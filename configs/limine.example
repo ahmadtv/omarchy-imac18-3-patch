@@ -1,0 +1,7 @@
+# Template only. Preserve the root, encryption, Btrfs and resume values from
+# your own /etc/default/limine. Do not copy identifiers from another machine.
+
+ESP_PATH="/boot"
+
+KERNEL_CMDLINE[default]="cryptdevice=PARTUUID=YOUR_ROOT_PARTUUID:root root=/dev/mapper/root zswap.enabled=0 rootflags=subvol=@ rw rootfstype=btrfs resume=/dev/mapper/root resume_offset=YOUR_RESUME_OFFSET initramfs_async=0 amdgpu.dc=1 amdgpu.exp_res_limit=1 video=eDP-1:3840x2160@60e"
+
