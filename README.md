@@ -22,8 +22,10 @@ The internal macOS/OpenCore disk was kept out of scope throughout installation a
 | Radeon Pro 575 acceleration | Working with `amdgpu` |
 | OWC Thunderbolt 10GbE | Working at 10 Gb/s |
 | Wi-Fi profile conflict | Resolved |
-| Native 5120×2880 display | Not supported by the current Linux/Aquamarine tile path |
-| 3840×2160 panel-scaled fallback | Installed in boot configuration; reboot verification pending |
+| Native 5120×2880 display | Not supported by the current Linux/Aquamarine tile path (tracked upstream, see below) |
+| 3840×2160 panel-scaled fallback | Working, verified after reboot |
+| Internal speakers and mic (CS8409) | Working, via out-of-tree DKMS driver |
+| Boot entry in firmware picker | Named `Omarchy` entry registered, no more guessing at unlabeled icons |
 
 ## 1. Original black-screen problem
 
@@ -38,37 +40,45 @@ The relevant observations were:
 
 ## 2. Persistent boot fix
 
-Back up the existing configuration first:
+**Critical correction:** editing `/etc/default/limine` alone is not enough on this Omarchy setup. Omarchy builds a Unified Kernel Image (UKI) with `limine-mkinitcpio`, and that UKI has a kernel command line **embedded directly into it** at build time, sourced from `/etc/kernel/cmdline`—not from Limine's per-entry `cmdline:` line in `limine.conf`. The systemd-stub boot process uses the embedded value, so a `limine.conf` edit alone can silently have no effect even after a real reboot. Fix **both** files, in this order:
+
+1. Edit `/etc/kernel/cmdline` (the actual source baked into the UKI):
 
 ```bash
-sudo cp /etc/default/limine /etc/default/limine.backup
+sudo cp /etc/kernel/cmdline /etc/kernel/cmdline.bak
 ```
 
-Use [configs/limine.example](configs/limine.example) as a template. Keep the root and resume values from your own existing configuration—never copy another machine's UUID, PARTUUID, mapper, or resume offset.
-
-Important changes:
-
-- Use `KERNEL_CMDLINE[default]="..."`, not `+=`, to replace Omarchy's drop-in command line and prevent `quiet splash` from being appended again.
-- Preserve the machine's existing root, encryption, Btrfs, resume, and `initramfs_async=0` parameters.
-- Add:
+Add the following to the existing line in `/etc/kernel/cmdline` (keep your own root/encryption/resume values—never copy another machine's PARTUUID or resume offset):
 
 ```text
 amdgpu.dc=1 amdgpu.exp_res_limit=1 video=eDP-1:3840x2160@60e
 ```
 
+2. Also update `/etc/default/limine` for consistency (keeps `limine.conf`'s displayed entry in sync, and matters if Omarchy ever changes the UKI build to prefer the bootloader-supplied cmdline):
+
+```bash
+sudo cp /etc/default/limine /etc/default/limine.backup
+```
+
+Use [configs/limine.example](configs/limine.example) as a template.
+
+- Use `KERNEL_CMDLINE[default]="..."`, not `+=`, to replace Omarchy's drop-in command line and prevent `quiet splash` from being appended again.
+- Preserve the machine's existing root, encryption, Btrfs, resume, and `initramfs_async=0` parameters.
 - Do not include `quiet splash`.
 
-Rebuild the unified kernel image and Limine entry:
+3. Rebuild the UKI and Limine entry (this re-embeds the new `/etc/kernel/cmdline` into the image):
 
 ```bash
 sudo limine-mkinitcpio
 ```
 
-Verify the generated entry before rebooting:
+4. Verify the cmdline that will actually boot is embedded in the UKI itself—do not trust `limine.conf` alone:
 
 ```bash
-sudo grep 'cmdline:' /boot/limine.conf
+sudo objcopy -O binary --only-section=.cmdline /boot/EFI/Linux/omarchy_linux.efi /dev/stdout
 ```
+
+The output must contain `video=eDP-1:3840x2160@60e`. If it doesn't, the rebuild didn't pick up `/etc/kernel/cmdline`.
 
 After reboot, verify:
 
@@ -84,6 +94,16 @@ Expected GPU driver:
 ```text
 Kernel driver in use: amdgpu
 ```
+
+### Selecting the boot entry at startup
+
+This external SSD has no NVRAM boot entry by default, so the firmware's boot picker shows it as a blank/unlabeled icon. Register a proper named entry once, so it's unambiguous going forward:
+
+```bash
+sudo efibootmgr --create --disk /dev/sdX --part 1 --label "Omarchy" --loader '\EFI\BOOT\BOOTX64.EFI'
+```
+
+Replace `/dev/sdX` with the external SSD's device (check with `lsblk`; the ESP is the small `vfat` partition mounted at `/boot`). After this, at every boot: hold **Option** at power-on to bring up the firmware's boot picker, and select the entry labeled **Omarchy**.
 
 ## 3. Why the 5K panel appears skewed
 
@@ -179,14 +199,49 @@ ping -I enp11s0 -c 3 1.1.1.1
 
 The working result had a DHCP address, a default route through `enp11s0`, successful DNS, and successful internet pings.
 
-## 6. Recovery and rollback
+## 6. Internal speakers and microphone (CS8409 codec)
+
+The iMac18,3 uses a Cirrus Logic CS8409 HDA codec (subsystem ID `0x106b1000`). The in-kernel driver's generic autoconfig does not recognize a real speaker output complex on this board:
+
+```bash
+cat /proc/asound/card0/codec#0 | grep -i subsystem
+journalctl -k -b | grep -i cs8409
+```
+
+Kernel log shows `speaker_outs=0` despite two pins typed `speaker`—a known gap for this exact machine, not a volume/mute misconfiguration.
+
+Fix: install the out-of-tree, hardware-gated DKMS driver built specifically for this model:
+
+```bash
+sudo pacman -S --needed git gcc linux-headers make patch wget dkms
+git clone https://github.com/jackdanyell/imac18-3-cs8409-linux-audio.git
+cd imac18-3-cs8409-linux-audio
+sudo ./install-imac18-3.sh
+sudo reboot
+```
+
+The installer checks `product_name` (`iMac18,3`) and the HDA codec chip name before installing, so it refuses to run on other hardware. It builds via DKMS against the running kernel, so it survives kernel updates automatically. Requires `wget` to be installed (used to fetch the matching mainline kernel source for the codec patch).
+
+Verify after reboot:
+
+```bash
+dkms status
+wpctl status
+```
+
+Expect `snd_hda_macbookpro/<version>, <kernel>, x86_64: installed` and a working `Built-in Audio Analog Stereo` sink/source.
+
+To remove: `sudo /path/to/install.cirrus.driver.sh -r` (restores the original in-kernel module).
+
+## 7. Recovery and rollback
 
 If the new 4K boot mode causes a black screen:
 
 1. In Limine, boot the known-good snapshot entry.
-2. Restore `/etc/default/limine.backup`.
-3. Run `sudo limine-mkinitcpio` again.
-4. Reboot.
+2. Restore `/etc/kernel/cmdline.bak` to `/etc/kernel/cmdline` (this is the file that actually matters—see section 2).
+3. Also restore `/etc/default/limine.backup` for consistency.
+4. Run `sudo limine-mkinitcpio` again.
+5. Reboot.
 
 Alternatively, edit the Limine entry temporarily and remove only:
 
@@ -196,7 +251,7 @@ video=eDP-1:3840x2160@60e
 
 Do not edit or mount the internal macOS/OpenCore disk while troubleshooting the external Omarchy installation.
 
-## 7. Post-reboot checklist
+## 8. Post-reboot checklist
 
 Run:
 
@@ -210,6 +265,7 @@ Confirm visually that:
 - Hyprland reports 3840×2160 around 60 Hz.
 - The OWC adapter reconnects automatically after a cold boot.
 - `enp11s0` receives DHCP and owns the default route.
+- `dkms status` shows the CS8409 audio module installed, and speakers/mic work.
 
 ## Upstream references
 
@@ -218,4 +274,6 @@ Confirm visually that:
 - [Aquamarine redundant-tile handling PR #238](https://github.com/hyprwm/aquamarine/pull/238)
 - [Aquamarine standalone-capable tile proposal #354](https://github.com/hyprwm/aquamarine/pull/354)
 - [Omarchy iMac17,1 discussion—useful context, but not the same GPU](https://github.com/basecamp/omarchy/discussions/5151)
+- [drm/amd tiled-display tracking issue #4455](https://gitlab.freedesktop.org/drm/amd/-/issues/4455) — the open upstream issue for native 5120×2880 support on tiled iMac 5K panels; the second DisplayPort tile link exists in hardware but `amdgpu` doesn't link-train or tile-group it yet.
+- [jackdanyell/imac18-3-cs8409-linux-audio](https://github.com/jackdanyell/imac18-3-cs8409-linux-audio) — the DKMS audio driver used in section 6.
 
