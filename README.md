@@ -26,6 +26,7 @@ The internal macOS/OpenCore disk was kept out of scope throughout installation a
 | 3840×2160 panel-scaled fallback | Working, verified after reboot |
 | Internal speakers and mic (CS8409) | Working, via out-of-tree DKMS driver |
 | Boot entry in firmware picker | Named `Omarchy` entry registered, no more guessing at unlabeled icons |
+| Suspend (S3) and hibernate | **Broken, likely unfixable without ACPI/DSDT work.** Every attempt hard-hangs the machine (see section 7). Do not use—mask both targets. |
 
 ## 1. Original black-screen problem
 
@@ -40,21 +41,11 @@ The relevant observations were:
 
 ## 2. Persistent boot fix
 
-**Critical correction:** editing `/etc/default/limine` alone is not enough on this Omarchy setup. Omarchy builds a Unified Kernel Image (UKI) with `limine-mkinitcpio`, and that UKI has a kernel command line **embedded directly into it** at build time, sourced from `/etc/kernel/cmdline`—not from Limine's per-entry `cmdline:` line in `limine.conf`. The systemd-stub boot process uses the embedded value, so a `limine.conf` edit alone can silently have no effect even after a real reboot. Fix **both** files, in this order:
+### 2.1 The real source of the embedded cmdline
 
-1. Edit `/etc/kernel/cmdline` (the actual source baked into the UKI):
+Omarchy builds a Unified Kernel Image (UKI) with `limine-mkinitcpio`, and that UKI has a kernel command line **embedded directly into it** at build time. After extensive testing, the actual source is **`/etc/default/limine`'s `KERNEL_CMDLINE[default]`**—not `/etc/kernel/cmdline` (an earlier version of this doc claimed the opposite; that was wrong, confirmed by editing each file independently and checking which change actually altered the embedded UKI).
 
-```bash
-sudo cp /etc/kernel/cmdline /etc/kernel/cmdline.bak
-```
-
-Add the following to the existing line in `/etc/kernel/cmdline` (keep your own root/encryption/resume values—never copy another machine's PARTUUID or resume offset):
-
-```text
-amdgpu.dc=1 amdgpu.exp_res_limit=1 video=eDP-1:3840x2160@60e
-```
-
-2. Also update `/etc/default/limine` for consistency (keeps `limine.conf`'s displayed entry in sync, and matters if Omarchy ever changes the UKI build to prefer the bootloader-supplied cmdline):
+Edit `/etc/default/limine`:
 
 ```bash
 sudo cp /etc/default/limine /etc/default/limine.backup
@@ -62,23 +53,57 @@ sudo cp /etc/default/limine /etc/default/limine.backup
 
 Use [configs/limine.example](configs/limine.example) as a template.
 
-- Use `KERNEL_CMDLINE[default]="..."`, not `+=`, to replace Omarchy's drop-in command line and prevent `quiet splash` from being appended again.
+- Use `KERNEL_CMDLINE[default]="..."`, not `+=`, to replace Omarchy's drop-in command line and prevent `quiet splash` from being appended again (unless you deliberately want it—see 2.4).
 - Preserve the machine's existing root, encryption, Btrfs, resume, and `initramfs_async=0` parameters.
-- Do not include `quiet splash`.
+- Add:
 
-3. Rebuild the UKI and Limine entry (this re-embeds the new `/etc/kernel/cmdline` into the image):
+```text
+amdgpu.dc=1 amdgpu.exp_res_limit=1 video=eDP-1:3840x2160@60e
+```
+
+Rebuild the UKI and Limine entry:
 
 ```bash
 sudo limine-mkinitcpio
 ```
 
-4. Verify the cmdline that will actually boot is embedded in the UKI itself—do not trust `limine.conf` alone:
+Verify the cmdline that will actually boot is embedded in the UKI itself—do not trust `limine.conf` alone:
 
 ```bash
 sudo objcopy -O binary --only-section=.cmdline /boot/EFI/Linux/omarchy_linux.efi /dev/stdout
 ```
 
-The output must contain `video=eDP-1:3840x2160@60e`. If it doesn't, the rebuild didn't pick up `/etc/kernel/cmdline`.
+### 2.2 Critical gotcha: three copies of `limine.conf`, and a stale fallback UKI
+
+This ESP has **three separate copies** of `limine.conf`, and `limine-mkinitcpio` only updates one of them:
+
+```text
+/boot/limine.conf              <- updated by limine-mkinitcpio
+/boot/EFI/limine/limine.conf   <- NOT updated automatically
+/boot/EFI/BOOT/limine.conf     <- NOT updated automatically
+```
+
+Worse: `/boot/EFI/BOOT/BOOTX64.EFI` (the universal generic fallback path every UEFI firmware checks first) was, on this install, **not Limine at all**—it was a frozen, stale copy of an old UKI build from install time, with the real Limine binary renamed alongside it as `BOOTX64.LIMINE.EFI`. Since `\EFI\BOOT\BOOTX64.EFI` is what firmware/OpenCore's generic auto-detection defaults to, every "just boot automatically" path was silently loading that old, unfixed UKI—completely bypassing every fix made afterward, with zero indication anything was wrong (no error, just old behavior).
+
+**Symptoms this causes:** a fix appears to have no effect after a real reboot; two different boot-menu entries seem to give two different, inconsistent results even though they're "the same install"; verified-correct config on disk doesn't match `/proc/cmdline` after boot.
+
+**Fix—after every `limine-mkinitcpio` run, always sync all copies:**
+
+```bash
+sudo cp /boot/limine.conf /boot/EFI/BOOT/limine.conf
+sudo cp /boot/limine.conf /boot/EFI/limine/limine.conf
+sudo cp /boot/EFI/Linux/omarchy_linux.efi /boot/EFI/BOOT/BOOTX64.EFI
+```
+
+**Always verify by extracting the embedded cmdline from the actual file firmware will load, not just the "main" one:**
+
+```bash
+sudo objcopy -O binary --only-section=.cmdline /boot/EFI/BOOT/BOOTX64.EFI /dev/stdout
+```
+
+If this doesn't match what you just set, nothing else you do will take effect until it does.
+
+### 2.3 Verifying and selecting the boot entry at startup
 
 After reboot, verify:
 
@@ -95,15 +120,19 @@ Expected GPU driver:
 Kernel driver in use: amdgpu
 ```
 
-### Selecting the boot entry at startup
-
-This external SSD has no NVRAM boot entry by default, so the firmware's boot picker shows it as a blank/unlabeled icon. Register a proper named entry once, so it's unambiguous going forward:
+This external SSD has no NVRAM boot entry by default, so the firmware's boot picker shows it as a blank/unlabeled icon ("no name"). Register a proper named entry once:
 
 ```bash
-sudo efibootmgr --create --disk /dev/sdX --part 1 --label "Omarchy" --loader '\EFI\BOOT\BOOTX64.EFI'
+sudo efibootmgr --create --disk /dev/sdX --part 1 --label "Omarchy" --loader '\EFI\limine\limine_x64.efi'
 ```
 
-Replace `/dev/sdX` with the external SSD's device (check with `lsblk`; the ESP is the small `vfat` partition mounted at `/boot`). After this, at every boot: hold **Option** at power-on to bring up the firmware's boot picker, and select the entry labeled **Omarchy**.
+Replace `/dev/sdX` with the external SSD's device (check with `lsblk`; the ESP is the small `vfat` partition mounted at `/boot`). Point the loader at `\EFI\limine\limine_x64.efi` specifically (the real Limine binary), not the generic `\EFI\BOOT\BOOTX64.EFI` path, to sidestep the stale-fallback trap in 2.2 entirely.
+
+At every boot: hold **Option** at power-on to bring up the firmware's boot picker, and select the entry labeled **Omarchy**. Note that Mac NVRAM entries can get wiped by hard power-cycles (see section 7)—if the label disappears and reverts to a generic "Limine" entry auto-created by a pacman hook, that's expected; it points at the same file and works identically, just re-run the `efibootmgr --create` command above to relabel it.
+
+### 2.4 Re-enabling `quiet splash`
+
+`quiet splash` was originally excluded because it was suspected of retriggering the graphics-handoff black screen (section 1). That warning predates `amdgpu.dc=1` being properly set and predates the sync fix in 2.2, so it's untested whether the original problem still applies now. Re-adding it on top of the working config (synced per 2.2) is a reasonable thing to try—if it produces a black screen instead of the graphical splash + password prompt, remove it again via section 8 (Recovery). Update this section once retested and confirmed either way.
 
 ## 3. Why the 5K panel appears skewed
 
@@ -233,17 +262,40 @@ Expect `snd_hda_macbookpro/<version>, <kernel>, x86_64: installed` and a working
 
 To remove: `sudo /path/to/install.cirrus.driver.sh -r` (restores the original in-kernel module).
 
-## 7. Recovery and rollback
+## 7. Suspend and hibernate are broken—do not use
 
-If the new 4K boot mode causes a black screen:
+Both `systemctl suspend` and `systemctl hibernate` hard-hang this machine, every time, with no exceptions found across many attempts. The kernel log stops dead mid-transition (`PM: suspend entry (deep)` or `PM: hibernation: hibernation entry`) with nothing logged afterward—no crash trace, no resume, nothing. Recovery requires a hard power-cycle (hold the power button).
+
+**Ruled out, with clean confirmed tests (config verified embedded in the running kernel before each test):**
+
+- Sleep mode: `deep` and `s2idle` both hang identically (`/sys/power/mem_sleep`).
+- The forced `video=eDP-1:3840x2160@60e` display override: removing it entirely made no difference.
+- BACO/BAMACO GPU runtime power state: `amdgpu.runpm=0` (fully disables it) made no difference.
+- Hibernate fails identically to suspend, ruling out anything suspend-specific (e.g. display-related) as the sole cause.
+
+**`pm_trace` diagnostic** (`echo 1 > /sys/power/pm_trace`, then check the RTC-based hash match on the next boot after a hang) pointed to a `memory` pseudo-device as the last thing being processed—consistent with the hang happening very late, near actual ACPI S3 hardware entry, i.e. a firmware-level failure rather than a specific Linux driver bug.
+
+**Likely root cause:** Apple's EFI/ACPI firmware implements S3 sleep exclusively for macOS's IOKit power management. Generic Linux ACPI sleep entry on real Mac firmware is a long-documented, cross-model class of problem, not specific to this GPU or this fix. No published fix for this exact model (iMac18,3) was found; existing public SSDT/DSDT work is either for making sleep work *in macOS* under Hackintosh setups (the opposite direction) or for unrelated non-Mac hardware.
+
+**The only real remaining path** would be writing custom ACPI SSDT patches to fake macOS-compatible sleep behavior for Linux—a substantial, uncertain undertaking (typically pursued by dedicated OpenCore/Hackintosh ACPI projects), not attempted here.
+
+**Recommendation:** don't use suspend or hibernate on this machine. Mask both to prevent accidental triggers (menu, keybinding, or command):
+
+```bash
+sudo systemctl mask suspend.target hibernate.target hybrid-sleep.target suspend-then-hibernate.target
+```
+
+## 8. Recovery and rollback
+
+If a boot-config change causes a black screen or other boot failure:
 
 1. In Limine, boot the known-good snapshot entry.
-2. Restore `/etc/kernel/cmdline.bak` to `/etc/kernel/cmdline` (this is the file that actually matters—see section 2).
-3. Also restore `/etc/default/limine.backup` for consistency.
-4. Run `sudo limine-mkinitcpio` again.
+2. Restore `/etc/default/limine.backup` to `/etc/default/limine` (see section 2.1 for why this is the file that matters).
+3. Run `sudo limine-mkinitcpio` again.
+4. **Re-sync all three `limine.conf` copies and the fallback `BOOTX64.EFI`** (section 2.2)—skipping this step is the single most common reason a "fix" silently doesn't apply.
 5. Reboot.
 
-Alternatively, edit the Limine entry temporarily and remove only:
+Alternatively, edit `/etc/default/limine` temporarily and remove only:
 
 ```text
 video=eDP-1:3840x2160@60e
@@ -251,7 +303,7 @@ video=eDP-1:3840x2160@60e
 
 Do not edit or mount the internal macOS/OpenCore disk while troubleshooting the external Omarchy installation.
 
-## 8. Post-reboot checklist
+## 9. Post-reboot checklist
 
 Run:
 
@@ -266,6 +318,8 @@ Confirm visually that:
 - The OWC adapter reconnects automatically after a cold boot.
 - `enp11s0` receives DHCP and owns the default route.
 - `dkms status` shows the CS8409 audio module installed, and speakers/mic work.
+- `sudo objcopy -O binary --only-section=.cmdline /boot/EFI/BOOT/BOOTX64.EFI /dev/stdout` matches `/proc/cmdline` (confirms the sync in section 2.2 held).
+- `systemctl list-unit-files 'suspend*' 'hibernate*'` shows masked, not enabled (section 7).
 
 ## Upstream references
 
@@ -275,5 +329,6 @@ Confirm visually that:
 - [Aquamarine standalone-capable tile proposal #354](https://github.com/hyprwm/aquamarine/pull/354)
 - [Omarchy iMac17,1 discussion—useful context, but not the same GPU](https://github.com/basecamp/omarchy/discussions/5151)
 - [drm/amd tiled-display tracking issue #4455](https://gitlab.freedesktop.org/drm/amd/-/issues/4455) — the open upstream issue for native 5120×2880 support on tiled iMac 5K panels; the second DisplayPort tile link exists in hardware but `amdgpu` doesn't link-train or tile-group it yet.
+- [Omarchy MacBook sleep/suspend discussion #4695](https://github.com/basecamp/omarchy/discussions/4695) — same class of Mac+Omarchy sleep bug on T2 MacBooks (laptop-specific fixes don't apply to this desktop iMac, but useful background on Apple-firmware sleep incompatibility).
 - [jackdanyell/imac18-3-cs8409-linux-audio](https://github.com/jackdanyell/imac18-3-cs8409-linux-audio) — the DKMS audio driver used in section 6.
 
