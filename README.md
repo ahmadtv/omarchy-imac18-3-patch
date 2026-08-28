@@ -26,6 +26,7 @@ The internal macOS/OpenCore disk was kept out of scope throughout installation a
 | 3840×2160 panel-scaled fallback | Working, verified after reboot |
 | Internal speakers and mic (CS8409) | Working, via out-of-tree DKMS driver |
 | Boot entry in firmware picker | Named `Omarchy` entry registered, no more guessing at unlabeled icons |
+| Quiet graphical boot (`quiet splash`) | Working, confirmed safe on top of the full fix (section 2.4) |
 | Suspend (S3) and hibernate | **Broken, likely unfixable without ACPI/DSDT work.** Every attempt hard-hangs the machine (see section 7). Do not use—mask both targets. |
 
 ## 1. Original black-screen problem
@@ -132,7 +133,7 @@ At every boot: hold **Option** at power-on to bring up the firmware's boot picke
 
 ### 2.4 Re-enabling `quiet splash`
 
-`quiet splash` was originally excluded because it was suspected of retriggering the graphics-handoff black screen (section 1). That warning predates `amdgpu.dc=1` being properly set and predates the sync fix in 2.2, so it's untested whether the original problem still applies now. Re-adding it on top of the working config (synced per 2.2) is a reasonable thing to try—if it produces a black screen instead of the graphical splash + password prompt, remove it again via section 8 (Recovery). Update this section once retested and confirmed either way.
+`quiet splash` was originally excluded because it was suspected of retriggering the graphics-handoff black screen (section 1). That warning predated `amdgpu.dc=1` being properly set and predated the sync fix in 2.2. **Retested and confirmed working**: with `amdgpu.dc=1 amdgpu.exp_res_limit=1 amdgpu.runpm=0 video=eDP-1:3840x2160@60e` in place and all boot-file copies synced per 2.2, adding `quiet splash` back boots normally—graphical splash, password prompt, working desktop, no black screen. The original problem is understood to have been specific to the earlier fix state (missing `amdgpu.dc=1` and/or the sync bug), not `quiet splash` itself.
 
 ## 3. Why the 5K panel appears skewed
 
