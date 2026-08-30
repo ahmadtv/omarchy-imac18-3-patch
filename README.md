@@ -1,72 +1,106 @@
 # Omarchy on a 2017 27" 5K iMac (iMac18,3)
 
-External-SSD Omarchy install, dual-boot with macOS/OpenCore on the internal disk (not touched).
+External-SSD Omarchy install, dual-booting with macOS/OpenCore on the internal disk. The internal disk is never touched — every fix here lives on the external drive.
 
 ## Hardware
 
-- iMac18,3, AMD Radeon Pro 575 (Polaris, `1002:67df`, DCE 11.2)
-- Omarchy on external SSD, Linux 7.1.9, Hyprland 0.56.2
+- Apple iMac18,3 (27", 2017)
+- AMD Radeon Pro 575 (Polaris, `1002:67df`, DCE 11.2 — not the older iMac17,1/R9 M380, and not a newer DCN-generation card)
+- Omarchy on an external SSD, Linux 7.1.9, Hyprland 0.56.2
 
 ## Status
 
 | | |
 |---|---|
 | Boot, display (3840×2160 fallback), audio, network, color | ✅ working |
-| Native 5120×2880 | 🚧 not supported (upstream `amdgpu` gap) |
+| Native 5120×2880 | 🚧 not supported yet (upstream `amdgpu` gap) |
 | Suspend / hibernate | ❌ broken, masked off |
+
+Run `./scripts/verify.sh` any time to check kernel cmdline, GPU driver, monitor state, Thunderbolt, and networking in one shot.
 
 ## Settled
 
-**Boot cmdline** — lives in `/etc/default/limine`, not `/etc/kernel/cmdline`:
+### Boot cmdline
+
+The kernel command line lives in `/etc/default/limine`, **not** `/etc/kernel/cmdline`:
+
 ```
 KERNEL_CMDLINE[default]="<your root/crypt/resume params> amdgpu.dc=1 amdgpu.exp_res_limit=1 amdgpu.runpm=0 video=eDP-1:3840x2160@60e quiet splash"
 ```
-Rebuild, then **always sync all copies** (three `limine.conf`s + the fallback UKI — otherwise a fix silently won't take effect):
+
+(Template: [`configs/limine.example`](configs/limine.example) — keep your own root/encryption/resume values, never copy another machine's.) Do **not** use the older iMac17,1-era workaround (`amdgpu.cik_support`, `radeon.cik_support`, `amdgpu.dc=0`) on this Polaris GPU — wrong hardware generation, will make things worse.
+
+Rebuild, then **always sync every copy** — this ESP has three separate `limine.conf` files plus a fallback UKI, and only one gets updated automatically. Skipping this is the single most common reason a fix silently doesn't apply:
+
 ```bash
 sudo limine-mkinitcpio
 sudo cp /boot/limine.conf /boot/EFI/BOOT/limine.conf /boot/EFI/limine/limine.conf
 sudo cp /boot/EFI/Linux/omarchy_linux.efi /boot/EFI/BOOT/BOOTX64.EFI
 ```
-`default_entry` targets by name, not a numeric index (index can silently drift to an old snapshot):
+
+`default_entry` should target by name, not a numeric index — the index can silently drift to point at an old snapshot as new snapshots accumulate:
+
 ```
 default_entry: Omarchy/linux
 ```
 
-**Boot picker naming** — named EFI entry + FAT label (top-level firmware picker):
+### Boot picker naming
+
+Top-level firmware picker (hold Option at power-on) needs a named EFI entry and a FAT volume label, or it shows a blank/"NO NAME" icon:
+
 ```bash
 sudo efibootmgr --create --disk /dev/sdX --part 1 --label "Omarchy" --loader '\EFI\limine\limine_x64.efi'
 sudo fatlabel /dev/sdX1 OMARCHY
 ```
-OpenCore's own internal picker (separate from the above) reads these, placed on the same external ESP:
+
+OpenCore's own internal menu is a *separate* picker with its own auto-detection — it doesn't read either of the above. Fix it the same way, with files on this same external ESP (no internal-disk edits needed):
+
 ```bash
 sudo cp omarchy.icns /boot/EFI/Linux/omarchy_linux.efi.icns
 printf 'OMARCHY' | sudo tee /boot/EFI/Linux/.contentDetails
 ```
 
-**Display** — native 5K needs `amdgpu` to combine two tile links; it doesn't yet. Fallback is the `video=` param above (3840×2160, correct proportions, not native res).
+### Display
 
-**Color** — panel is wide-gamut (Display P3); default `srgb` mode oversaturates. In `~/.config/hypr/monitors.lua`:
+The panel is a tiled display — two 2560×2880 links that combine into 5120×2880 natively. `amdgpu` doesn't yet link-train and combine the second link, so the desktop looks stretched unless a supported single-stream mode is forced. The `video=` parameter above (3840×2160) is that fallback — correct proportions, not native resolution.
+
+### Color
+
+The panel is wide-gamut (Display P3); Hyprland's default `srgb` color mode doesn't gamut-map for it, so everything looks oversaturated. Fixed in `~/.config/hypr/monitors.lua`:
+
 ```lua
 hl.monitor({ output = "", mode = "preferred", position = "auto", scale = omarchy_monitor_scale, cm = "dp3" })
 ```
 
-**Audio** (CS8409 codec):
+### Audio (CS8409 codec)
+
+The in-kernel driver doesn't recognize a real speaker output on this board. Fix is a hardware-gated, model-specific DKMS driver:
+
 ```bash
 git clone https://github.com/jackdanyell/imac18-3-cs8409-linux-audio.git
 cd imac18-3-cs8409-linux-audio && sudo ./install-imac18-3.sh && sudo reboot
 ```
 
-**OWC Thunderbolt 10GbE**:
+### OWC Thunderbolt 10GbE
+
+Shows up in `boltctl` but stays unauthorized until enrolled:
+
 ```bash
 boltctl enroll <uuid-from-boltctl-list> --policy auto
 ```
 
-**Wi-Fi/Ethernet conflict** — disable Wi-Fi, keep Ethernet primary:
+### Wi-Fi / Ethernet conflict
+
+Running both on the same subnet, NetworkManager can withhold the wired default route in favor of Wi-Fi. Disable Wi-Fi to keep Ethernet primary:
+
 ```bash
 nmcli radio wifi off
 ```
 
-**Suspend/hibernate** — broken (Apple firmware ACPI S3 issue, not fixable via kernel params). Masked:
+### Suspend / hibernate
+
+Both hard-hang the machine every time — an Apple firmware ACPI S3 issue, not fixable via kernel parameters. Masked off rather than left to fail on accidental use:
+
 ```bash
 sudo systemctl mask suspend.target hibernate.target hybrid-sleep.target suspend-then-hibernate.target
 ```
@@ -79,8 +113,8 @@ sudo systemctl mask suspend.target hibernate.target hybrid-sleep.target suspend-
 
 ## Recovery
 
-Boot breaks → boot the Limine snapshot entry → restore `/etc/default/limine.backup` → `sudo limine-mkinitcpio` → re-sync (above) → reboot.
+If a boot change breaks something: boot the Limine snapshot entry → restore `/etc/default/limine.backup` → `sudo limine-mkinitcpio` → re-sync (above) → reboot. Never mount or edit the internal macOS/OpenCore disk while troubleshooting this external install.
 
 ## Note
 
-Multiple assistants/agents can end up editing this machine's boot files concurrently (this repo included) — if a fix seems to silently un-apply, check for stray `.disabled` files under `/boot/EFI/` before assuming the fix is wrong.
+Multiple assistants/agents can end up editing this machine's boot files concurrently. If a fix seems to silently un-apply, check for stray `.disabled` files under `/boot/EFI/` before assuming the fix itself is wrong.
