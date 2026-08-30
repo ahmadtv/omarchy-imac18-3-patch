@@ -17,17 +17,17 @@ The internal macOS/OpenCore disk was kept out of scope throughout installation a
 
 | Component | Status |
 |---|---|
-| External Omarchy installation | Working |
-| LUKS unlock and graphical boot | Working |
-| Radeon Pro 575 acceleration | Working with `amdgpu` |
-| OWC Thunderbolt 10GbE | Working at 10 Gb/s |
-| Wi-Fi profile conflict | Resolved |
-| Native 5120×2880 display | Not supported by the current Linux/Aquamarine tile path (tracked upstream, see below) |
-| 3840×2160 panel-scaled fallback | Working, verified after reboot |
-| Internal speakers and mic (CS8409) | Working, via out-of-tree DKMS driver |
-| Boot entry in firmware picker | Named `Omarchy` entry registered, no more guessing at unlabeled icons |
-| Quiet graphical boot (`quiet splash`) | Working, confirmed safe on top of the full fix (section 2.4) |
-| Suspend (S3) and hibernate | **Broken, likely unfixable without ACPI/DSDT work.** Every attempt hard-hangs the machine (see section 7). Do not use—mask both targets. |
+| External Omarchy installation | ✅ Working |
+| LUKS unlock and graphical boot | ✅ Working |
+| Radeon Pro 575 acceleration | ✅ Working with `amdgpu` |
+| OWC Thunderbolt 10GbE | ✅ Working at 10 Gb/s |
+| Wi-Fi profile conflict | ✅ Resolved |
+| Native 5120×2880 display | 🚧 Not supported by the current Linux/Aquamarine tile path — ongoing (tracked upstream, see below) |
+| 3840×2160 panel-scaled fallback | ✅ Working, verified after reboot |
+| Internal speakers and mic (CS8409) | ✅ Working, via out-of-tree DKMS driver |
+| Boot entry in firmware picker | ✅ Named `Omarchy` entry registered, no more guessing at unlabeled icons |
+| Quiet graphical boot (`quiet splash`) | ✅ Working, confirmed safe on top of the full fix (section 2.4) |
+| Suspend (S3) and hibernate | ❌ **Broken, likely unfixable without ACPI/DSDT work.** Every attempt hard-hangs the machine (see section 7). Do not use—mask both targets. |
 
 ## 1. Original black-screen problem
 
