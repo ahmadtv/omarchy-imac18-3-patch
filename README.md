@@ -22,7 +22,7 @@ The internal macOS/OpenCore disk was kept out of scope throughout installation a
 | Radeon Pro 575 acceleration | ✅ Working with `amdgpu` |
 | OWC Thunderbolt 10GbE | ✅ Working at 10 Gb/s |
 | Wi-Fi profile conflict | ✅ Resolved |
-| Native 5120×2880 display | 🚧 Not supported by the current Linux/Aquamarine tile path — ongoing (tracked upstream, see below) |
+| Native 5120×2880 display | 🚧 Not supported by the current Linux/Aquamarine tile path — ongoing (tracked upstream, see [section 3](#3-why-the-5k-panel-appears-skewed)) |
 | 3840×2160 panel-scaled fallback | ✅ Working, verified after reboot |
 | Internal speakers and mic (CS8409) | ✅ Working, via out-of-tree DKMS driver |
 | Boot entry in firmware picker | ✅ Named `Omarchy` entry registered, no more guessing at unlabeled icons |
