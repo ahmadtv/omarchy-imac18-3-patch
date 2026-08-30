@@ -488,17 +488,24 @@ This iMac's 27" 5K panel is a **wide-gamut (Display P3) panel**. macOS uses Colo
 - AMD's own detailed driver-specific color-management pipeline (plane-level CTM/degamma/3D-LUT, used e.g. for the Steam Deck's color accuracy) is advertised for **DCN 3.0 and newer only**—this GPU's **DCE 11.2** display engine predates that and has a reduced color pipeline.
 - The one existing tool built for exactly this class of problem, [`AMDColorTweaks`](https://github.com/dantmnf/AMDColorTweaks) (EDID-based GPU-side sRGB clamp for AMD GPUs), is Windows-only with no Linux port.
 
-**Fix found instead: Hyprland has its own EDID-aware color management mode.** Beyond `auto`/`srgb`, Hyprland's monitor `cm` option also supports `dcip3`, `dp3`, `adobe`, `wide`, `edid`, and `hdr` ([Hyprland issue #4377](https://github.com/hyprwm/Hyprland/issues/4377) and related discussions #11744/#12527 track this class of bug generally). `cm = "edid"` specifically manages color against **this panel's own EDID-reported gamut** instead of assuming generic sRGB—this is the correct mode for a panel like this one, and does not require the AMD DCN-specific pipeline since it uses the more widely-supported CRTC-level (not plane-level) DRM color properties.
+**Follow-up research before settling on a fix—checked whether the obvious first fix was actually best practice, not just "a working option":**
+
+- Hyprland's monitor `cm` option supports `auto`, `srgb`, `wide`, `edid`, `hdr`, `hdredid`, and (confirmed present in the version installed here, `0.56.2`, though absent from the original color-management PR's description—added in a later revision) `dcip3`/`dp3`/`adobe`.
+- **`cm = "edid"` is explicitly *not* the community-recommended default**—Hyprland's own docs describe it as using primaries "known to be inaccurate," since EDID chromaticity data quality varies a lot across monitor manufacturers. The generally-recommended setting is `cm = "auto"`.
+- **`auto` turns out not to help on this specific machine.** `auto` resolves to `srgb` at 8 bits per channel and `wide` (BT2020) only at 10bpc. This display's `currentFormat` is `XRGB8888` (8bpc), so `auto` here is identical to the already-oversaturated default—the general community advice doesn't apply to this specific bit depth.
+- Given the caveat about EDID reliability, and that this is a *known, standard* panel (not some unbranded monitor), **`cm = "dp3"` (explicit Display P3 primaries—Apple's own spec for this exact panel) was tested as the more theoretically robust choice**, since it doesn't depend on trusting this specific unit's self-reported EDID data at all.
+
+**Result: `edid` and `dp3` look visually equivalent on this specific panel**—meaning this panel's EDID happens to report accurate primaries, but `dp3` was kept as the final setting anyway since it's the more robust choice in general (doesn't rely on EDID data quality, which isn't guaranteed to be as accurate on any given unit or future panel replacement).
 
 Applied in `~/.config/hypr/monitors.lua`:
 
 ```lua
-hl.monitor({ output = "", mode = "preferred", position = "auto", scale = omarchy_monitor_scale, cm = "edid" })
+hl.monitor({ output = "", mode = "preferred", position = "auto", scale = omarchy_monitor_scale, cm = "dp3" })
 ```
 
-Note: `hyprctl eval 'hl.monitor({...})'` accepted `cm = "edid"` without error but did **not** actually apply it (`colorManagementPreset` stayed `srgb`)—matches the same "accepted into state without a backend commit" gap noted for custom modes in section 3.1. Editing `monitors.lua` directly and running `hyprctl reload` applied it correctly (verified via `hyprctl monitors all | grep colorManagement`).
+Note: `hyprctl eval 'hl.monitor({...})'` accepted a `cm` change without error but did **not** actually apply it (`colorManagementPreset` stayed on the old value)—matches the same "accepted into state without a backend commit" gap noted for custom modes in section 3.1. Editing `monitors.lua` directly and running `hyprctl reload` applied it correctly every time (verified via `hyprctl monitors all | grep colorManagement` after each change).
 
-**Confirmed fixed** (2026-08-30)—visually closer to the expected macOS rendering. If `edid` doesn't work for a different panel, try `dcip3`/`dp3`/`wide` next; if none help, that points at the DCE hardware-pipeline limitation being the real blocker rather than a config choice.
+**Confirmed fixed** (2026-08-30)—visually closer to the expected macOS rendering, with `dp3` as the final choice. If this ever needs revisiting (e.g. a different/replacement panel), test `edid` first as a quick check, then fall back to `dp3` (or `dcip3` if the panel needs the cinema white point/gamma instead of Apple's Display P3 variant) for a data-independent guarantee.
 
 ## Upstream references
 
