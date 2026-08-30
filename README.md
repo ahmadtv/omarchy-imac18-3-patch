@@ -29,6 +29,7 @@ The internal macOS/OpenCore disk was kept out of scope throughout installation a
 | Quiet graphical boot (`quiet splash`) | ✅ Working, confirmed safe on top of the full fix (section 2.4) |
 | Top-level firmware boot entry ("OMARCHY", outside OpenCore) | ✅ Working—display correct, splash centered, confirmed 2026-08-30 |
 | OpenCore-internal boot entry (deep inside OpenCore's own menu) | 🚧 Not yet retested since the 2.5/2.6 fixes below—was working before, unconfirmed after |
+| Display color oversaturation vs. macOS | ✅ Fixed—see [section 10](#10-display-colors-oversaturated-compared-to-macos) |
 | Suspend (S3) and hibernate | ❌ **Broken, likely unfixable without ACPI/DSDT work.** Every attempt hard-hangs the machine (see section 7). Do not use—mask both targets. |
 
 ## 1. Original black-screen problem
@@ -477,6 +478,27 @@ Confirm visually that:
 - `dkms status` shows the CS8409 audio module installed, and speakers/mic work.
 - `sudo objcopy -O binary --only-section=.cmdline /boot/EFI/BOOT/BOOTX64.EFI /dev/stdout` matches `/proc/cmdline` (confirms the sync in section 2.2 held).
 - `systemctl list-unit-files 'suspend*' 'hibernate*'` shows masked, not enabled (section 7).
+
+## 10. Display colors oversaturated compared to macOS
+
+This iMac's 27" 5K panel is a **wide-gamut (Display P3) panel**. macOS uses ColorSync to properly gamut-map standard sRGB content down for correct-looking colors on it. By default, Hyprland's color management preset here was `srgb`, which does not compute a real per-panel gamut-mapping transform—it assumes a generic sRGB target rather than reading this specific panel's actual wide-gamut primaries, so sRGB content renders wider/more vivid than intended.
+
+**Researched first, confirmed no existing packaged fix for this exact combination** (Linux/Wayland + AMD Polaris/DCE display engine + wide-gamut Apple panel):
+- General Wayland color management is still broadly immature (multiple Arch/Fedora forum reports of ICC profiles not taking effect).
+- AMD's own detailed driver-specific color-management pipeline (plane-level CTM/degamma/3D-LUT, used e.g. for the Steam Deck's color accuracy) is advertised for **DCN 3.0 and newer only**—this GPU's **DCE 11.2** display engine predates that and has a reduced color pipeline.
+- The one existing tool built for exactly this class of problem, [`AMDColorTweaks`](https://github.com/dantmnf/AMDColorTweaks) (EDID-based GPU-side sRGB clamp for AMD GPUs), is Windows-only with no Linux port.
+
+**Fix found instead: Hyprland has its own EDID-aware color management mode.** Beyond `auto`/`srgb`, Hyprland's monitor `cm` option also supports `dcip3`, `dp3`, `adobe`, `wide`, `edid`, and `hdr` ([Hyprland issue #4377](https://github.com/hyprwm/Hyprland/issues/4377) and related discussions #11744/#12527 track this class of bug generally). `cm = "edid"` specifically manages color against **this panel's own EDID-reported gamut** instead of assuming generic sRGB—this is the correct mode for a panel like this one, and does not require the AMD DCN-specific pipeline since it uses the more widely-supported CRTC-level (not plane-level) DRM color properties.
+
+Applied in `~/.config/hypr/monitors.lua`:
+
+```lua
+hl.monitor({ output = "", mode = "preferred", position = "auto", scale = omarchy_monitor_scale, cm = "edid" })
+```
+
+Note: `hyprctl eval 'hl.monitor({...})'` accepted `cm = "edid"` without error but did **not** actually apply it (`colorManagementPreset` stayed `srgb`)—matches the same "accepted into state without a backend commit" gap noted for custom modes in section 3.1. Editing `monitors.lua` directly and running `hyprctl reload` applied it correctly (verified via `hyprctl monitors all | grep colorManagement`).
+
+**Confirmed fixed** (2026-08-30)—visually closer to the expected macOS rendering. If `edid` doesn't work for a different panel, try `dcip3`/`dp3`/`wide` next; if none help, that points at the DCE hardware-pipeline limitation being the real blocker rather than a config choice.
 
 ## Upstream references
 
