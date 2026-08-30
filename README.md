@@ -27,6 +27,8 @@ The internal macOS/OpenCore disk was kept out of scope throughout installation a
 | Internal speakers and mic (CS8409) | ✅ Working, via out-of-tree DKMS driver |
 | Boot entry in firmware picker | ✅ Named `Omarchy` entry registered, no more guessing at unlabeled icons |
 | Quiet graphical boot (`quiet splash`) | ✅ Working, confirmed safe on top of the full fix (section 2.4) |
+| Top-level firmware boot entry ("OMARCHY", outside OpenCore) | ✅ Working—display correct, splash centered, confirmed 2026-08-30 |
+| OpenCore-internal boot entry (deep inside OpenCore's own menu) | 🚧 Not yet retested since the 2.5/2.6 fixes below—was working before, unconfirmed after |
 | Suspend (S3) and hibernate | ❌ **Broken, likely unfixable without ACPI/DSDT work.** Every attempt hard-hangs the machine (see section 7). Do not use—mask both targets. |
 
 ## 1. Original black-screen problem
@@ -134,6 +136,59 @@ At every boot: hold **Option** at power-on to bring up the firmware's boot picke
 ### 2.4 Re-enabling `quiet splash`
 
 `quiet splash` was originally excluded because it was suspected of retriggering the graphics-handoff black screen (section 1). That warning predated `amdgpu.dc=1` being properly set and predated the sync fix in 2.2. **Retested and confirmed working**: with `amdgpu.dc=1 amdgpu.exp_res_limit=1 amdgpu.runpm=0 video=eDP-1:3840x2160@60e` in place and all boot-file copies synced per 2.2, adding `quiet splash` back boots normally—graphical splash, password prompt, working desktop, no black screen. The original problem is understood to have been specific to the earlier fix state (missing `amdgpu.dc=1` and/or the sync bug), not `quiet splash` itself.
+
+A separate, real cosmetic bug did show up along the way: the Plymouth splash (logo + password box) appeared shifted toward the lower-left instead of centered, at one point during testing. Root cause traced to Omarchy's own stock `plymouth` hook running *before* `kms` in `/etc/mkinitcpio.conf.d/omarchy_hooks.conf` (dated from original install, never modified here)—Plymouth can initialize its canvas size before `amdgpu` applies the forced `video=` mode, so its centering math (`Window.GetWidth()/2`, correct code, wrong input) can be based on the panel's native tile size (2560×2880) instead of the actual active resolution. **This was not chased further and not fixed**—the boot-entry/`default_entry` fix in 2.5 below resolved the visible symptom without needing to touch this Omarchy default, and the current top-level boot path is confirmed correctly centered (see status table). Documented here only in case the symptom reappears; the hook-order fix, if ever needed, would be reordering `kms` before `plymouth` in that file.
+
+### 2.5 `default_entry` can silently point at a stale snapshot instead of the current kernel
+
+`limine.conf`'s `default_entry: 2` (the numeric-index form Omarchy's tooling originally wrote) does not get recalculated by any tool here—not `limine-entry-tool`, not `limine-mkinitcpio`—it's a static value from install time. As snapshots accumulate via `limine-snapper-sync`, that fixed number can end up resolving to a **stale snapshot's kernel entry** instead of the current "linux" entry, with no error or warning.
+
+This exact thing happened: a snapshot from very early in this project's timeline (with an old, since-superseded `video=eDP-1:2560x1440@60e`) sat at the position `default_entry: 2` pointed to. Booting via the top-level firmware entry (which goes through Limine and respects `default_entry`) landed on that old snapshot instead of the current kernel—producing a different (and differently wrong) resolution than booting via OpenCore's internal menu, which bypasses Limine's menu logic and boots the current UKI directly. Two boot paths, "same install," different results—this was the cause.
+
+**Fix**: Limine supports referencing `default_entry` by name/path instead of a fragile numeric index:
+
+```text
+default_entry: Omarchy/linux
+```
+
+(`Omarchy` and `linux` are this config's actual `/+` and `//` entry names—adjust if yours differ.) This is immune to snapshot count/ordering changes going forward. Applied and synced across all three `limine.conf` copies (section 2.2).
+
+### 2.6 Making the ESP's own name show up correctly, and OpenCore's picker too
+
+Two separate cosmetic-but-confusing issues, both fixed without touching the internal macOS/OpenCore disk:
+
+**The firmware's native Option-key boot picker showed a blank/"NO NAME" icon** even after registering a named `efibootmgr` entry (section 2.3)—because Apple's own picker displays the **FAT filesystem's own volume label** for third-party bootloaders, not the EFI entry's description text. The ESP had no label set at all. Fix:
+
+```bash
+sudo fatlabel /dev/sdX1 OMARCHY
+```
+
+**OpenCore's own internal menu** (its separate picker, shown when you go through OpenCore itself rather than the top-level firmware picker directly) uses its own auto-detection for the Linux entry and doesn't read either of the above—it shows "no name" from its own scan. OpenCore (v0.7.8+) supports `.contentDetails` (plain-text display name) and a `.icns` icon file, both placed **on this same external ESP**, no internal-disk edit needed:
+
+```bash
+# Icon: place next to whatever OpenCore is detecting/booting
+sudo cp your-icon.icns /boot/EFI/Linux/omarchy_linux.efi.icns
+printf 'OMARCHY' | sudo tee /boot/EFI/Linux/.contentDetails /boot/EFI/Linux/omarchy_linux.efi.contentDetails
+# Same convention applied to /boot/EFI/limine/ in case OpenCore scans that path instead
+```
+
+A minimal valid `.icns` can be hand-built from any PNG without needing macOS or `iconutil`—modern ICNS allows embedding a raw PNG directly in an `ic08` chunk: 8-byte magic `icns` + total length, then one chunk `ic08` + chunk length + raw PNG bytes. Not independently reverified from OpenCore's side this session (no internal-disk access)—flag here if it turns out not to take effect.
+
+### 2.7 A second, uncoordinated agent had disabled Limine entirely—watch for this
+
+Separately from all of the above: at one point this session, `/boot/EFI/limine/limine_x64.efi` and `/boot/EFI/BOOT/BOOTX64.LIMINE.EFI` were found renamed to `.disabled`/`.DISABLED`, with the registered `efibootmgr` "Omarchy" entry left pointing at the now-missing file. This was **not** done by the Claude session maintaining this doc—it turned out to be a *different*, independently-running AI agent (on this same machine, working from the macOS side) that hit a genuine "no config found" Limine error and worked around it by disabling Limine entirely, forcing boot through the raw fallback UKI instead.
+
+That workaround sacrifices Limine's own menu, the named `default_entry` targeting in 2.5, and snapshot/rollback access, to route around what was very likely a **transient race**: multiple uncoordinated agents (this session, sub-agents spawned for sections 3.3/7, and the separate macOS-side agent) editing the same live `limine.conf`/UKI/binary files concurrently, with no locking, can easily catch a file mid-write.
+
+**If boot config seems to unexplainably regress again, check for this first** before assuming a fix "didn't work":
+
+```bash
+ls /boot/EFI/limine/*.efi /boot/EFI/BOOT/*.EFI 2>&1   # look for stray .disabled files
+sudo mv /boot/EFI/limine/limine_x64.efi.disabled /boot/EFI/limine/limine_x64.efi 2>/dev/null
+sudo mv /boot/EFI/BOOT/BOOTX64.LIMINE.EFI.DISABLED /boot/EFI/BOOT/BOOTX64.LIMINE.EFI 2>/dev/null
+```
+
+If multiple agents/assistants have access to this machine's boot configuration, coordinate so only one touches it at a time—this class of bug (each agent "fixing" a problem the others' concurrent edits caused) can otherwise repeat indefinitely.
 
 ## 3. Why the 5K panel appears skewed
 
