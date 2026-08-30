@@ -165,6 +165,107 @@ hl.env("GDK_SCALE", tostring(omarchy_gdk_scale))
 hl.monitor({ output = "", mode = "preferred", position = "auto", scale = omarchy_monitor_scale })
 ```
 
+### 3.1 Follow-up investigation (2026-08-28): still blocked upstream
+
+Re-checked whether anything had changed since the original investigation. Conclusion: **no**, this is still the known, tracked, not-yet-implemented AMD/Aquamarine tile-combining gap—nothing new to work around it was found.
+
+- **No newer kernel helps.** The running kernel (7.1.9) is already newer than every other package available (`linux-lts` 6.18, `linux-zen` same version/different scheduler, `linux-mainline-panther-lake` is an unrelated Intel-platform audio-focused build). None carry more `amdgpu` tiled-display work than what's already running.
+- **The July-2026 AMDGPU DC "Apple Studio Display" patch series (targeting v7.3) does not apply here.** Confirmed via the Phoronix writeup: that fix *hides/disconnects* a spurious second SST DisplayPort link on the external Studio Display so compositors stop trying to drive it—the opposite of what this iMac's internal eDP panel needs, which is combining two genuine tile links into one mode. Not backportable to this case.
+- **No merged fix on `drm/amd` issue #4455** as of this check (GitLab's Anubis bot-challenge still blocks direct fetch; confirmed via search-engine snippets only). One community thread adds a detail not previously noted here: the second tile link is expected to be `DP-1` specifically (not `DP-2`/`DP-3`), based on general reasoning about amdgpu's connector enumeration order—unconfirmed against this exact hardware's debugfs, since that requires root not available this session.
+- **Tested, and ruled out, a custom-mode-injection path that hadn't been tried before:** Hyprland 0.56.2 replaced its config parser with a Lua-based one, so the old `hyprctl keyword monitor ...` path used in prior wlr-randr-style attempts is deprecated in favor of `hyprctl eval 'hl.monitor({ output = "eDP-1", mode = "5120x2880@60", ... })'`. This appeared to succeed—`hyprctl monitors` briefly reported `5120x2880@60` active with no config errors—but it does not reflect a real hardware modeset: the kernel's own connector mode list (`/sys/class/drm/card1-eDP-1/modes`, read directly from the driver) never contained `5120x2880`, Hyprland's own log has no corresponding DRM atomic-commit entry for the change, and a subsequent read reverted to `3840x2160` with no revert command issued. This is Hyprland accepting a config value into its internal state without a corresponding backend commit landing, not a working custom-mode mechanism. The underlying gap described in Aquamarine issues #59/#238/#354 stands unchanged.
+
+Net result: no working or partial improvement found this session. The `video=eDP-1:3840x2160@60e` boot-parameter fallback (section 3) remains the correct approach until upstream `amdgpu` DC gains the link-training/tile-group logic tracked in #4455.
+
+### 3.2 Reverse-engineering the Windows Boot Camp AMD driver (2026-08-28)
+
+The GitLab #4455 maintainer's comment says the real fix needs "reverse-engineering the Windows Boot Camp AMD driver" to learn Apple's tile-combining sequence. Took a real run at that rather than treating it as a closed door. Concrete, previously-undocumented findings below—not a working fix, but a genuine lead for whoever picks this up next (upstream or a future session with better tooling).
+
+**How the driver was obtained (no macOS needed):** Apple's Boot Camp driver downloads are served from a public, unauthenticated Software Update catalog—no Mac, no Boot Camp Assistant required:
+
+```text
+https://swscan.apple.com/content/catalogs/others/index-11-10.15-10.14-10.13-10.12-10.11-10.10-10.9-mountainlion-lion-snowleopard-leopard.merged-1.sucatalog
+```
+
+Downloaded that catalog, found all `BootCampESD` product entries, fetched each one's English `.dist` file, and grepped for `iMac18,3` until a match came back (`061-97204`, ~663 MB). Its `pkg-ref` pointed at `BootCampESD.pkg` in the same directory. That `.pkg` is a `xar` archive; with no `xar` binary available and no root to install one, wrote a small pure-Python xar reader (~70 lines, stdlib only: `struct` + `zlib` + `xml.etree`) to pull out `Payload` (a gzip'd cpio), which extracts to `Library/Application Support/BootCamp/WindowsSupport.dmg`. That `.dmg` needed an HFS/ISO reader; rather than requiring `sudo pacman -S`, downloaded the standalone `7zz` binary from 7-zip.org (no install, no root) and used it to browse straight into the DMG.
+
+Inside: `BootCamp/Drivers/AMD/AMDGraphics/Packages/Drivers/Display/WT6A_INF/B350622/`—the actual unpacked AMD driver package, INF included, no need to run the installer at all.
+
+**Finding 1—confirmed this exact GPU gets Apple-specific driver behavior on Windows.** The INF (`C0350660.inf`) lists our precise hardware ID:
+
+```text
+"%AMD67DF.2%" = ati2mtag_Polaris10, PCI\VEN_1002&DEV_67DF&SUBSYS_0162106B&REV_C4
+AMD67DF.2 = "Radeon Pro 575"
+```
+
+That device's install section (`[ati2mtag_Polaris10]`) applies `AddReg = ati2mtag_SoftwareDeviceSettings`, which sets:
+
+```text
+HKR,, PP_Apple_Bootcamp_Enable, %REG_DWORD%, 1
+```
+
+A sibling flag, `KMD_BootCampPlatform` (`REG_DWORD = 1`), is set the same way for the Vega/Vega20 device sections (2019 iMac/iMac Pro). So on real Windows/Boot Camp, this exact PCI ID (`1002:67DF`, subsystem `0162106B`) is driven with an explicit "this is Apple Boot Camp hardware" flag turned on—confirming the driver *does* branch on platform identity, not just EDID content.
+
+**Finding 2—new, specific lead: undocumented DAL registry flags for tiled 5K, not present anywhere in the installer's own INF.** `strings` across the 60 MB kernel-mode driver itself (`atikmdag.sys`) turned up a small family of `DalShared::ModeManager`-adjacent registry-style flags that never appear in the INF's `AddReg` sections (meaning they're internally defaulted/toggled by the driver, not installer-set):
+
+```text
+DalEnableTiledDisplay
+DalEnable5kTiledMode
+DalAllowTiledDisplayGLSync
+DalDisableNBP4KTiledDisplay
+DalTiledRotatedOverride
+Dal5K60PipeSplit
+```
+
+`DalEnable5kTiledMode` sits directly adjacent to `DalShared::ModeManager::ModeManager` in the string table—i.e. it's read by DAL's mode-management code, which is the layer responsible for deciding what timing/topology to present to the OS. This is a materially more specific lead than anything in the upstream issue or prior research: it's the actual internal name of the feature switch, not just "some magic happens."
+
+**Where this stops, honestly:** turning these flag names into working kernel code needs real disassembly—finding what sets `DalEnable5kTiledMode` (almost certainly gated on the `PP_Apple_Bootcamp_Enable`/platform-detection path above, combined with the EDID tile block) and what code runs when it's true (the actual DPCD/link-training sequence for the second tile). That needs a disassembler (Ghidra/IDA) capable of handling a 60 MB stripped PE driver with no symbols; `objdump`/`strings` alone can't get there, and installing Ghidra here needs `sudo` that wasn't available this session. **This is the right handoff point**, not a dead end: the next step for anyone continuing this (upstream contributor or a future session with Ghidra/root access) is to disassemble `atikmdag.sys` around the `DalEnable5kTiledMode` string's cross-references and compare against `drivers/gpu/drm/amd/display/dc/` in the Linux kernel source for an equivalent (likely absent or stubbed) `dc_debug_options` field—AMD's DC/DAL code is substantially shared between the Windows and Linux drivers, so a Windows-only registry flag family like this is a strong signal of Linux-side code that either doesn't exist yet or exists but is never enabled/wired up for eDP.
+
+**Note for anyone reproducing this:** the extracted driver files (`.pkg`/`.dmg`/`.sys`/`.dll`) are Apple/AMD proprietary binaries obtained under Apple's standard Boot Camp EULA for this Mac's own hardware—legitimate to download and analyze locally for interoperability, but **do not commit or redistribute them in this (public) repo.** Only the findings above (flag names, hardware IDs, technical analysis) are recorded here; the binaries themselves were kept out of the repo, in a local scratch directory.
+
+### 3.3 The real upstream status, a legitimate community kernel, and a concrete patch target (2026-08-30)
+
+Checked GitLab issue [`drm/amd#4455`](https://gitlab.freedesktop.org/drm/amd/-/issues/4455) directly via its API/GraphQL endpoint (the web UI is Anubis-gated, but `curl`/GraphQL against `gitlab.freedesktop.org` works fine—see below). This corrects an earlier, too-pessimistic read from this same session: there *is* real, current activity, just not a merged fix yet.
+
+**Real upstream engagement exists.** AMD's actual Linux graphics driver lead, **Alex Deucher (`agd5f`)**, has been directly engaged on this issue since March 2026. His technical roadmap, in his own words: identify which physical DP PHY carries the second tile (via VBIOS PHY tables + AUX/DPCD probing), hardcode `2560x2880` modelines on both links as a first step (ignore real EDID/tiling entirely at first), then wire up tile-group info once both links are lit. He explicitly said the driver just needs "the appropriate quirk"—see below, that mechanism already exists in-tree. He's waiting on a contributor to do the physical-wiring legwork; as of his last comment (April 2026) nobody had confirmed it yet for any model.
+
+**A legitimate out-of-tree kernel already gets partial results—on the newer 2019 iMac19,x, not yet confirmed on our 2017 iMac18,3.** [`github.com/mcirsta/linux-imac-5k`](https://github.com/mcirsta/linux-imac-5k) (real project—its top-level README is an unrelated generic kernel-doc template with an odd "AI Coding Assistant" section, worth ignoring/not trusting, but the actual kernel patches are real and referenced by name in the GitLab thread). As of Aug 23-28, 2026, community members (`taprobane99`, `M4rt1n12`, `LandonTheCoder`) report:
+- Tear-free real 5K on **GNOME**, combining this kernel with a Mutter patch "originally designed for the LG UltraFine 5K"
+- On a different iMac (RX 480, so iMac19,x-class), a **less clean** result: "not a single screen, but 2 next to each other" rather than one seamless display
+- Active work porting the patch set to newer/mainline kernels (7.0/7.2/CachyOS)
+- Verified two `.pkg.tar.zst` Arch packages of this exact kernel build (`7.0.1-1-imac-5k-g5ca584fa84fb`) downloaded locally—version string matches `taprobane99`'s working GNOME report byte-for-byte. Installing/testing this on our actual iMac18,3 is a live option, not yet done (needs a real reboot to verify; not attempted this session pending user go-ahead).
+
+**The concrete, exact patch target—more specific than anything found before.** AMD's DC driver already has the *mechanism* Alex Deucher said was needed: a per-panel quirk table.
+
+```c
+// drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm_helpers.c, apply_edid_quirks()
+/*
+ * Workaround for Apple Studio Display which exposes a 2x1 tiled panel
+ * over two SST DP links. Hide the secondary tile from userspace so
+ * compositors drive a single 5K stream on the primary link only.
+ */
+case drm_edid_encode_panel_id('A', 'P', 'P', 0xAE3A):
+case drm_edid_encode_panel_id('A', 'P', 'P', 0xAE42):
+case drm_edid_encode_panel_id('A', 'P', 'P', 0xAE46):
+	edid_caps->panel_patch.disable_second_tile = true;
+	break;
+```
+
+This is real, in-tree, shipping code—confirmed via GitHub code search across `torvalds/linux`. It only ever does the *opposite* of what our panel needs (hides a redundant tile instead of combining two real ones), and the three panel IDs listed are all Apple Studio Display, not any iMac.
+
+**Our exact panel's ID, decoded from this session's own EDID dump:** manufacturer bytes `06 10` → `APP`, product code bytes `11 ae` (little-endian) → **`0xAE11`** (matches `edid-decode`'s "Model: 44561" = 0xAE11 exactly). This ID is **not** in the quirk table today.
+
+The precise, actionable patch shape for anyone picking this up:
+1. Add a new bool to `struct dc_panel_patch` in `dc_types.h` (e.g. `combine_second_tile`—the inverse of `disable_second_tile`)
+2. Add `case drm_edid_encode_panel_id('A', 'P', 'P', 0xAE11):` to `apply_edid_quirks()`, setting that new flag
+3. **The still-unsolved part**: somewhere in the link-detection path (`dc_link_detect()` / `amdgpu_dm_connector_detect()`), when that flag is set, actively probe/link-train the sibling connector (rather than hide it) and construct a real DRM tile-group spanning both—this is the actual link-training work nobody has done yet for this exact hardware.
+
+**Even a working kernel-side fix would need a second, compositor-side piece for Hyprland—assessed this session, verdict: real feature work, not a quick patch.** Investigated Aquamarine's (Hyprland's DRM backend) actual tile-group code (`markRedundantTiles()` in `src/backend/drm/DRM.cpp`) and Hyprland's `CMonitor`. Finding: Aquamarine's existing tile fixes (issues #238, #354—both already merged) only ever do "pick one connector in a tile group, discard the rest"—there is no code path for keeping two tile connectors alive and stitching them into one logical output. `CMonitor` is hard-typed to one Aquamarine output. No maintainer discussion of true multi-CRTC stitching exists in either repo's history. Building it for real would need a new Aquamarine output type owning multiple CRTCs plus Hyprland render-pipeline changes to composite across two independent atomic commits without visible tearing between them—comparable in scope to GNOME/Mutter's existing (years-old, dedicated) tiled-monitor subsystem, not a portable bugfix. Feasible in principle; realistically multi-week upstream feature work with no existing design to build on, not something to expect quickly.
+
+**Debunked this session, for the record (so future readers don't waste time on these again):**
+- A polished "Verified configuration: 5120x2880 @ 60Hz on KDE Wayland" report circulated (LLM-paraphrased) traces back to a single unconfirmed forum post ([Arch Linux BBS, `8-bit-brett`](https://bbs.archlinux.org/viewtopic.php?id=312192)) whose *first* attempt at the same goal required `nomodeset` (no GPU acceleration) and whose second, unelaborated claim was never corroborated by anyone and directly contradicted the thread's most experienced participant's (`seth`) explicit prediction. Thread ends immediately after that final post.
+- A separate "fully working 5K on X11" xrandr recipe was the *original poster's own first attempt* in that same thread, which they themselves described as "not crisp, just slightly blurry"—and its modeline uses non-reduced-blank timings requiring a physically implausible 1276.5 MHz pixel clock.
+- `amdgpu.exp_res_limit=1`, cited in both of the above and in older forum folklore, is confirmed **not a real parameter** on this machine's kernel: `dmesg`/`journalctl -k` shows `amdgpu: unknown parameter 'exp_res_limit' ignored`, and it does not appear in `/sys/module/amdgpu/parameters/` at all.
+
 ## 4. OWC Thunderbolt 10GbE fix
 
 The adapter initially appeared in `boltctl` but was only connected, not stored or authorized. Consequently, its Aquantia PCI Ethernet controller did not exist in `lspci` or NetworkManager.
