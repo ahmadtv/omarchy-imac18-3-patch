@@ -81,6 +81,12 @@ git clone https://github.com/jackdanyell/imac18-3-cs8409-linux-audio.git
 cd imac18-3-cs8409-linux-audio && sudo ./install-imac18-3.sh && sudo reboot
 ```
 
+### Speaker tone (bass/treble)
+
+This codec+amp path does zero processing (confirmed by the driver author) — macOS's fuller sound comes entirely from its own software EQ, which Linux has no equivalent of by default. Fixed with a PipeWire filter-chain EQ (native module, nothing extra installed): low-shelf bass boost, a couple of small corrective bands, and a `clamp` at the end so the boost can't cause digital clipping on bass-heavy audio. Template: [`configs/eq6.conf`](configs/eq6.conf) → copy to `~/.config/pipewire/filter-chain.conf.d/eq6.conf`. Creates a selectable "iMac Speaker EQ" output device; select it (or set as default) to hear it.
+
+After enabling it, also re-check `wpctl get-volume` on the underlying hardware sink (`Built-in Audio Analog Stereo`) — it keeps its own independent volume, and if it's left at an old lower value your volume slider will silently cap out below 100%.
+
 ### OWC Thunderbolt 10GbE
 
 Shows up in `boltctl` but stays unauthorized until enrolled:
