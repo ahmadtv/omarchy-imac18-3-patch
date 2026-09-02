@@ -1,5 +1,3 @@
-# Comment to post on drm/amd#4455
-
 **Confirmed working on iMac18,3 — and a fix for the tile genlock (seamless, no seam under motion)**
 
 Reporting the first iMac18,3 (27" 5K, 2017, Radeon Pro 575 / POLARIS10 / DCE 11.2) confirmed working at native, genlocked 5120×2880, on Omarchy (Hyprland/Wayland).
