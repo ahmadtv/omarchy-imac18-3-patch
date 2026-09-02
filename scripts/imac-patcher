@@ -111,9 +111,9 @@ sync_boot_files() {
 }
 
 verify_embedded_cmdline() {  # $1 = pattern that MUST be present, $2 = pattern that must NOT
-    local tmp; tmp="$(mktemp)"
-    sudo objcopy -O binary --only-section=.cmdline /boot/EFI/BOOT/BOOTX64.EFI "$tmp"
-    local line; line="$(tr -d '\0' <"$tmp")"; rm -f "$tmp"
+    # root-owned temp: /tmp's protected_regular sysctl blocks root writing a user-owned file
+    local line
+    line="$(sudo bash -c 'tmp=$(mktemp); trap "rm -f $tmp" EXIT; objcopy -O binary --only-section=.cmdline /boot/EFI/BOOT/BOOTX64.EFI "$tmp" && tr -d "\0" < "$tmp"')"
     if [[ -n "${1:-}" ]] && ! grep -q "$1" <<<"$line"; then
         echo "VERIFY FAILED: embedded cmdline missing '$1'"; echo "  got: $line"; return 1
     fi
