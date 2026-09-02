@@ -1,0 +1,61 @@
+drm/amd/display: genlock Apple iMac 5K dual-tile panels
+
+The internal panel on the 27" 5K iMacs (iMac15,1 / 17,1 / 18,3 / 19,1 /
+iMacPro1,1 / 20,x) is a 2x1 tiled display: two 2560x2880 halves driven
+over two separate links (eDP root + a second DP tile), combined into one
+5120x2880 image. Once both tiles are woken/trained and presented as a
+single stream pair, the panel's TCON only latches native dual-tile mode
+when the two tile streams scan out in lockstep.
+
+dm_enable_per_frame_crtc_master_sync() sets up each stream's
+event_source (master) but never enables the per-frame CRTC reset -- the
+multi_sync_enabled path is a standing TODO ("read AMD VSDB bits ... for
+now it's set to false"). As a result triggered_crtc_reset.enabled stays
+false, enable_timing_multisync() finds nothing to program, the two tiles
+free-run, and the panel shows a black/unstable image (endless re-modeset)
+or, at best, a visible tear at the tile seam under motion.
+
+The two halves are already known to be one Apple tiled panel via the
+Apple panel quirk (link->tiled_pair_apple). Enable the per-frame reset on
+the slave tile(s) so they hard-sync to the master's VSYNC; the master
+(event_source == self) stays free-running as the timing source.
+enable_timing_multisync() then programs the GSL per-frame position reset
+on DCE (dce110_enable_per_frame_crtc_position_reset), the tiles lock, and
+the panel presents a stable, seamless 5120x2880 image.
+
+Tested on an iMac18,3 (Radeon Pro 575, POLARIS10, DCE 11.2): sync_enabled
+flips 0 -> 1 and the seam is seamless under motion. First confirmed
+native genlocked 5K on this model under Linux.
+
+---
+ drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.c | 14 ++++++++++++++
+ 1 file changed, 14 insertions(+)
+
+--- a/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.c
++++ b/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.c
+@@ dm_enable_per_frame_crtc_master_sync(struct dc_state *context)
+ 	for (i = 0; i < context->stream_count ; i++) {
+ 		stream = context->streams[i];
+
+ 		if (!stream)
+ 			continue;
+
++		/*
++		 * Apple iMac 5K dual-tile genlock. Mainline leaves per-frame
++		 * CRTC master sync disabled (the multi_sync_enabled TODO above),
++		 * so the two tile streams free-run and the panel's TCON never
++		 * latches native dual-tile mode. The two halves are one Apple
++		 * tiled panel (link->tiled_pair_apple); set_master_stream() has
++		 * just pointed every stream's event_source at the chosen master,
++		 * so enable the per-frame reset on the slave tile(s) to hard-sync
++		 * them to the master's VSYNC. The master (event_source == self)
++		 * stays free-running as the timing source.
++		 */
++		if (stream->link && stream->link->tiled_pair_apple &&
++		    stream->triggered_crtc_reset.event_source &&
++		    stream->triggered_crtc_reset.event_source != stream)
++			stream->triggered_crtc_reset.enabled = true;
++
+ 		set_multisync_trigger_params(stream);
+ 	}
+ }
