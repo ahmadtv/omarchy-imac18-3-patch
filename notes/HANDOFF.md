@@ -60,10 +60,14 @@ clone; the main SSD is still stock (4K fallback) pending one system update.
 
 ## The path to 5K on the main SSD (next session's job)
 
-Arch core **already ships `linux 7.2.2.arch1-1`** (since 2026-08-31) — the
-exact series the patch targets. So NO porting is needed:
+**Verified 2026-09-02:** the same patch applies cleanly to BOTH 7.1.x and
+7.2.x — a 5K amdgpu module was built for the running `7.1.9-arch1-2` kernel
+with exact vermagic match (tree kept at `~/.cache/kernel-5k-build/linux-7.1.9`,
+which the installer script reuses). So the script works on the CURRENT 7.1.9
+system today, no update required. Arch core also already ships
+`linux 7.2.2.arch1-1` (since 2026-08-31), and the script covers that too:
 
-1. `sudo pacman -Syu` (brings the SSD to kernel 7.2.2.arch1-1) + reboot
+1. (Optional) `sudo pacman -Syu` — works on 7.1.9 as-is, or on 7.2.2 after updating
 2. Optional but recommended: run `scripts/patch-imac5k-amdgpu.sh` **on the
    USB clone first** (update the clone, run script, verify 5K)
 3. Run it on the SSD, reboot → native seamless 5K on the daily system
