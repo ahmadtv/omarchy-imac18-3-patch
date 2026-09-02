@@ -18,6 +18,8 @@ External-SSD Omarchy install, dual-booting with macOS/OpenCore on the internal d
 
 Run `./scripts/verify.sh` any time to check kernel cmdline, GPU driver, monitor state, Thunderbolt, and networking in one shot.
 
+Run `./scripts/imac-patcher` for the interactive patch manager (status, preflight, apply/restore the native-5K patch with the full safety rails — see `PLAN.md` Phase 5).
+
 ## Settled
 
 ### Boot cmdline
