@@ -61,12 +61,36 @@ GOP 250 (keyframe every 8.33 s), no audio stream.
 
 Fan daemon if needed · Wi-Fi firmware · backlight fix · SD/BT/HDMI fixes as found.
 
-## Phase 5 — Deliverable
+## Phase 5 — Deliverable: TUI patch manager
 
-`setup-imac18-3.sh`: idempotent, hardware-gated (refuses non-iMac18,3), applying every
-settled fix — boot cmdline + 3-way sync + name-based `default_entry`, audio DKMS,
-speaker EQ, `cm=dp3`, suspend masking, boot-picker naming — plus Phase 4 additions,
-ending with a verify step. README updated to point at it.
+Not a monolithic script — a patch *manager*: `imac-patcher` (bash + `gum`, which
+Omarchy already ships; CLI flags `--status/--all/--only/--remove` as headless
+fallback, plain prompts if gum is absent).
+
+**Architecture.** Every patch is a module implementing a 4-function contract:
+`detect` (applied? applicable?) · `apply` · `remove` · `verify`. The TUI is a loop
+over the registry — status display, idempotency, selective apply, and removal all
+fall out of this one contract. Reversibility is mandatory metadata.
+
+**UX flow.** (1) DMI hardware gate: iMac18,3 or exit unless `--force`.
+(2) Status table always shown first: `✓ applied · ✗ not applied · ⚠ partial · — n/a`.
+(3) Three tiers:
+  - **Safe** (pre-selected, fully reversible): audio DKMS, speaker EQ, `cm=dp3`,
+    boot-picker naming, suspend mask, Wi-Fi firmware.
+  - **Boot-critical** (pre-selected, flagged): cmdline + 3-way sync +
+    `default_entry`. Auto-backup of every touched file; recovery steps printed
+    BEFORE applying (lesson from the original install black screen).
+  - **Experimental** (never pre-selected): 5K fix (first candidate, once the other
+    session lands it; labeled untested-on-18,3 until proven; revert = boot the
+    previous kernel/snapshot entry), VCE fixes when ready. No working revert →
+    refused from this tier entirely.
+(4) Simple run = apply all defaults with one confirm; advanced = multi-select.
+(5) Remove mode lists only applied+reversible patches, runs `remove`, re-verifies.
+
+**Portability.** Hardware gate and distro adapter are separate layers. Audio/EQ/color
+patches are near distro-agnostic (any systemd+PipeWire Arch); boot patches get an
+`omarchy` (Limine) backend now, contract leaves room for grub/systemd-boot backends
+later. Launch target: Omarchy, tested. README updated to point at the tool.
 
 ## Needed from the user
 
