@@ -1,0 +1,230 @@
+#!/usr/bin/env bash
+#
+# imac-patcher — TUI patch manager for iMac18,3 + Omarchy.
+#
+# v1 wraps the native-5K amdgpu patch (scripts/patch-imac5k-amdgpu.sh):
+#   * preflight checks surfaced BEFORE anything runs
+#   * honest applied/partial/active status detection
+#   * clone-first acknowledgment gate (patches/README.md RULE 2)
+#   * streamed build progress + full log
+#   * prominent restore, and the 3-way Limine sync done RIGHT
+#     (including the /boot/EFI/BOOT/BOOTX64.EFI fallback UKI the
+#      underlying installer does not cover)
+#
+# Usage:
+#   imac-patcher              interactive menu
+#   imac-patcher --status     print patch status and exit
+#   imac-patcher --apply-5k   apply the 5K patch (still asks the safety gate)
+#   imac-patcher --restore-5k restore stock amdgpu + 4K fallback
+#
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+INSTALLER="${SCRIPT_DIR}/patch-imac5k-amdgpu.sh"
+LOGDIR="${HOME}/.local/state/imac-patcher"
+KREL="$(uname -r)"
+KSERIES="$(uname -r | cut -d. -f1-2)"
+SUPPORTED_SERIES="7.1 7.2"
+LIMINE_DEFAULT=/etc/default/limine
+VIDEO_4K='video=eDP-1:3840x2160@60e'
+mkdir -p "$LOGDIR"
+
+HAVE_GUM=0; command -v gum >/dev/null && HAVE_GUM=1
+
+# ── tiny UI layer (gum with plain fallback) ────────────────────────────────
+say()    { printf '\033[1;33m==>\033[0m %s\n' "$*"; }
+hdr()    { if ((HAVE_GUM)); then gum style --border rounded --padding "0 2" --bold "$*"; else printf '\n== %s ==\n' "$*"; fi; }
+confirm(){ if ((HAVE_GUM)); then gum confirm "$1"; else read -rp "$1 [y/N] " a; [[ $a == [yY]* ]]; fi; }
+choose() { if ((HAVE_GUM)); then gum choose "$@"; else select o in "$@"; do echo "$o"; break; done; fi; }
+
+# ── hardware gate ──────────────────────────────────────────────────────────
+product="$(cat /sys/class/dmi/id/product_name 2>/dev/null || echo unknown)"
+if [[ "$product" != "iMac18,3" && "${1:-}" != "--force" ]]; then
+    echo "This tool is for the iMac18,3 (detected: ${product}). Refusing." >&2
+    exit 1
+fi
+
+# ── preflight ──────────────────────────────────────────────────────────────
+preflight() {
+    local ok=1
+    p() { printf '  %s %s\n' "$1" "$2"; }
+    if [[ " $SUPPORTED_SERIES " == *" $KSERIES "* ]]; then
+        p "✓" "kernel ${KREL} (series ${KSERIES} — supported)"
+    else
+        p "✗" "kernel ${KREL} — patch verified only for series: ${SUPPORTED_SERIES}. Needs a human re-port first (patches/README.md RULE 1)."
+        ok=0
+    fi
+    if [[ -e "/usr/lib/modules/${KREL}/build/Module.symvers" ]]; then
+        p "✓" "linux-headers for running kernel"
+    else
+        p "✗" "linux-headers missing:  sudo pacman -S linux-headers"; ok=0
+    fi
+    local missing=""
+    for t in gcc make bc; do command -v "$t" >/dev/null || missing+=" $t"; done
+    if [[ -z "$missing" ]]; then p "✓" "build tools (base-devel, bc)"; else p "✗" "missing:${missing}  →  sudo pacman -S --needed base-devel bc pahole"; ok=0; fi
+    local free_gb; free_gb=$(df --output=avail -BG "${HOME}/.cache" 2>/dev/null | tail -1 | tr -dc 0-9)
+    if (( ${free_gb:-0} >= 8 )); then p "✓" "disk space (${free_gb}G free, need ~8G)"; else p "✗" "only ${free_gb:-?}G free under ~/.cache — need ~8G"; ok=0; fi
+    [[ -f "$INSTALLER" ]] && p "✓" "installer present" || { p "✗" "installer not found: $INSTALLER"; ok=0; }
+    if [[ -d "${HOME}/.cache/kernel-5k-build/linux-${KREL%%-*}" ]]; then
+        p "✓" "kernel source tree already prepared (build will skip download)"
+    else
+        p "·" "kernel source will be downloaded from kernel.org (~150MB)"
+    fi
+    return $((1 - ok))
+}
+
+# ── 5K patch: detect ───────────────────────────────────────────────────────
+# prints one of: not-applied | staged | active | partial
+detect_5k() {
+    local moddir="/usr/lib/modules/${KREL}/kernel/drivers/gpu/drm/amd"
+    local backup module_swapped=0 conf=0 live=0 res=""
+    backup="$(find "$moddir" -name 'amdgpu.ko*.stock-backup' 2>/dev/null | head -1 || true)"
+    [[ -n "$backup" ]] && module_swapped=1
+    grep -q 'amdgpu.tiled_stitch=1' "$LIMINE_DEFAULT" 2>/dev/null && conf=1
+    grep -q 'amdgpu.tiled_stitch=1' /proc/cmdline 2>/dev/null && live=1
+    command -v hyprctl >/dev/null && res="$(hyprctl monitors 2>/dev/null | grep -oE '5120x2880' | head -1 || true)"
+
+    if ((module_swapped && conf && live)) && [[ "$res" == "5120x2880" ]]; then echo active
+    elif ((module_swapped && conf)) && ((!live)); then echo staged
+    elif ((!module_swapped && !conf && !live)); then echo not-applied
+    else echo partial
+    fi
+}
+
+status_5k_verbose() {
+    local st; st="$(detect_5k)"
+    case "$st" in
+        active)      echo "✓ APPLIED + ACTIVE — running native 5120×2880";;
+        staged)      echo "⚠ STAGED — module + cmdline installed, reboot to activate";;
+        not-applied) echo "✗ NOT APPLIED — running stock amdgpu ($(grep -q "$VIDEO_4K" /proc/cmdline && echo '4K fallback active' || echo 'no 4K fallback param live'))";;
+        partial)     echo "⚠ PARTIAL — inconsistent state, inspect: module-backup/cmdline/live values disagree (a kernel update may have replaced the patched module — re-apply)";;
+    esac
+}
+
+# ── the full 3-way Limine sync (project doctrine — see README) ─────────────
+sync_boot_files() {
+    say "rebuilding UKI + syncing all Limine copies (incl. fallback BOOTX64.EFI)"
+    sudo limine-mkinitcpio
+    sudo cp /boot/limine.conf /boot/EFI/BOOT/limine.conf
+    sudo cp /boot/limine.conf /boot/EFI/limine/limine.conf
+    sudo cp /boot/EFI/Linux/omarchy_linux.efi /boot/EFI/BOOT/BOOTX64.EFI
+}
+
+verify_embedded_cmdline() {  # $1 = pattern that MUST be present, $2 = pattern that must NOT
+    local tmp; tmp="$(mktemp)"
+    sudo objcopy -O binary --only-section=.cmdline /boot/EFI/BOOT/BOOTX64.EFI "$tmp"
+    local line; line="$(tr -d '\0' <"$tmp")"; rm -f "$tmp"
+    if [[ -n "${1:-}" ]] && ! grep -q "$1" <<<"$line"; then
+        echo "VERIFY FAILED: embedded cmdline missing '$1'"; echo "  got: $line"; return 1
+    fi
+    if [[ -n "${2:-}" ]] && grep -q "$2" <<<"$line"; then
+        echo "VERIFY FAILED: embedded cmdline still contains '$2'"; echo "  got: $line"; return 1
+    fi
+    say "embedded cmdline verified"
+}
+
+dkms_check() {
+    if command -v dkms >/dev/null; then
+        if dkms status 2>/dev/null | grep -q "snd_hda_macbookpro.*${KREL}.*installed"; then
+            say "audio DKMS module OK for ${KREL}"
+        else
+            say "audio DKMS module NOT built for ${KREL}"
+            if confirm "Run 'dkms autoinstall' to rebuild the audio driver now?"; then
+                sudo dkms autoinstall -k "$KREL" || say "dkms autoinstall failed — check manually (see README audio section)"
+            fi
+        fi
+    fi
+}
+
+# ── apply ──────────────────────────────────────────────────────────────────
+apply_5k() {
+    hdr "Apply: native 5K (amdgpu wake + stitch + genlock)"
+    preflight || { echo; echo "Fix the ✗ items above first. Nothing was changed."; return 1; }
+    echo
+    echo "This will:"
+    echo "  1. Build a patched amdgpu module for ${KREL} (~20–40 min, streamed below)"
+    echo "  2. Swap it in (stock module backed up), add amdgpu.tiled_stitch=1"
+    echo "  3. Remove the 4K fallback ${VIDEO_4K} (you confirm)"
+    echo "  4. Rebuild the UKI + full 3-way Limine sync, verify the embedded cmdline"
+    echo
+    printf '\033[1mRestore at any time:\033[0m  %s --restore-5k\n\n' "$0"
+
+    local ack
+    ack=$(choose "I have tested this on the USB clone (RULE 2)" \
+                 "Proceed on THIS system anyway — I accept software-rendering-until-restore risk" \
+                 "Abort")
+    [[ "$ack" == Abort ]] && { echo "Aborted. Nothing changed."; return 1; }
+    echo "$(date -Is) ack: $ack" >> "$LOGDIR/acknowledgments.log"
+
+    sudo -v
+    local log="$LOGDIR/apply-5k-$(date +%Y%m%d-%H%M%S).log"
+    say "building + installing (log: $log) — started $(date +%T)"
+    local t0=$SECONDS
+    sudo "$INSTALLER" 2>&1 | tee "$log"
+    say "installer finished in $(( (SECONDS-t0)/60 ))m$(( (SECONDS-t0)%60 ))s"
+
+    if grep -q "$VIDEO_4K" "$LIMINE_DEFAULT" && confirm "Remove the 4K fallback param (required for real 5K)?"; then
+        sudo cp "$LIMINE_DEFAULT" "${LIMINE_DEFAULT}.backup-pre5k-$(date +%s)"
+        sudo sed -i "s| ${VIDEO_4K}||" "$LIMINE_DEFAULT"
+        say "removed ${VIDEO_4K} (backup kept)"
+    fi
+
+    sync_boot_files
+    verify_embedded_cmdline 'amdgpu.tiled_stitch=1' "$VIDEO_4K" || return 1
+    dkms_check
+    echo
+    hdr "DONE — reboot to native 5K. If anything is wrong after reboot: $0 --restore-5k"
+    confirm "Reboot now?" && sudo systemctl reboot || true
+}
+
+# ── restore ────────────────────────────────────────────────────────────────
+restore_5k() {
+    hdr "Restore: stock amdgpu + 4K fallback"
+    sudo -v
+    local log="$LOGDIR/restore-5k-$(date +%Y%m%d-%H%M%S).log"
+    sudo "$INSTALLER" --restore 2>&1 | tee "$log"
+
+    if grep -q 'amdgpu.tiled_stitch=1' "$LIMINE_DEFAULT"; then
+        sudo cp "$LIMINE_DEFAULT" "${LIMINE_DEFAULT}.backup-restore-$(date +%s)"
+        sudo sed -i 's| amdgpu.tiled_stitch=1||' "$LIMINE_DEFAULT"
+        say "removed amdgpu.tiled_stitch=1"
+    fi
+    if ! grep -q "$VIDEO_4K" "$LIMINE_DEFAULT"; then
+        if confirm "Re-add the 4K fallback param (recommended — avoids the skewed native tile mode)?"; then
+            sudo sed -i "s|\(KERNEL_CMDLINE\[default\]=\"[^\"]*\)\"|\1 ${VIDEO_4K}\"|" "$LIMINE_DEFAULT"
+            say "re-added ${VIDEO_4K}"
+        fi
+    fi
+
+    sync_boot_files
+    verify_embedded_cmdline "$VIDEO_4K" 'amdgpu.tiled_stitch=1' || return 1
+    dkms_check
+    hdr "Restored. Reboot to return to the stock 4K-fallback setup."
+    confirm "Reboot now?" && sudo systemctl reboot || true
+}
+
+# ── entry ──────────────────────────────────────────────────────────────────
+show_status() {
+    hdr "imac-patcher — iMac18,3 patch status"
+    echo "  Machine : $product   Kernel: $KREL"
+    echo "  5K patch: $(status_5k_verbose)"
+}
+
+case "${1:-}" in
+    --status)     show_status; exit 0 ;;
+    --preflight)  hdr "Preflight"; preflight; exit $? ;;
+    --apply-5k)   apply_5k; exit $? ;;
+    --restore-5k) restore_5k; exit $? ;;
+    --force|"")   ;;
+    *) echo "usage: $0 [--status|--preflight|--apply-5k|--restore-5k]"; exit 2 ;;
+esac
+
+show_status
+echo
+sel=$(choose "Apply 5K patch" "Restore stock (undo 5K)" "Run preflight checks only" "Quit")
+case "$sel" in
+    "Apply 5K patch")            apply_5k ;;
+    "Restore stock (undo 5K)")   restore_5k ;;
+    "Run preflight checks only") hdr "Preflight"; preflight || true ;;
+    *) exit 0 ;;
+esac
