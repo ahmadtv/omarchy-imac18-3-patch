@@ -90,8 +90,17 @@ cd "$SRC"
 say "configuring to match the running kernel"
 cp "$BUILDLINK/.config" .config
 cp "$BUILDLINK/Module.symvers" Module.symvers 2>/dev/null || true
-# make the module's vermagic match `uname -r` so it loads without --force
+# Arch's kernel release is e.g. 7.2.2-arch1-1 while kernel.org source builds
+# as plain 7.2.2 -- write the suffix into a localversion file so the built
+# module's vermagic matches `uname -r` exactly (else it refuses to load).
+KSUFFIX="${KREL#"$KVER"}"                 # e.g. -arch1-1
+printf '%s' "$KSUFFIX" > localversion
+scripts/config --disable LOCALVERSION_AUTO 2>/dev/null || true
+scripts/config --set-str LOCALVERSION "" 2>/dev/null || true
 make olddefconfig >/dev/null
+BUILTREL="$(make -s kernelrelease)"
+[[ "$BUILTREL" == "$KREL" ]] || die "computed kernelrelease '$BUILTREL' != running '$KREL' — refusing to build a module that won't load"
+say "kernelrelease matches running kernel: $BUILTREL"
 
 # ── apply the 5K patch stack (idempotent: skip if already applied) ─────────
 if patch -p1 --dry-run --force < "$PATCH_FILE" >/dev/null 2>&1; then
