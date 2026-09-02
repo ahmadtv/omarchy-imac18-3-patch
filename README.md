@@ -113,7 +113,7 @@ sudo systemctl mask suspend.target hibernate.target hybrid-sleep.target suspend-
 
 ## Still open
 
-- **Native 5K** — a working out-of-tree kernel fix now exists (DPCD `0x4F1` wake of the hidden second tile link; portable patches for kernels 7.0.x and 7.2.2 posted upstream 2026-08-30). This panel (`APP 0xAE11`) is explicitly covered by the patch but **no iMac18,3 has tested it yet** — this machine would be the first. Catch: only GNOME/Mutter can stitch the two tiles today; Hyprland can't (would show two side-by-side 2560×2880 outputs). Full record, mechanism, model matrix, debunked dead ends, and a test plan: [`notes/5k-display-investigation.md`](notes/5k-display-investigation.md). Tracked upstream: [`drm/amd#4455`](https://gitlab.freedesktop.org/drm/amd/-/issues/4455)
+- **Native 5K** — ✅ **SOLVED on this machine** (2026-09-02): genuine, seamless, genlocked 5120×2880 under Hyprland, first confirmed iMac18,3 — currently proven on a USB test clone; the main SSD still runs the 4K fallback until it's updated to kernel 7.2.2 and [`scripts/patch-imac5k-amdgpu.sh`](scripts/patch-imac5k-amdgpu.sh) is run (no second kernel needed). Patch stack + rules: [`patches/`](patches/) · full record: [`notes/5k-display-investigation.md`](notes/5k-display-investigation.md) · **handoff for the next session: [`notes/HANDOFF.md`](notes/HANDOFF.md)** · upstream (incl. this project's genlock fix): [`drm/amd#4455`](https://gitlab.freedesktop.org/drm/amd/-/issues/4455)
 - **Suspend/hibernate** — no fix short of custom ACPI/DSDT work
 - **OpenCore-internal boot entry** — not retested since the latest boot-config fixes
 
