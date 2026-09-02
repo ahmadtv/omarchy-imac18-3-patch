@@ -29,12 +29,12 @@ swaps it in (stock module backed up first). Re-run it after a kernel update.
 
 ## The rules
 
-- **RULE 1 — version gate.** The patch matches kernel **7.2.x source only**.
+- **RULE 1 — version gate.** The patch is verified against kernel **7.1.x and 7.2.x source** (same diff applies to both).
   The script refuses to run on any other series, because the amdgpu display
   code changes between kernel versions and a mis-applied patch means a broken
   GPU module. When Arch/Omarchy moves to 7.3+, the patch must be **re-ported
   by a human first** — re-running the script is not enough. (Check
-  `uname -r` starts with 7.2 before expecting anything.)
+  `uname -r` starts with 7.1 or 7.2 before expecting anything.)
 
 - **RULE 2 — test on the USB clone first.** Never run this for the first time
   on your only install. The project keeps a full bootable clone on a USB

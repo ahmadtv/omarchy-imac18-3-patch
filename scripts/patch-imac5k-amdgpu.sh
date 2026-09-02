@@ -15,7 +15,7 @@
 #   Restore the stock module any time with:  sudo ./patch-imac5k-amdgpu.sh --restore
 #
 # ── HONEST LIMITS — READ THESE ─────────────────────────────────────────────
-# * The patch is version-specific. It is written for kernel 7.2.x. On a kernel
+# * The patch is version-specific. It is verified for kernels 7.1.x-7.2.x. On a kernel
 #   whose amdgpu source differs enough (e.g. a future 7.3+), the patch will
 #   FAIL TO APPLY and this script aborts cleanly without touching anything.
 #   That case needs a human to re-port the patch — it is not a "just re-run" fix.
@@ -26,10 +26,10 @@
 # ───────────────────────────────────────────────────────────────────────────
 set -euo pipefail
 
-PATCH_KVER_SUPPORTED="7.2"     # the kernel series this patch targets
+PATCH_KVER_SUPPORTED="7.1 7.2"   # kernel series this patch is verified to apply to
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PATCH_FILE="${SCRIPT_DIR}/../patches/imac5k-amdgpu-7.2.2.patch"
-WORK="${HOME}/.cache/imac5k-amdgpu"
+WORK="${IMAC5K_WORK:-/home/${SUDO_USER:-$USER}/.cache/kernel-5k-build}"
 KREL="$(uname -r)"                        # e.g. 7.2.2-arch1-1
 KVER="${KREL%%-*}"                        # e.g. 7.2.2
 KSERIES="${KVER%.*}"                      # e.g. 7.2
@@ -59,9 +59,9 @@ fi
 # ── sanity / version gate ──────────────────────────────────────────────────
 [[ -f "$PATCH_FILE" ]] || die "patch not found: $PATCH_FILE"
 say "running kernel: ${KREL}  (source version ${KVER}, series ${KSERIES})"
-if [[ "$KSERIES" != "$PATCH_KVER_SUPPORTED" ]]; then
+if [[ " ${PATCH_KVER_SUPPORTED} " != *" ${KSERIES} "* ]]; then
 	cat >&2 <<EOF
-$(printf '\033[1;31mABORT:\033[0m') this patch targets kernel ${PATCH_KVER_SUPPORTED}.x but you are on ${KVER}.
+$(printf '\033[1;31mABORT:\033[0m') this patch is verified for kernel series ${PATCH_KVER_SUPPORTED} but you are on ${KVER}.
 It will not apply to a different amdgpu source and would produce a broken module.
 This needs the patch re-ported to ${KSERIES}.x first (a human step, not a re-run).
 Nothing was changed.
@@ -131,6 +131,9 @@ VM="$(modinfo -F vermagic "$BUILT" 2>/dev/null | awk '{print $1}')"
 AMDKO="$(find_amdgpu)" || die "stock amdgpu module not found under $MODDIR"
 BAK="${AMDKO}.stock-backup"
 [[ -f "$BAK" ]] || { say "backing up stock module -> $BAK"; cp "$AMDKO" "$BAK"; }
+
+say "stripping debug info (matches stock packaging)"
+strip --strip-debug "$BUILT"
 
 say "installing patched amdgpu module"
 case "$AMDKO" in
