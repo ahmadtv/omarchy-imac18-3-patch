@@ -42,7 +42,7 @@ die()  { printf '\033[1;31mERROR:\033[0m %s\n' "$*" >&2; exit 1; }
 [[ $EUID -eq 0 ]] || die "run with sudo: sudo $0 ${*:-}"
 
 # ── restore mode ───────────────────────────────────────────────────────────
-find_amdgpu() { find "$(dirname "$MODDIR")" -maxdepth 2 -name 'amdgpu.ko*' 2>/dev/null | head -1; }
+find_amdgpu() { find "$(dirname "$MODDIR")" -maxdepth 2 -name 'amdgpu.ko*' ! -name '*.stock-backup' 2>/dev/null | head -1; }
 if [[ "${1:-}" == "--restore" ]]; then
 	AMDKO="$(find_amdgpu)" || true
 	BAK="${AMDKO}.stock-backup"
@@ -51,7 +51,7 @@ if [[ "${1:-}" == "--restore" ]]; then
 	cp -v "$BAK" "$AMDKO"
 	depmod "$KREL"
 	say "rebuilding initramfs"
-	mkinitcpio -P
+	if command -v limine-mkinitcpio >/dev/null; then limine-mkinitcpio; else mkinitcpio -P; fi
 	say "done — reboot to run the stock module. (You may also want to remove amdgpu.tiled_stitch from your cmdline.)"
 	exit 0
 fi
@@ -151,7 +151,7 @@ if ! grep -q 'amdgpu.tiled_stitch=1' /etc/default/limine 2>/dev/null; then
 fi
 
 say "rebuilding initramfs (bakes the patched module in)"
-mkinitcpio -P
+if command -v limine-mkinitcpio >/dev/null; then limine-mkinitcpio; else mkinitcpio -P; fi
 
 # sync the Limine copies (this ESP has three — see the project README)
 if [[ -f /boot/limine.conf ]]; then
