@@ -1,175 +1,124 @@
-# Omarchy on a 2017 27" 5K iMac (iMac18,3)
+# iMac18,3 Patch
 
-External-SSD Omarchy install, dual-booting with macOS/OpenCore on the internal disk. The internal disk is never touched — every fix here lives on the external drive.
+**Makes a 2017 27" 5K iMac work properly under Linux — native 5K, working speakers, and a fan that actually spins up.**
 
-## Hardware
-
-- Apple iMac18,3 (27", 2017)
-- AMD Radeon Pro 575 (Polaris, `1002:67df`, DCE 11.2 — not the older iMac17,1/R9 M380, and not a newer DCN-generation card)
-- Omarchy on an external SSD, Linux 7.1.9, Hyprland 0.56.2
-
-## Status
-
-| | |
-|---|---|
-| Boot, display (3840×2160 fallback), audio, network, color | ✅ working |
-| Native 5120×2880 | 🚧 not supported yet (upstream `amdgpu` gap) |
-| Suspend / hibernate | ❌ broken, masked off |
-| macOS (external disk) as a VM | ✅ working — `macos-vm` |
-
-Run `./scripts/verify.sh` any time to check kernel cmdline, GPU driver, monitor state, Thunderbolt, and networking in one shot.
-
-Run `./scripts/imac-patcher` for the interactive patch manager (status, preflight, apply/restore the native-5K patch with the full safety rails — see `PLAN.md` Phase 5).
-
-## Settled
-
-### Boot cmdline
-
-The kernel command line lives in `/etc/default/limine`, **not** `/etc/kernel/cmdline`:
-
-```
-KERNEL_CMDLINE[default]="<your root/crypt/resume params> amdgpu.dc=1 amdgpu.exp_res_limit=1 amdgpu.runpm=0 video=eDP-1:3840x2160@60e quiet splash"
-```
-
-(Template: [`configs/limine.example`](configs/limine.example) — keep your own root/encryption/resume values, never copy another machine's.) Do **not** use the older iMac17,1-era workaround (`amdgpu.cik_support`, `radeon.cik_support`, `amdgpu.dc=0`) on this Polaris GPU — wrong hardware generation, will make things worse.
-
-Rebuild, then **always sync every copy** — this ESP has three separate `limine.conf` files plus a fallback UKI, and only one gets updated automatically. Skipping this is the single most common reason a fix silently doesn't apply:
+Apple's 2017 iMac hardware has several things stock Linux gets wrong or doesn't support at all. This repo is a patcher that fixes them, one command at a time, with every change reversible.
 
 ```bash
-sudo limine-mkinitcpio
-sudo cp /boot/limine.conf /boot/EFI/BOOT/limine.conf /boot/EFI/limine/limine.conf
-sudo cp /boot/EFI/Linux/omarchy_linux.efi /boot/EFI/BOOT/BOOTX64.EFI
+git clone https://github.com/ahmadtv/omarchy-imac18-3-patch
+cd omarchy-imac18-3-patch
+./scripts/imac-patcher
 ```
 
-`default_entry` should target by name, not a numeric index — the index can silently drift to point at an old snapshot as new snapshots accumulate:
+The patcher shows you what's applied, what isn't, and lets you pick. Nothing is applied without asking.
 
-```
-default_entry: Omarchy/linux
-```
+---
 
-### Boot picker naming
+## What it fixes
 
-Top-level firmware picker (hold Option at power-on) needs a named EFI entry and a FAT volume label, or it shows a blank/"NO NAME" icon:
+| | Problem on stock Linux | Status |
+|---|---|---|
+| **Display** | Panel is two 2560×2880 tiles; stock `amdgpu` drives one and stretches it. No native 5K. | ✅ Native 5120×2880, genlocked |
+| **Fans** | The SMC never ramps under Linux. Measured: **85°C CPU with the fan idling at its 1200 RPM minimum** (2700 available). | ✅ Fan curve daemon |
+| **Speakers / mic** | CS8409 codec: kernel finds no speaker output at all. Silent machine. | ✅ Hardware-gated DKMS driver |
+| **Speaker tone** | Codec does zero DSP; macOS's warmth is all software EQ that Linux lacks. | ✅ PipeWire EQ profile |
+| **Colour** | Wide-gamut (P3) panel rendered as sRGB — everything oversaturated. | ✅ Correct gamut mapping |
+| **Suspend** | Hard-hangs the machine every time (Apple firmware ACPI issue). | ⚠️ Masked off — see below |
+| **Thunderbolt / 10GbE** | Adapter detected but never authorised. | ✅ Persistent enrolment |
+
+---
+
+## The headline: native 5K
+
+The internal panel is a genuine dual-tile display — two 2560×2880 halves on separate physical links, which Apple's firmware leaves half-asleep for non-Apple operating systems. Stock `amdgpu` only ever lights one tile and lets the panel stretch it.
+
+The patch stack fixes this in three layers, all inside the `amdgpu` module:
+
+1. **Wake** — a vendor DPCD write (`0x4F1`) powers up the dormant second link
+2. **Stitch** — both tiles are presented to userspace as one 5120×2880 output, so compositors work unmodified
+3. **Genlock** — per-frame CRTC sync so the two halves scan in lockstep (mainline has this as a literal `TODO`; filling it is this project's own contribution, submitted upstream)
+
+Install it without a second kernel — only the `amdgpu` module is rebuilt for your running kernel, with the stock module backed up:
 
 ```bash
-sudo efibootmgr --create --disk /dev/sdX --part 1 --label "Omarchy" --loader '\EFI\limine\limine_x64.efi'
-sudo fatlabel /dev/sdX1 OMARCHY
+./scripts/imac-patcher            # menu-driven
+./scripts/imac-patcher --apply-5k # or direct
+./scripts/imac-patcher --restore-5k   # full undo, any time
 ```
 
-OpenCore's own internal menu is a *separate* picker with its own auto-detection — it doesn't read either of the above. Fix it the same way, with files on this same external ESP (no internal-disk edits needed):
+**Read [`patches/README.md`](patches/README.md) first.** The patch is verified against kernel **7.1.x and 7.2.x only** and the installer refuses anything else, because a mis-applied patch means a broken GPU module.
+
+---
+
+## The one nobody expects: your fans aren't working
+
+This machine's SMC does not ramp the fan under Linux. Not "ramps late" — it sits at its 1200 RPM minimum no matter how hot the CPU gets. Measured on a stock system: **sustained 85°C**, above the chip's own 80°C threshold, fan idling, 2700 RPM available and unused.
+
+`imac-fand` reads CPU/GPU/NVMe temperatures and drives the fan on a conservative curve — silent at idle, ramping well before the danger zone.
 
 ```bash
-sudo cp omarchy.icns /boot/EFI/Linux/omarchy_linux.efi.icns
-printf 'OMARCHY' | sudo tee /boot/EFI/Linux/.contentDetails
+sudo install -m755 scripts/imac-fand /usr/local/bin/imac-fand
+sudo install -m644 configs/imac-fand.service /etc/systemd/system/
+sudo systemctl enable --now imac-fand
 ```
 
-### Display
+It never commands below the SMC's own minimum, clamps to its maximum, fails *safe* (full speed) if it can't read a sensor, and hands control back to the SMC whenever it stops.
 
-The panel is a tiled display — two 2560×2880 links that combine into 5120×2880 natively. `amdgpu` doesn't yet link-train and combine the second link, so the desktop looks stretched unless a supported single-stream mode is forced. The `video=` parameter above (3840×2160) is that fallback — correct proportions, not native resolution.
+---
 
-### Color
+## Audio
 
-The panel is wide-gamut (Display P3); Hyprland's default `srgb` color mode doesn't gamut-map for it, so everything looks oversaturated. Fixed in `~/.config/hypr/monitors.lua`:
-
-```lua
-hl.monitor({ output = "", mode = "preferred", position = "auto", scale = omarchy_monitor_scale, cm = "dp3" })
-```
-
-### Audio (CS8409 codec)
-
-The in-kernel driver doesn't recognize a real speaker output on this board. Fix is a hardware-gated, model-specific DKMS driver:
+The CS8409 codec needs an out-of-tree driver — the in-kernel one doesn't recognise a speaker output on this board at all:
 
 ```bash
-git clone https://github.com/jackdanyell/imac18-3-cs8409-linux-audio.git
+git clone https://github.com/jackdanyell/imac18-3-cs8409-linux-audio
 cd imac18-3-cs8409-linux-audio && sudo ./install-imac18-3.sh && sudo reboot
 ```
 
-### Speaker tone (bass/treble)
+Then, optionally, the tone fix. The codec and amplifier do no processing whatsoever — macOS's fuller sound is entirely software EQ, which Linux has no equivalent of. [`configs/eq6.conf`](configs/eq6.conf) is a PipeWire filter-chain (bass shelf, corrective bands, and a clipping clamp) → copy to `~/.config/pipewire/filter-chain.conf.d/`.
 
-This codec+amp path does zero processing (confirmed by the driver author) — macOS's fuller sound comes entirely from its own software EQ, which Linux has no equivalent of by default. Fixed with a PipeWire filter-chain EQ (native module, nothing extra installed): low-shelf bass boost, a couple of small corrective bands, and a `clamp` at the end so the boost can't cause digital clipping on bass-heavy audio. Template: [`configs/eq6.conf`](configs/eq6.conf) → copy to `~/.config/pipewire/filter-chain.conf.d/eq6.conf`. Creates a selectable "iMac Speaker EQ" output device; select it (or set as default) to hear it.
+---
 
-After enabling it, also re-check `wpctl get-volume` on the underlying hardware sink (`Built-in Audio Analog Stereo`) — it keeps its own independent volume, and if it's left at an old lower value your volume slider will silently cap out below 100%.
+## Colour
 
-### OWC Thunderbolt 10GbE
+The panel is wide-gamut Display P3. Hyprland's default `srgb` mode doesn't gamut-map for it, so everything looks oversaturated. In `~/.config/hypr/monitors.lua`:
 
-Shows up in `boltctl` but stays unauthorized until enrolled:
-
-```bash
-boltctl enroll <uuid-from-boltctl-list> --policy auto
+```lua
+hl.monitor({ output = "", mode = "preferred", position = "auto", scale = 2, cm = "dp3" })
 ```
 
-### Wi-Fi / Ethernet conflict
+---
 
-Running both on the same subnet, NetworkManager can withhold the wired default route in favor of Wi-Fi. Disable Wi-Fi to keep Ethernet primary:
+## Suspend — read this before you try it
 
-```bash
-nmcli radio wifi off
-```
+Suspend and hibernate **hard-hang this machine, every time**. This is an Apple firmware ACPI issue, not something a kernel parameter fixes; sleep mode, the display override, and GPU power states were each ruled out by testing. Recovery is a hard power-cycle.
 
-### Suspend / hibernate
-
-Both hard-hang the machine every time — an Apple firmware ACPI S3 issue, not fixable via kernel parameters. Masked off rather than left to fail on accidental use:
+The patcher masks the sleep targets so nothing triggers them by accident:
 
 ```bash
 sudo systemctl mask suspend.target hibernate.target hybrid-sleep.target suspend-then-hibernate.target
 ```
 
-### macOS VM (external disk)
+---
 
-The macOS 15.7.4 install on the external My Passport runs as a QEMU/KVM guest under
-Omarchy, so it no longer needs a reboot for everyday use. Verified to the login screen
-2026-09-04.
+## Known rough edges
 
-```bash
-macos-vm            # protected: physical disk read-only, guest writes go to an overlay
-macos-vm --direct   # writes to the real disk, so changes are there when it boots natively
-macos-vm --status
-```
+- **Boot artifacts with 5K active** — a skewed Apple logo on *warm* reboots (the patch wakes the second tile and never puts it back to sleep, so Apple's firmware draws into an unexpected state), and a half-black LUKS prompt (the 5120 mode goes live ~130 ms before the second tile does). Both root-caused; fixes planned.
+- **Video encode (VCE)** hangs the GPU on certain transcodes, taking the session down. Under investigation.
+- **YouTube 4K is CPU-decoded** — Polaris has no VP9/AV1 silicon. Hardware limit, not fixable.
 
-Also in the app launcher as **macOS (external disk)**. Launcher at
-`~/.local/bin/macos-vm`; image, overlay and full notes in `~/.local/share/macos-vm/`,
-kept out of git because the VM's OpenCore carries this machine's SMBIOS identity.
+---
 
-The VM needs its own OpenCore. The ESP copy is an OpenCore Legacy Patcher 1.0.4 build
-for this hardware: reused unchanged it injects the wifi and I210 ethernet kexts into a
-machine that has neither, and its `OpenLinuxBoot` scans Omarchy's own boot entries. The
-VM copy drops those, adds `VirtualSMC` (a VM has no physical SMC), keeps the OCLP
-pieces the unsupported-model boot depends on (`Lilu`, `RestrictEvents`, `AMFIPass`,
-`csr-active-config`, `revpatch=sbvmm`), and injects the real SMBIOS explicitly — read
-from this machine's DMI — so Apple services see one consistent machine either way.
-Regenerate it with `~/.local/share/macos-vm/build-vm-efi.py`.
+## Requirements
 
-Two traps worth remembering:
+- Apple iMac18,3 (2017 27" 5K). The patcher refuses to run on other hardware.
+- Kernel 7.1.x or 7.2.x for the 5K patch (everything else is version-independent)
+- Omarchy is what this is developed and tested against. The audio, EQ, colour and fan pieces are largely distribution-agnostic; the boot-related pieces assume Limine.
 
-- OpenCore resolves `config.plist`, `Kexts` and `Drivers` **relative to its own
-  directory**. The Mac boots `EFI/OC/OpenCore.efi` through a firmware NVRAM entry,
-  which OVMF has no equivalent of, so the VM boots the removable-media path — and that
-  path must be self-contained. Everything lives in `EFI/BOOT/`. Splitting it across
-  `EFI/BOOT` + `EFI/OC` fails with `OC: Failed to load configuration!`.
-- The ESP-root `boot.efi` is Apple's hardware-test loader (TAEFI 1.0.30r5), not an
-  OpenCore launcher. Booting it lands in Apple diagnostics and dies in a KVM emulation
-  failure at `RIP=0xb0000`.
+## Safety
 
-Both external drives are "My Passport", so the launcher matches the macOS disk by
-serial, never by `/dev/sdX`, and refuses to start while any of its partitions is
-mounted here — a host mount plus guest writes to one block device corrupts the
-filesystem. `/etc/udev/rules.d/70-macos-vm-disk.rules` grants the ACL, scoped to that
-one serial, so QEMU need not run as root.
+Every patch backs up what it replaces and can be reversed. Boot-related changes print their recovery steps *before* running. If a boot change ever goes wrong: boot the Limine snapshot entry, restore `/etc/default/limine.backup`, re-run `limine-mkinitcpio`, reboot.
 
-No GPU acceleration: IOMMU is off, and a single-GPU iMac could not do passthrough
-anyway. Fine for apps and files, not for GPU-heavy work. 3 vCPU of the 4 cores, no
-audio device, and about 6 minutes to boot over USB.
+## Credits
 
-## Still open
-
-- **Native 5K** — ✅ **SOLVED on this machine** (2026-09-02): genuine, seamless, genlocked 5120×2880 under Hyprland, first confirmed iMac18,3 — currently proven on a USB test clone; the main SSD still runs the 4K fallback until it's updated to kernel 7.2.2 and [`scripts/patch-imac5k-amdgpu.sh`](scripts/patch-imac5k-amdgpu.sh) is run (no second kernel needed). Patch stack + rules: [`patches/`](patches/) · full record: [`notes/5k-display-investigation.md`](notes/5k-display-investigation.md) · **handoff for the next session: [`notes/HANDOFF.md`](notes/HANDOFF.md)** · upstream (incl. this project's genlock fix): [`drm/amd#4455`](https://gitlab.freedesktop.org/drm/amd/-/issues/4455)
-- **Suspend/hibernate** — no fix short of custom ACPI/DSDT work
-- **OpenCore-internal boot entry** — not retested since the latest boot-config fixes
-
-## Recovery
-
-If a boot change breaks something: boot the Limine snapshot entry → restore `/etc/default/limine.backup` → `sudo limine-mkinitcpio` → re-sync (above) → reboot. Never mount or edit the internal macOS/OpenCore disk while troubleshooting this external install.
-
-## Note
-
-Multiple assistants/agents can end up editing this machine's boot files concurrently. If a fix seems to silently un-apply, check for stray `.disabled` files under `/boot/EFI/` before assuming the fix itself is wrong.
+Native 5K builds on community work from [drm/amd#4455](https://gitlab.freedesktop.org/drm/amd/-/issues/4455) — mforce2 (tile wake), erik2 (stitch), taprobane99 (7.2.2 port), with guidance from AMD's Alex Deucher. The genlock fix and the first verified iMac18,3 result came from this project. Audio driver by [jackdanyell](https://github.com/jackdanyell/imac18-3-cs8409-linux-audio).
