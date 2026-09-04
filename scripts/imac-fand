@@ -22,12 +22,18 @@ set -uo pipefail
 SMC=/sys/devices/platform/applesmc.768
 POLL_SECONDS="${IMAC_FAND_POLL:-5}"
 
-# Curve: "temp_C:rpm" — linear ramp between points, clamped at both ends.
-# Tuned conservatively: silent at idle, audibly ramping before the 80 °C mark.
-CURVE_TEMPS=(50 60 70 80 90)
-CURVE_RPMS=(1200 1500 1900 2400 2700)
+# Curve: linear ramp between points, clamped at both ends.
+#
+# Deliberately FLAT until it is genuinely warm. This machine idles and does
+# ordinary work in the 55-70 C range, which is well inside spec (the chip
+# reports high=80 C, crit=100 C) and needs no extra airflow. Ramping there
+# only produces noise. The problem this daemon exists to solve is the fan
+# staying at its 1200 RPM minimum at 85 C under sustained load - so that is
+# where the curve does its work.
+CURVE_TEMPS=(75 82 88 95)
+CURVE_RPMS=(1200 1700 2200 2700)
 
-HYSTERESIS_C="${IMAC_FAND_HYSTERESIS:-3}"   # only re-adjust after this much change
+HYSTERESIS_C="${IMAC_FAND_HYSTERESIS:-4}"   # only re-adjust after this much change
 
 log() { printf '%s imac-fand: %s\n' "$(date +%T)" "$*"; }
 
