@@ -1,5 +1,7 @@
 # iMac18,3 Patch
 
+![iMac18,3 Patch — native 5120×2880, working speakers and mic, true wide-gamut colour](.github/social-preview.png)
+
 **Makes a 2017 27" 5K iMac work properly under Linux — native 5120×2880, working speakers, and correct colour.**
 
 Apple's 2017 iMac hardware has several things stock Linux gets wrong or doesn't support at all. This repo is a patcher that fixes them, one command at a time, with every change reversible.
