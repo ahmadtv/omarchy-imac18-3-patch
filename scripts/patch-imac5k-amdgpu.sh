@@ -29,6 +29,8 @@ set -euo pipefail
 PATCH_KVER_SUPPORTED="7.1 7.2"   # kernel series this patch is verified to apply to
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PATCH_FILE="${SCRIPT_DIR}/../patches/imac5k-amdgpu-7.2.2.patch"
+# Applied in order, on top of PATCH_FILE. Each must apply cleanly or we abort.
+EXTRA_PATCHES=("${SCRIPT_DIR}/../patches/5k-boot-artifacts.patch")
 WORK="${IMAC5K_WORK:-/home/${SUDO_USER:-$USER}/.cache/kernel-5k-build}"
 KREL="$(uname -r)"                        # e.g. 7.2.2-arch1-1
 KVER="${KREL%%-*}"                        # e.g. 7.2.2
@@ -103,14 +105,35 @@ BUILTREL="$(make -s kernelrelease)"
 say "kernelrelease matches running kernel: $BUILTREL"
 
 # ── apply the 5K patch stack (idempotent: skip if already applied) ─────────
-if patch -p1 --dry-run --force < "$PATCH_FILE" >/dev/null 2>&1; then
-	say "applying iMac 5K patch stack"
-	patch -p1 < "$PATCH_FILE"
-elif patch -p1 -R --dry-run --force < "$PATCH_FILE" >/dev/null 2>&1; then
-	say "patch already applied — reusing"
-else
-	die "patch did not apply cleanly to ${KVER} source. It likely needs re-porting for this kernel. Nothing installed."
-fi
+# Idempotency is tracked with a stamp per patch rather than a reverse-apply
+# dry-run: once two patches touch the same context, reversing the first one no
+# longer matches and a correctly-patched tree looks unpatched. The stamp records
+# the patch content hash, so editing a patch re-applies it on the next run.
+STAMPDIR=".imac5k-applied"
+apply_patch() {          # apply_patch <file> <label>
+	local f="$1" label="$2" sum stamp
+	[[ -f "$f" ]] || die "patch not found: $f"
+	sum="$(sha256sum "$f" | cut -c1-16)"
+	stamp="${STAMPDIR}/$(basename "$f").${sum}"
+	mkdir -p "$STAMPDIR"
+
+	if [[ -f "$stamp" ]]; then
+		say "${label} already applied — reusing"
+		return
+	fi
+	if patch -p1 --dry-run --force < "$f" >/dev/null 2>&1; then
+		say "applying ${label}"
+		patch -p1 < "$f"
+		touch "$stamp"
+		return
+	fi
+	die "${label} did not apply cleanly to ${KVER} source. It likely needs re-porting for this kernel. Nothing installed. If this tree was patched by an older version of this script, delete it and re-run:  rm -rf ${WORK}/${SRC}"
+}
+
+apply_patch "$PATCH_FILE" "iMac 5K patch stack"
+for extra in "${EXTRA_PATCHES[@]}"; do
+	apply_patch "$extra" "$(basename "$extra")"
+done
 
 # ── build just the amdgpu module ───────────────────────────────────────────
 say "preparing build (fast)"
@@ -158,6 +181,23 @@ if [[ -f /boot/limine.conf ]]; then
 	cp -f /boot/limine.conf /boot/EFI/BOOT/limine.conf 2>/dev/null || true
 	cp -f /boot/limine.conf /boot/EFI/limine/limine.conf 2>/dev/null || true
 fi
+
+# Refresh the fallback boot path too. On this machine \EFI\BOOT\BOOTX64.EFI is a
+# COPY of the UKI (an earlier bypass of Limine), not the Limine binary — so if
+# the firmware takes the fallback path it boots whatever UKI was current when
+# that copy was made. Leaving it stale means booting the previous initramfs,
+# with the previous amdgpu module baked in, and wondering why nothing changed.
+# Only refresh it when it really is a UKI copy; never clobber a Limine binary.
+UKI=/boot/EFI/Linux/omarchy_linux.efi
+FALLBACK=/boot/EFI/BOOT/BOOTX64.EFI
+if [[ -f "$UKI" && -f "$FALLBACK" ]] && \
+   objcopy -O binary --only-section=.cmdline "$FALLBACK" /dev/null 2>/dev/null; then
+	if ! cmp -s "$UKI" "$FALLBACK"; then
+		say "refreshing fallback boot path $FALLBACK from the new UKI"
+		cp -f "$UKI" "$FALLBACK"
+	fi
+fi
+sync
 
 cat <<EOF
 
