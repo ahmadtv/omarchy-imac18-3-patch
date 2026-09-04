@@ -48,6 +48,14 @@ Install it without a second kernel — only the `amdgpu` module is rebuilt for y
 
 **Read [`patches/README.md`](patches/README.md) first.** The patch is verified against kernel **7.1.x and 7.2.x only** and the installer refuses anything else, because a mis-applied patch means a broken GPU module.
 
+You don't need to supply any files — the patch ships in this repo, and the installer downloads the matching kernel source from kernel.org itself. What you do need:
+
+- **Build tools and kernel headers** — `base-devel bc pahole linux-headers`. The patcher checks for these up front and offers to install anything missing, rather than failing part-way through a compile.
+- **About 8 GB of disk** for the kernel source tree.
+- **20–40 minutes** for the first build. Re-runs (e.g. after a kernel update) reuse the tree and are much faster.
+
+Re-run it after any kernel update — the patched module is built for one specific kernel version and a new kernel reverts you to stock (which the patcher will report as `partial`).
+
 ---
 
 ## The one nobody expects: your fans aren't working

@@ -190,15 +190,60 @@ mod_5k_detect() {
     elif (( swapped || conf || live )); then echo partial
     else echo not-applied; fi
 }
-mod_5k_apply() {
+mod_5k_preflight() {
+    local ok=1 missing=() pkgs=()
     if [[ " $SUPPORTED_5K_SERIES " != *" $KSERIES "* ]]; then
         warn "kernel ${KREL}: the 5K patch is verified only for series ${SUPPORTED_5K_SERIES}."
-        warn "It needs re-porting by hand first (see patches/README.md RULE 1). Nothing changed."
-        return 1
+        warn "It needs re-porting by hand first (see patches/README.md RULE 1)."
+        ok=0
+    else
+        say "kernel ${KREL} — supported"
     fi
-    [[ -e "/usr/lib/modules/${KREL}/build/Module.symvers" ]] || { warn "linux-headers missing: sudo pacman -S linux-headers"; return 1; }
-    printf '\033[1mRestore at any time:\033[0m  %s --remove 5k\n\n' "$0"
-    confirm "Build and install the patched amdgpu module? (~20-40 min on a cold build)" || return 1
+    # Build dependencies. The underlying installer only checks gcc, so a missing
+    # bc/pahole surfaces as a confusing failure 20 minutes into a compile.
+    local t
+    for t in gcc make ld bc pahole flex bison zstd curl tar; do
+        command -v "$t" >/dev/null || missing+=("$t")
+    done
+    if (( ${#missing[@]} )); then
+        warn "missing build tools: ${missing[*]}"
+        for t in "${missing[@]}"; do case $t in
+            gcc|make|ld|flex|bison) pkgs+=(base-devel) ;;
+            *)                      pkgs+=("$t") ;;
+        esac; done
+        # de-duplicate
+        mapfile -t pkgs < <(printf '%s\n' "${pkgs[@]}" | sort -u)
+        say "install with:  sudo pacman -S --needed ${pkgs[*]}"
+        if confirm "Install them now?"; then
+            sudo pacman -S --needed --noconfirm "${pkgs[@]}" || ok=0
+        else ok=0; fi
+    else
+        say "build tools present"
+    fi
+    if [[ -e "/usr/lib/modules/${KREL}/build/Module.symvers" ]]; then
+        say "kernel headers present"
+    else
+        warn "linux-headers missing for ${KREL}"
+        if confirm "Install linux-headers now?"; then
+            sudo pacman -S --needed --noconfirm linux-headers || ok=0
+        else ok=0; fi
+    fi
+    local free_gb
+    free_gb=$(df --output=avail -BG "$HOME" 2>/dev/null | tail -1 | tr -dc 0-9)
+    if (( ${free_gb:-0} >= 8 )); then say "disk space: ${free_gb}G free"
+    else warn "only ${free_gb:-?}G free — the kernel source tree needs roughly 8G"; ok=0; fi
+    # A pre-populated tree makes this minutes instead of tens of minutes.
+    if [[ -d "${HOME}/.cache/kernel-5k-build/linux-${KREL%%-*}" ]]; then
+        say "kernel source already prepared — build will be quick"
+    else
+        say "kernel source will be downloaded (~150M) and built: expect 20-40 min"
+    fi
+    return $(( 1 - ok ))
+}
+mod_5k_apply() {
+    mod_5k_preflight || { warn "preflight failed — nothing was changed."; return 1; }
+    printf '\n\033[1mRestore at any time:\033[0m  %s --remove 5k\n\n' "$0"
+    confirm "Build and install the patched amdgpu module?" || return 1
     local log="$LOGDIR/apply-5k-$(date +%Y%m%d-%H%M%S).log"
     sudo "$INSTALLER_5K" 2>&1 | tee "$log" || return 1
     if grep -q "$VIDEO_4K" "$LIMINE_DEFAULT" 2>/dev/null && confirm "Remove the 4K fallback parameter (required for real 5K)?"; then
