@@ -1,6 +1,6 @@
 # iMac18,3 Patch
 
-**Makes a 2017 27" 5K iMac work properly under Linux — native 5K, working speakers, and a fan that actually spins up.**
+**Makes a 2017 27" 5K iMac work properly under Linux — native 5120×2880, working speakers, and correct colour.**
 
 Apple's 2017 iMac hardware has several things stock Linux gets wrong or doesn't support at all. This repo is a patcher that fixes them, one command at a time, with every change reversible.
 
@@ -19,7 +19,6 @@ The patcher shows you what's applied, what isn't, and lets you pick. Nothing is 
 | | Problem on stock Linux | Status |
 |---|---|---|
 | **Display** | Panel is two 2560×2880 tiles; stock `amdgpu` drives one and stretches it. No native 5K. | ✅ Native 5120×2880, genlocked |
-| **Fans** | The SMC never ramps under Linux. Measured: **85°C CPU with the fan idling at its 1200 RPM minimum** (2700 available). | ✅ Fan curve daemon |
 | **Speakers / mic** | CS8409 codec: kernel finds no speaker output at all. Silent machine. | ✅ Hardware-gated DKMS driver |
 | **Speaker tone** | Codec does zero DSP; macOS's warmth is all software EQ that Linux lacks. | ✅ PipeWire EQ profile |
 | **Colour** | Wide-gamut (P3) panel rendered as sRGB — everything oversaturated. | ✅ Correct gamut mapping |
@@ -42,8 +41,8 @@ Install it without a second kernel — only the `amdgpu` module is rebuilt for y
 
 ```bash
 ./scripts/imac-patcher            # menu-driven
-./scripts/imac-patcher --apply-5k # or direct
-./scripts/imac-patcher --restore-5k   # full undo, any time
+./scripts/imac-patcher --apply 5k  # or direct
+./scripts/imac-patcher --remove 5k # full undo, any time
 ```
 
 **Read [`patches/README.md`](patches/README.md) first.** The patch is verified against kernel **7.1.x and 7.2.x only** and the installer refuses anything else, because a mis-applied patch means a broken GPU module.
@@ -55,22 +54,6 @@ You don't need to supply any files — the patch ships in this repo, and the ins
 - **20–40 minutes** for the first build. Re-runs (e.g. after a kernel update) reuse the tree and are much faster.
 
 Re-run it after any kernel update — the patched module is built for one specific kernel version and a new kernel reverts you to stock (which the patcher will report as `partial`).
-
----
-
-## The one nobody expects: your fans aren't working
-
-This machine's SMC does not ramp the fan under Linux. Not "ramps late" — it sits at its 1200 RPM minimum no matter how hot the CPU gets. Measured on a stock system: **sustained 85°C**, above the chip's own 80°C threshold, fan idling, 2700 RPM available and unused.
-
-`imac-fand` reads CPU/GPU/NVMe temperatures and drives the fan on a conservative curve — silent at idle, ramping well before the danger zone.
-
-```bash
-sudo install -m755 scripts/imac-fand /usr/local/bin/imac-fand
-sudo install -m644 configs/imac-fand.service /etc/systemd/system/
-sudo systemctl enable --now imac-fand
-```
-
-It never commands below the SMC's own minimum, clamps to its maximum, fails *safe* (full speed) if it can't read a sensor, and hands control back to the SMC whenever it stops.
 
 ---
 
@@ -121,7 +104,7 @@ sudo systemctl mask suspend.target hibernate.target hybrid-sleep.target suspend-
 
 - Apple iMac18,3 (2017 27" 5K). The patcher refuses to run on other hardware.
 - Kernel 7.1.x or 7.2.x for the 5K patch (everything else is version-independent)
-- Omarchy is what this is developed and tested against. The audio, EQ, colour and fan pieces are largely distribution-agnostic; the boot-related pieces assume Limine.
+- Omarchy is what this is developed and tested against. The audio, EQ and colour pieces are largely distribution-agnostic; the boot-related pieces assume Limine.
 
 ## Safety
 
