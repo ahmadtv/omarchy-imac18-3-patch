@@ -1,0 +1,126 @@
+#!/usr/bin/env bash
+#
+# imac-fand — fan curve daemon for the iMac18,3 under Linux.
+#
+# Why this exists: on this machine the SMC does NOT ramp the fan on its own
+# under Linux. Measured on a stock system: CPU sustained at 85 °C (the chip's
+# own "high" threshold is 80 °C) while the fan sat at 1200 RPM — its absolute
+# minimum — with max being 2700 RPM. macOS ramps well before that point.
+#
+# This daemon reads the hottest relevant sensor and drives applesmc's fan
+# control directly.
+#
+# Safety design:
+#   * never commands below the SMC's own reported minimum
+#   * clamps to the SMC's reported maximum
+#   * hands control back to the SMC (manual=0) on clean exit
+#   * hysteresis so it doesn't oscillate
+#   * if a sensor read fails, it fails SAFE (commands maximum, not minimum)
+#
+set -uo pipefail
+
+SMC=/sys/devices/platform/applesmc.768
+POLL_SECONDS="${IMAC_FAND_POLL:-5}"
+
+# Curve: "temp_C:rpm" — linear ramp between points, clamped at both ends.
+# Tuned conservatively: silent at idle, audibly ramping before the 80 °C mark.
+CURVE_TEMPS=(50 60 70 80 90)
+CURVE_RPMS=(1200 1500 1900 2400 2700)
+
+HYSTERESIS_C="${IMAC_FAND_HYSTERESIS:-3}"   # only re-adjust after this much change
+
+log() { printf '%s imac-fand: %s\n' "$(date +%T)" "$*"; }
+
+[[ -d $SMC ]] || { log "applesmc not present at $SMC — is this an Apple machine?"; exit 1; }
+[[ -w $SMC/fan1_manual ]] || { log "cannot write $SMC/fan1_manual — run as root"; exit 1; }
+
+FAN_MIN=$(cat "$SMC/fan1_min" 2>/dev/null || echo 1200)
+FAN_MAX=$(cat "$SMC/fan1_max" 2>/dev/null || echo 2700)
+log "fan range from SMC: ${FAN_MIN}–${FAN_MAX} RPM; poll ${POLL_SECONDS}s"
+
+_restored=0
+restore_smc() {
+    (( _restored )) && return
+    _restored=1
+    log "restoring SMC automatic fan control"
+    echo 0 > "$SMC/fan1_manual" 2>/dev/null || true
+}
+trap restore_smc EXIT INT TERM
+
+# Resolve the hwmon nodes we actually care about, by driver name. Reading every
+# hwmon input is unsafe here: applesmc exposes ~90 keys, several of which report
+# junk (-127 °C, and others that can read implausibly high) and would drive the
+# fan on noise. CPU package / GPU edge / NVMe composite are the meaningful ones.
+declare -a TEMP_FILES=()
+discover_sensors() {
+    TEMP_FILES=()
+    local h name
+    for h in /sys/class/hwmon/hwmon*; do
+        name=$(cat "$h/name" 2>/dev/null) || continue
+        case "$name" in
+            coretemp|amdgpu|nvme)
+                [[ -r $h/temp1_input ]] && TEMP_FILES+=("$h/temp1_input") ;;
+        esac
+    done
+    log "monitoring: ${TEMP_FILES[*]:-none found}"
+}
+
+# hottest of the monitored sensors. Returns integer °C, or 0 if none readable.
+read_hottest() {
+    local hottest=0 t f
+    for f in "${TEMP_FILES[@]}"; do
+        [[ -r $f ]] || continue
+        t=$(<"$f") || continue
+        t=$(( t / 1000 ))
+        (( t > 0 && t < 125 )) || continue
+        (( t > hottest )) && hottest=$t
+    done
+    echo "$hottest"
+}
+
+rpm_for_temp() {  # linear interpolation across the curve
+    local t=$1 i n
+    n=${#CURVE_TEMPS[@]}
+    (( t <= CURVE_TEMPS[0] )) && { echo "${CURVE_RPMS[0]}"; return; }
+    (( t >= CURVE_TEMPS[n-1] )) && { echo "${CURVE_RPMS[n-1]}"; return; }
+    for (( i = 0; i < n - 1; i++ )); do
+        if (( t >= CURVE_TEMPS[i] && t < CURVE_TEMPS[i+1] )); then
+            local t0=${CURVE_TEMPS[i]}   t1=${CURVE_TEMPS[i+1]}
+            local r0=${CURVE_RPMS[i]}    r1=${CURVE_RPMS[i+1]}
+            echo $(( r0 + (t - t0) * (r1 - r0) / (t1 - t0) ))
+            return
+        fi
+    done
+    echo "${CURVE_RPMS[n-1]}"
+}
+
+discover_sensors
+(( ${#TEMP_FILES[@]} > 0 )) || { log "no usable temperature sensors found — refusing to take fan control"; exit 1; }
+
+echo 1 > "$SMC/fan1_manual" || { log "failed to enter manual fan mode"; exit 1; }
+log "manual fan control engaged"
+
+last_temp=-999
+while true; do
+    temp=$(read_hottest)
+    if (( temp <= 0 )); then
+        # fail SAFE: could not read any sensor -> full cooling, keep trying
+        log "WARNING: no readable sensor — commanding maximum ${FAN_MAX} RPM"
+        echo "$FAN_MAX" > "$SMC/fan1_output" 2>/dev/null || true
+        sleep "$POLL_SECONDS"; continue
+    fi
+
+    delta=$(( temp > last_temp ? temp - last_temp : last_temp - temp ))
+    if (( delta >= HYSTERESIS_C )); then
+        rpm=$(rpm_for_temp "$temp")
+        (( rpm < FAN_MIN )) && rpm=$FAN_MIN
+        (( rpm > FAN_MAX )) && rpm=$FAN_MAX
+        if echo "$rpm" > "$SMC/fan1_output" 2>/dev/null; then
+            log "temp ${temp}°C -> fan ${rpm} RPM"
+            last_temp=$temp
+        else
+            log "WARNING: failed writing fan1_output"
+        fi
+    fi
+    sleep "$POLL_SECONDS"
+done
