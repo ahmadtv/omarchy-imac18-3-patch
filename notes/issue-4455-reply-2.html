@@ -1,0 +1,46 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Reply to taprobane99 — copy this</title>
+<style>
+  body{font:16px/1.6 system-ui,-apple-system,Segoe UI,sans-serif;max-width:760px;margin:2rem auto;padding:0 1rem;color:#1a1a1a;background:#fff}
+  code{background:#f0f0f0;padding:.1em .3em;border-radius:3px;font-family:ui-monospace,Consolas,monospace;font-size:.9em}
+  pre{background:#f5f5f5;border:1px solid #e0e0e0;border-radius:5px;padding:.8rem 1rem;overflow-x:auto}
+  pre code{background:none;padding:0}
+  .banner{background:#fff8e1;border:1px solid #ffe082;border-radius:6px;padding:.6rem 1rem;margin-bottom:1.4rem;font-size:.9rem}
+  ol{padding-left:1.4rem}
+  li{margin:.35rem 0}
+  .sig{color:#666;margin-top:1.5rem}
+  a{color:#0b5fff}
+</style></head>
+<body>
+<div class="banner">📋 Select everything <strong>below this box</strong> (from "@taprobane99 Great questions" down to "— Ahmad"), copy, and paste into the GitLab reply box.</div>
+
+<p><strong>@taprobane99</strong> Great questions — clarifying exactly what I ran, because my setup differs from yours in one important way: I'm on Hyprland (wlroots), which has no two-tile support at all. So I couldn't run your patch the way you do on GNOME (two outputs, Mutter stitching). My stack is:</p>
+
+<ol>
+<li>Your <code>5k-imac-7.2.2.patch</code> as the base (wake + tile-pair wiring) — unmodified</li>
+<li>erik2's two "tiled stitch" commits from his fork (<code>pro1-apple5k-tiled-stitch</code>: <code>b514ebd</code> + <code>2fe1cfd</code>), hand-ported onto your 7.2.2 base (4 rejected hunks) — presents the pair as ONE 5120×2880 output so any compositor works</li>
+<li>The genlock addition on top</li>
+</ol>
+
+<p>To answer a/b directly: <strong>I never tested your patch alone</strong> (no GNOME here), so no claim it doesn't work — it clearly does on Mutter setups. What I hit is specific to the stitched single-display path: with (1)+(2) but without (3), both tiles trained and the streams committed, but <code>sync_enabled</code> stayed 0, the tiles free-ran, and the panel never latched — black screen and an endless re-modeset loop. With (3): <code>sync_enabled=1</code>, rock solid, seamless under motion.</p>
+
+<p>You're right that the hunk alone doesn't compile — <code>tiled_pair_apple</code> is a field added by erik2's stitch commits, not by your base. Two options:</p>
+
+<p><strong>The full patch I actually run</strong> (your base + erik2's stitch + genlock, as one diff against pristine 7.2.2 — it also applies cleanly to 7.1.9, zero rejects):<br>
+<a href="https://github.com/ahmadtv/omarchy-imac18-3/blob/main/patches/imac5k-amdgpu-7.2.2.patch">https://github.com/ahmadtv/omarchy-imac18-3/blob/main/patches/imac5k-amdgpu-7.2.2.patch</a></p>
+
+<p><strong>For your tree without the stitch</strong>, the same fix can gate on the <code>tiled_peer</code> wiring your base already does in <code>dm_helpers_wire_tiled_peer()</code>:</p>
+
+<pre><code>if (stream-&gt;link &amp;&amp; stream-&gt;link-&gt;tiled_peer &amp;&amp;
+    stream-&gt;triggered_crtc_reset.event_source &amp;&amp;
+    stream-&gt;triggered_crtc_reset.event_source != stream)
+        stream-&gt;triggered_crtc_reset.enabled = true;</code></pre>
+
+<p>placed in <code>dm_enable_per_frame_crtc_master_sync()</code>, in the second loop, right before <code>set_multisync_trigger_params(stream)</code>. That should compile against your base alone.</p>
+
+<p>On the Mutter comparison: I think they solve it at different layers. The Mutter work paces the two outputs in the compositor; this engages the DCE per-frame CRTC position reset (GSL) so the two tile CRTCs are locked in hardware. On the stitch path no compositor even knows there are two tiles, so hardware genlock is the only place it can happen. It may also reduce the seam tearing on the two-output path at the source — which is exactly why it's worth the test on your machine.</p>
+
+<p>Happy to provide full dmesg/drm_info from the working boot. And the 7.3-rc1 port plus the one-click repo is great news — thank you for that.</p>
+
+<p class="sig">— Ahmad</p>
+</body></html>
