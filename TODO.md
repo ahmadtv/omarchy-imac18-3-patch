@@ -5,8 +5,9 @@ to re-derive them.
 
 ## Display — two boot artifacts (5K only)
 
-Both are gaps in the patch's handling of the slave tile's *state*, not cosmetic
-quirks. Both confirmed from the boot timeline.
+Both root-caused and **fixed in `patches/5k-boot-artifacts.patch`**; the fixes are
+built and installed but not yet confirmed on a reboot. Confirm, then move this
+section to a changelog.
 
 ### Skewed Apple logo on warm reboot (cold boot is fine)
 
@@ -17,24 +18,42 @@ warm reboot, and Apple's firmware — which assumes the factory single-link stat
 draws its boot logo into a panel configuration it doesn't expect. A cold boot
 power-cycles the panel, which is why it looks correct then.
 
-**Fix:** write `0x4F1 = 0` on shutdown/module-unload (amdgpu `.shutdown` /
-`amdgpu_pci_shutdown`). Low risk — the code only runs as the machine goes down.
+**Fix, implemented:** `link_apple_5k_root_panel_latch_clear()` writes `0x4F1 = 0`,
+called from `amdgpu_pci_shutdown()` (reboot/poweroff, while AUX still works) and
+from `amdgpu_dm_fini()` (module unload, so `--remove 5k` also leaves the panel
+in the state the firmware expects). Low risk — only runs as the device goes down.
 
-### Half-black screen at the LUKS password prompt
+### Half-dark panel at the disk-encryption password prompt
+
+An earlier note here claimed the 5120 mode goes live ~130 ms before the slave
+tile wakes. **That was wrong.** From the boot log, the wake is early and fine —
+`root wake 0x4F1 stage=slave-predetect` fires at 5.702 s, *before* the stitched
+mode is published at 5.908 s. The real gap is elsewhere:
 
 | t | event |
 |---|---|
-| 7.7 s | connectors enumerated, 5120 mode advertised |
-| 18.9 s | `crtc_mode=5120x2880` but `stream_timing=2560x2880` — link[0] only |
-| 19.03 s | `root wake 0x4F1 stage=slave-predetect` — slave tile finally woken |
-| 19.03 s+ | peer stream added, `sync_enabled=1` — genlock latches |
+| 5.702 s | slave tile woken (`stage=slave-predetect`) |
+| 5.908 s | `TILED_STITCH: exposed only stitched mode 5120x2880 on eDP-1` |
+| 5.911 s | `fbcon: amdgpudrmfb (fb0) is primary` + `Deferring console take-over` |
+| 5.93–6.84 s | thunderbolt / nvme / usb-storage / sdhci probing |
+| **7.069 s** | `added peer slave-tile stream` — **first atomic modeset** |
+| 7.10–7.12 s | slave link trained, `stream-enable latch 0x4F1` |
 
-The stitched mode is exposed to fbcon/Plymouth **before** the slave tile is awake,
-so the prompt is drawn across 5120 px while only the left 2560 px is lit.
+The slave tile only gets a DC stream during an atomic modeset (the stitch block
+in `amdgpu_dm_atomic_check`), and `drm_client_setup()`'s initial fbdev config
+deliberately stops short of committing one — `__drm_fb_helper_initial_config_and_unlock()`
+probes, sets up the crtcs and calls `register_framebuffer()`, then leaves the
+commit to a later hotplug or to fbcon taking over the console. With `quiet splash`
+fbcon defers take-over, so that first commit landed **1.16 s** after fb0 went
+live. For that whole window the panel presents the full-width stitched mode
+while only the root tile scans out — long enough to cover the password prompt,
+which Plymouth draws across all 5120 px (the initramfs carries `plymouth` and
+`encrypt` hooks via `omarchy_hooks.conf`).
 
-**Fix (preferred):** do the slave wake + link-train during amdgpu init, before the
-connector/mode is published. **Fallback:** don't advertise 5120×2880 until both
-streams report `sync_enabled=1`. Medium risk — touches bring-up ordering.
+**Fix, implemented:** after `drm_client_setup()`, if this device drives a stitched
+tile panel, issue a second `drm_client_dev_hotplug()`. That takes the
+`dev->fb_helper` path, which *does* commit, so the peer tile stream is created
+during probe instead of whenever something else happens to trigger a modeset.
 
 ### DP-1 phantom output (cosmetic, low priority)
 
@@ -86,6 +105,11 @@ session, so a GPU reset costs nothing. Capture the devcoredump at
 
 - Upload `.github/social-preview.png` in GitHub Settings → Social preview
   (no API for this; must be done in the web UI).
+- `\EFI\BOOT\BOOTX64.EFI` on this ESP is a *copy of the UKI*, not the Limine
+  binary. It was found 2 days stale after a module rebuild — the firmware taking
+  that fallback path would have booted the previous initramfs with the previous
+  amdgpu module. `imac-patcher` already synced it; `patch-imac5k-amdgpu.sh` now
+  does too. Anything that rebuilds the UKI must refresh it.
 
 ## Considered and rejected
 
