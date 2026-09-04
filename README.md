@@ -129,7 +129,7 @@ Every patch backs up what it replaces and can be reversed. Boot-related changes 
 
 ## How this was worked out
 
-The investigation record — how the dual-tile panel was reverse-engineered, what was tried and rejected, the upstream correspondence, and the open leads — lives in [**omarchy-imac18-3-research**](https://github.com/ahmadtv/omarchy-imac18-3-research).
+Open items, root causes and rejected approaches are tracked in [`TODO.md`](TODO.md).
 
 ## Credits
 
