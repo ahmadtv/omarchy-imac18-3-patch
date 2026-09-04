@@ -15,6 +15,7 @@ External-SSD Omarchy install, dual-booting with macOS/OpenCore on the internal d
 | Boot, display (3840×2160 fallback), audio, network, color | ✅ working |
 | Native 5120×2880 | 🚧 not supported yet (upstream `amdgpu` gap) |
 | Suspend / hibernate | ❌ broken, masked off |
+| macOS (external disk) as a VM | ✅ working — `macos-vm` |
 
 Run `./scripts/verify.sh` any time to check kernel cmdline, GPU driver, monitor state, Thunderbolt, and networking in one shot.
 
@@ -112,6 +113,52 @@ Both hard-hang the machine every time — an Apple firmware ACPI S3 issue, not f
 ```bash
 sudo systemctl mask suspend.target hibernate.target hybrid-sleep.target suspend-then-hibernate.target
 ```
+
+### macOS VM (external disk)
+
+The macOS 15.7.4 install on the external My Passport runs as a QEMU/KVM guest under
+Omarchy, so it no longer needs a reboot for everyday use. Verified to the login screen
+2026-09-04.
+
+```bash
+macos-vm            # protected: physical disk read-only, guest writes go to an overlay
+macos-vm --direct   # writes to the real disk, so changes are there when it boots natively
+macos-vm --status
+```
+
+Also in the app launcher as **macOS (external disk)**. Launcher at
+`~/.local/bin/macos-vm`; image, overlay and full notes in `~/.local/share/macos-vm/`,
+kept out of git because the VM's OpenCore carries this machine's SMBIOS identity.
+
+The VM needs its own OpenCore. The ESP copy is an OpenCore Legacy Patcher 1.0.4 build
+for this hardware: reused unchanged it injects the wifi and I210 ethernet kexts into a
+machine that has neither, and its `OpenLinuxBoot` scans Omarchy's own boot entries. The
+VM copy drops those, adds `VirtualSMC` (a VM has no physical SMC), keeps the OCLP
+pieces the unsupported-model boot depends on (`Lilu`, `RestrictEvents`, `AMFIPass`,
+`csr-active-config`, `revpatch=sbvmm`), and injects the real SMBIOS explicitly — read
+from this machine's DMI — so Apple services see one consistent machine either way.
+Regenerate it with `~/.local/share/macos-vm/build-vm-efi.py`.
+
+Two traps worth remembering:
+
+- OpenCore resolves `config.plist`, `Kexts` and `Drivers` **relative to its own
+  directory**. The Mac boots `EFI/OC/OpenCore.efi` through a firmware NVRAM entry,
+  which OVMF has no equivalent of, so the VM boots the removable-media path — and that
+  path must be self-contained. Everything lives in `EFI/BOOT/`. Splitting it across
+  `EFI/BOOT` + `EFI/OC` fails with `OC: Failed to load configuration!`.
+- The ESP-root `boot.efi` is Apple's hardware-test loader (TAEFI 1.0.30r5), not an
+  OpenCore launcher. Booting it lands in Apple diagnostics and dies in a KVM emulation
+  failure at `RIP=0xb0000`.
+
+Both external drives are "My Passport", so the launcher matches the macOS disk by
+serial, never by `/dev/sdX`, and refuses to start while any of its partitions is
+mounted here — a host mount plus guest writes to one block device corrupts the
+filesystem. `/etc/udev/rules.d/70-macos-vm-disk.rules` grants the ACL, scoped to that
+one serial, so QEMU need not run as root.
+
+No GPU acceleration: IOMMU is off, and a single-GPU iMac could not do passthrough
+anyway. Fine for apps and files, not for GPU-heavy work. 3 vCPU of the 4 cores, no
+audio device, and about 6 minutes to boot over USB.
 
 ## Still open
 
