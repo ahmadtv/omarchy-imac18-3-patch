@@ -33,8 +33,8 @@
   <!-- fixes -->
   <g font-size="26" fill="#a9b1d6">
     <text x="90" y="330">✓  Native 5120 × 2880, genlocked</text>
-    <text x="90" y="378">✓  Fans that actually ramp</text>
-    <text x="90" y="426">✓  Working speakers, mic and colour</text>
+    <text x="90" y="378">✓  Working speakers, mic and tone</text>
+    <text x="90" y="426">✓  True wide-gamut colour</text>
   </g>
 
   <!-- command -->
