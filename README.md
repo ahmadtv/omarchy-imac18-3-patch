@@ -119,6 +119,10 @@ sudo systemctl mask suspend.target hibernate.target hybrid-sleep.target suspend-
 
 Every patch backs up what it replaces and can be reversed. Boot-related changes print their recovery steps *before* running. If a boot change ever goes wrong: boot the Limine snapshot entry, restore `/etc/default/limine.backup`, re-run `limine-mkinitcpio`, reboot.
 
+## How this was worked out
+
+The investigation record — how the dual-tile panel was reverse-engineered, what was tried and rejected, the upstream correspondence, and the open leads — lives in [**omarchy-imac18-3-research**](https://github.com/ahmadtv/omarchy-imac18-3-research).
+
 ## Credits
 
 Native 5K builds on community work from [drm/amd#4455](https://gitlab.freedesktop.org/drm/amd/-/issues/4455) — mforce2 (tile wake), erik2 (stitch), taprobane99 (7.2.2 port), with guidance from AMD's Alex Deucher. The genlock fix and the first verified iMac18,3 result came from this project. Audio driver by [jackdanyell](https://github.com/jackdanyell/imac18-3-cs8409-linux-audio).
