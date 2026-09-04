@@ -1,230 +1,323 @@
 #!/usr/bin/env bash
 #
-# imac-patcher — TUI patch manager for iMac18,3 + Omarchy.
+# imac-patcher — patch manager for the Apple iMac18,3 under Linux/Omarchy.
 #
-# v1 wraps the native-5K amdgpu patch (scripts/patch-imac5k-amdgpu.sh):
-#   * preflight checks surfaced BEFORE anything runs
-#   * honest applied/partial/active status detection
-#   * clone-first acknowledgment gate (patches/README.md RULE 2)
-#   * streamed build progress + full log
-#   * prominent restore, and the 3-way Limine sync done RIGHT
-#     (including the /boot/EFI/BOOT/BOOTX64.EFI fallback UKI the
-#      underlying installer does not cover)
+# Every fix is a module implementing the same contract:
+#   mod_<id>_title / _tier / _desc   metadata
+#   mod_<id>_detect                  -> applied | not-applied | partial | n/a
+#   mod_<id>_apply                   install it
+#   mod_<id>_remove                  undo it
+#
+# Tiers:
+#   safe   fully reversible, no boot risk       (pre-selected)
+#   boot   touches boot config or GPU driver    (flagged, prints recovery first)
 #
 # Usage:
-#   imac-patcher              interactive menu
-#   imac-patcher --status     print patch status and exit
-#   imac-patcher --apply-5k   apply the 5K patch (still asks the safety gate)
-#   imac-patcher --restore-5k restore stock amdgpu + 4K fallback
+#   imac-patcher                 interactive
+#   imac-patcher --status        print status of every module
+#   imac-patcher --apply  <id..> apply named modules (or "safe" for all safe ones)
+#   imac-patcher --remove <id..> remove named modules
 #
-set -euo pipefail
+set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-INSTALLER="${SCRIPT_DIR}/patch-imac5k-amdgpu.sh"
+REPO_DIR="$(dirname "$SCRIPT_DIR")"
+INSTALLER_5K="${SCRIPT_DIR}/patch-imac5k-amdgpu.sh"
 LOGDIR="${HOME}/.local/state/imac-patcher"
+CACHE="${HOME}/.cache/imac-patcher"
 KREL="$(uname -r)"
 KSERIES="$(uname -r | cut -d. -f1-2)"
-SUPPORTED_SERIES="7.1 7.2"
+SUPPORTED_5K_SERIES="7.1 7.2"
 LIMINE_DEFAULT=/etc/default/limine
 VIDEO_4K='video=eDP-1:3840x2160@60e'
-mkdir -p "$LOGDIR"
+MONITORS_LUA="${HOME}/.config/hypr/monitors.lua"
+EQ_DEST="${HOME}/.config/pipewire/filter-chain.conf.d/eq6.conf"
+SLEEP_TARGETS=(suspend.target hibernate.target hybrid-sleep.target suspend-then-hibernate.target)
+mkdir -p "$LOGDIR" "$CACHE"
+
+MODULES=(audio eq color suspend 5k)
 
 HAVE_GUM=0; command -v gum >/dev/null && HAVE_GUM=1
-
-# ── tiny UI layer (gum with plain fallback) ────────────────────────────────
-say()    { printf '\033[1;33m==>\033[0m %s\n' "$*"; }
-hdr()    { if ((HAVE_GUM)); then gum style --border rounded --padding "0 2" --bold "$*"; else printf '\n== %s ==\n' "$*"; fi; }
+say()  { printf '\033[1;33m==>\033[0m %s\n' "$*"; }
+warn() { printf '\033[1;31m!!\033[0m %s\n' "$*"; }
+hdr()  { if ((HAVE_GUM)); then gum style --border rounded --padding "0 2" --bold "$*"; else printf '\n== %s ==\n' "$*"; fi; }
 confirm(){ if ((HAVE_GUM)); then gum confirm "$1"; else read -rp "$1 [y/N] " a; [[ $a == [yY]* ]]; fi; }
-choose() { if ((HAVE_GUM)); then gum choose "$@"; else select o in "$@"; do echo "$o"; break; done; fi; }
 
 # ── hardware gate ──────────────────────────────────────────────────────────
 product="$(cat /sys/class/dmi/id/product_name 2>/dev/null || echo unknown)"
-if [[ "$product" != "iMac18,3" && "${1:-}" != "--force" ]]; then
-    echo "This tool is for the iMac18,3 (detected: ${product}). Refusing." >&2
+if [[ "$product" != "iMac18,3" && " $* " != *" --force "* ]]; then
+    echo "This tool targets the iMac18,3 (detected: ${product}). Refusing. Use --force to override." >&2
     exit 1
 fi
 
-# ── preflight ──────────────────────────────────────────────────────────────
-preflight() {
-    local ok=1
-    p() { printf '  %s %s\n' "$1" "$2"; }
-    if [[ " $SUPPORTED_SERIES " == *" $KSERIES "* ]]; then
-        p "✓" "kernel ${KREL} (series ${KSERIES} — supported)"
-    else
-        p "✗" "kernel ${KREL} — patch verified only for series: ${SUPPORTED_SERIES}. Needs a human re-port first (patches/README.md RULE 1)."
-        ok=0
+# ═══════════════════════ module: audio ═════════════════════════════════════
+AUDIO_REPO=https://github.com/jackdanyell/imac18-3-cs8409-linux-audio
+AUDIO_SRC="${CACHE}/imac18-3-cs8409-linux-audio"
+mod_audio_title() { echo "Speakers & microphone (CS8409)"; }
+mod_audio_tier()  { echo safe; }
+mod_audio_desc()  { echo "The in-kernel driver finds no speaker output on this board. Installs the hardware-gated DKMS driver so it also survives kernel updates."; }
+mod_audio_detect() {
+    # NB: capture then match. "cmd | grep -q" is unsafe under `set -o pipefail`:
+    # grep -q exits on first match, the producer takes SIGPIPE, and pipefail
+    # then reports the pipeline as failed despite the match succeeding.
+    local dkms_ok=0 loaded=0 dkms_out mods
+    dkms_out="$(dkms status 2>/dev/null)"
+    mods="$(lsmod 2>/dev/null)"
+    [[ $dkms_out == *"snd_hda_macbookpro"*"${KREL}"*"installed"* ]] && dkms_ok=1
+    [[ $'\n'$mods == *$'\n'snd_hda_codec_cs8409* ]] && loaded=1
+    if (( dkms_ok && loaded )); then echo applied
+    elif (( loaded )); then echo partial       # working now, but DKMS can't rebuild it
+    else echo not-applied; fi
+}
+mod_audio_apply() {
+    command -v dkms >/dev/null || { warn "dkms not installed: sudo pacman -S dkms linux-headers"; return 1; }
+    # A prior install may be registered but broken (source dir vanished, e.g. it
+    # lived in /tmp). Clear that first so the installer can re-register cleanly.
+    if dkms status 2>/dev/null | grep -q "snd_hda_macbookpro.*broken"; then
+        say "removing broken DKMS registration"
+        sudo dkms remove snd_hda_macbookpro/0.2 --all 2>/dev/null || true
     fi
-    if [[ -e "/usr/lib/modules/${KREL}/build/Module.symvers" ]]; then
-        p "✓" "linux-headers for running kernel"
+    if [[ -d "$AUDIO_SRC/.git" ]]; then
+        say "updating driver source"; git -C "$AUDIO_SRC" pull --ff-only 2>&1 | tail -2
     else
-        p "✗" "linux-headers missing:  sudo pacman -S linux-headers"; ok=0
+        say "cloning driver source into $AUDIO_SRC"
+        git clone --depth 1 "$AUDIO_REPO" "$AUDIO_SRC" 2>&1 | tail -2 || return 1
     fi
-    local missing=""
-    for t in gcc make bc; do command -v "$t" >/dev/null || missing+=" $t"; done
-    if [[ -z "$missing" ]]; then p "✓" "build tools (base-devel, bc)"; else p "✗" "missing:${missing}  →  sudo pacman -S --needed base-devel bc pahole"; ok=0; fi
-    local free_gb; free_gb=$(df --output=avail -BG "${HOME}/.cache" 2>/dev/null | tail -1 | tr -dc 0-9)
-    if (( ${free_gb:-0} >= 8 )); then p "✓" "disk space (${free_gb}G free, need ~8G)"; else p "✗" "only ${free_gb:-?}G free under ~/.cache — need ~8G"; ok=0; fi
-    [[ -f "$INSTALLER" ]] && p "✓" "installer present" || { p "✗" "installer not found: $INSTALLER"; ok=0; }
-    if [[ -d "${HOME}/.cache/kernel-5k-build/linux-${KREL%%-*}" ]]; then
-        p "✓" "kernel source tree already prepared (build will skip download)"
-    else
-        p "·" "kernel source will be downloaded from kernel.org (~150MB)"
-    fi
-    return $((1 - ok))
+    ( cd "$AUDIO_SRC" && sudo ./install-imac18-3.sh ) || return 1
+    say "installed — a reboot is needed for the new module to load"
+}
+mod_audio_remove() {
+    [[ -x "$AUDIO_SRC/install.cirrus.driver.sh" ]] && ( cd "$AUDIO_SRC" && sudo ./install.cirrus.driver.sh -r )
+    sudo dkms remove snd_hda_macbookpro/0.2 --all 2>/dev/null || true
+    say "stock module restored — reboot to load it"
 }
 
-# ── 5K patch: detect ───────────────────────────────────────────────────────
-# prints one of: not-applied | staged | active | partial
-detect_5k() {
+# ═══════════════════════ module: eq ════════════════════════════════════════
+mod_eq_title() { echo "Speaker tone EQ"; }
+mod_eq_tier()  { echo safe; }
+mod_eq_desc()  { echo "The codec does no DSP at all; macOS's warmth is entirely software EQ. Adds a PipeWire filter-chain (bass shelf + clipping clamp)."; }
+mod_eq_detect() {
+    local conf=0 active=0
+    [[ -f "$EQ_DEST" ]] && conf=1
+    systemctl --user is-active filter-chain.service &>/dev/null && active=1
+    if (( conf && active )); then echo applied
+    elif (( conf || active )); then echo partial
+    else echo not-applied; fi
+}
+mod_eq_apply() {
+    mkdir -p "$(dirname "$EQ_DEST")"
+    install -m644 "${REPO_DIR}/configs/eq6.conf" "$EQ_DEST" || return 1
+    systemctl --user enable --now filter-chain.service || return 1
+    sleep 2
+    if command -v wpctl >/dev/null; then
+        local id
+        id=$(wpctl status 2>/dev/null | grep -oP '^\s*\*?\s*\K[0-9]+(?=\.\s+effect_input\.eq6)' | head -1)
+        [[ -n ${id:-} ]] && wpctl set-default "$id" && say "default output set to the EQ sink"
+        # the hardware sink keeps its own volume; leave it at full so the EQ
+        # sink's slider spans the real range (a stale low value silently caps it)
+        local hw
+        hw=$(wpctl status 2>/dev/null | grep -oP '^\s*\*?\s*\K[0-9]+(?=\.\s+.*Analog Stereo)' | head -1)
+        [[ -n ${hw:-} ]] && wpctl set-volume "$hw" 1.0 2>/dev/null || true
+    fi
+}
+mod_eq_remove() {
+    rm -f "$EQ_DEST"
+    systemctl --user disable --now filter-chain.service 2>/dev/null
+    if command -v wpctl >/dev/null; then
+        local hw
+        hw=$(wpctl status 2>/dev/null | grep -oP '^\s*\*?\s*\K[0-9]+(?=\.\s+.*Analog Stereo)' | head -1)
+        [[ -n ${hw:-} ]] && wpctl set-default "$hw" && say "default output restored to the hardware sink"
+    fi
+}
+
+# ═══════════════════════ module: color ═════════════════════════════════════
+mod_color_title() { echo "Wide-gamut colour"; }
+mod_color_tier()  { echo safe; }
+mod_color_desc()  { echo "The panel is Display P3; Hyprland's default sRGB mode leaves everything oversaturated. Sets cm=\"dp3\" on the monitor."; }
+mod_color_detect() {
+    [[ -f "$MONITORS_LUA" ]] || { echo n/a; return; }
+    grep -q 'cm = "dp3"' "$MONITORS_LUA" && echo applied || echo not-applied
+}
+mod_color_apply() {
+    [[ -f "$MONITORS_LUA" ]] || { warn "$MONITORS_LUA not found"; return 1; }
+    cp "$MONITORS_LUA" "${MONITORS_LUA}.bak-$(date +%s)"
+    if grep -q 'cm = "' "$MONITORS_LUA"; then
+        sed -i 's/cm = "[a-z0-9]*"/cm = "dp3"/' "$MONITORS_LUA"
+    else
+        # add cm to the active (uncommented) hl.monitor line
+        sed -i '/^hl\.monitor({/ s/ })$/, cm = "dp3" })/' "$MONITORS_LUA"
+    fi
+    grep -q 'cm = "dp3"' "$MONITORS_LUA" || { warn "could not edit $MONITORS_LUA — do it by hand"; return 1; }
+    command -v hyprctl >/dev/null && hyprctl reload >/dev/null 2>&1
+    say "applied: $(grep -o 'colorManagementPreset: .*' <(hyprctl monitors all 2>/dev/null) | head -1)"
+}
+mod_color_remove() {
+    [[ -f "$MONITORS_LUA" ]] || return 0
+    cp "$MONITORS_LUA" "${MONITORS_LUA}.bak-$(date +%s)"
+    sed -i 's/, cm = "dp3"//; s/cm = "dp3"/cm = "auto"/' "$MONITORS_LUA"
+    command -v hyprctl >/dev/null && hyprctl reload >/dev/null 2>&1
+}
+
+# ═══════════════════════ module: suspend ═══════════════════════════════════
+mod_suspend_title() { echo "Block suspend/hibernate"; }
+mod_suspend_tier()  { echo safe; }
+mod_suspend_desc()  { echo "Sleep hard-hangs this machine every time (Apple firmware ACPI issue; recovery is a hard power-cycle). Masks the sleep targets so nothing triggers them by accident."; }
+mod_suspend_detect() {
+    local masked=0
+    for t in "${SLEEP_TARGETS[@]}"; do
+        [[ "$(systemctl is-enabled "$t" 2>/dev/null)" == masked ]] && (( masked++ ))
+    done
+    if (( masked == ${#SLEEP_TARGETS[@]} )); then echo applied
+    elif (( masked > 0 )); then echo partial
+    else echo not-applied; fi
+}
+mod_suspend_apply()  { sudo systemctl mask "${SLEEP_TARGETS[@]}"; }
+mod_suspend_remove() { sudo systemctl unmask "${SLEEP_TARGETS[@]}"; warn "sleep re-enabled — it is known to hang this machine"; }
+
+# ═══════════════════════ module: 5k ════════════════════════════════════════
+mod_5k_title() { echo "Native 5K display"; }
+mod_5k_tier()  { echo boot; }
+mod_5k_desc()  { echo "Wakes the panel's second tile, stitches both into one 5120x2880 output and genlocks them. Rebuilds the amdgpu module for the running kernel (stock module backed up)."; }
+mod_5k_detect() {
     local moddir="/usr/lib/modules/${KREL}/kernel/drivers/gpu/drm/amd"
-    local backup module_swapped=0 conf=0 live=0 res=""
-    backup="$(find "$moddir" -name 'amdgpu.ko*.stock-backup' 2>/dev/null | head -1 || true)"
-    [[ -n "$backup" ]] && module_swapped=1
+    local backup swapped=0 conf=0 live=0 res=""
+    backup="$(find "$moddir" -name 'amdgpu.ko*.stock-backup' 2>/dev/null | head -1)"
+    [[ -n "$backup" ]] && swapped=1
     grep -q 'amdgpu.tiled_stitch=1' "$LIMINE_DEFAULT" 2>/dev/null && conf=1
     grep -q 'amdgpu.tiled_stitch=1' /proc/cmdline 2>/dev/null && live=1
-    command -v hyprctl >/dev/null && res="$(hyprctl monitors 2>/dev/null | grep -oE '5120x2880' | head -1 || true)"
-
-    if ((module_swapped && conf && live)) && [[ "$res" == "5120x2880" ]]; then echo active
-    elif ((module_swapped && conf)) && ((!live)); then echo staged
-    elif ((!module_swapped && !conf && !live)); then echo not-applied
-    else echo partial
+    command -v hyprctl >/dev/null && res="$(hyprctl monitors 2>/dev/null | grep -oE '5120x2880' | head -1)"
+    if (( swapped && conf && live )) && [[ "$res" == "5120x2880" ]]; then echo applied
+    elif (( swapped || conf || live )); then echo partial
+    else echo not-applied; fi
+}
+mod_5k_apply() {
+    if [[ " $SUPPORTED_5K_SERIES " != *" $KSERIES "* ]]; then
+        warn "kernel ${KREL}: the 5K patch is verified only for series ${SUPPORTED_5K_SERIES}."
+        warn "It needs re-porting by hand first (see patches/README.md RULE 1). Nothing changed."
+        return 1
     fi
+    [[ -e "/usr/lib/modules/${KREL}/build/Module.symvers" ]] || { warn "linux-headers missing: sudo pacman -S linux-headers"; return 1; }
+    printf '\033[1mRestore at any time:\033[0m  %s --remove 5k\n\n' "$0"
+    confirm "Build and install the patched amdgpu module? (~20-40 min on a cold build)" || return 1
+    local log="$LOGDIR/apply-5k-$(date +%Y%m%d-%H%M%S).log"
+    sudo "$INSTALLER_5K" 2>&1 | tee "$log" || return 1
+    if grep -q "$VIDEO_4K" "$LIMINE_DEFAULT" 2>/dev/null && confirm "Remove the 4K fallback parameter (required for real 5K)?"; then
+        sudo cp "$LIMINE_DEFAULT" "${LIMINE_DEFAULT}.backup-pre5k-$(date +%s)"
+        sudo sed -i "s| ${VIDEO_4K}||" "$LIMINE_DEFAULT"
+    fi
+    sync_boot_files && verify_cmdline 'amdgpu.tiled_stitch=1' "$VIDEO_4K"
+    say "reboot to activate"
+}
+mod_5k_remove() {
+    sudo "$INSTALLER_5K" --restore || return 1
+    if grep -q 'amdgpu.tiled_stitch=1' "$LIMINE_DEFAULT" 2>/dev/null; then
+        sudo cp "$LIMINE_DEFAULT" "${LIMINE_DEFAULT}.backup-restore-$(date +%s)"
+        sudo sed -i 's| amdgpu.tiled_stitch=1||' "$LIMINE_DEFAULT"
+    fi
+    if ! grep -q "$VIDEO_4K" "$LIMINE_DEFAULT" 2>/dev/null && confirm "Re-add the 4K fallback (recommended without 5K)?"; then
+        sudo sed -i "s|\(KERNEL_CMDLINE\[default\]=\"[^\"]*\)\"|\1 ${VIDEO_4K}\"|" "$LIMINE_DEFAULT"
+    fi
+    sync_boot_files && verify_cmdline "" 'amdgpu.tiled_stitch=1'
+    say "reboot to return to stock"
 }
 
-status_5k_verbose() {
-    local st; st="$(detect_5k)"
-    case "$st" in
-        active)      echo "✓ APPLIED + ACTIVE — running native 5120×2880";;
-        staged)      echo "⚠ STAGED — module + cmdline installed, reboot to activate";;
-        not-applied) echo "✗ NOT APPLIED — running stock amdgpu ($(grep -q "$VIDEO_4K" /proc/cmdline && echo '4K fallback active' || echo 'no 4K fallback param live'))";;
-        partial)     echo "⚠ PARTIAL — inconsistent state, inspect: module-backup/cmdline/live values disagree (a kernel update may have replaced the patched module — re-apply)";;
-    esac
-}
-
-# ── the full 3-way Limine sync (project doctrine — see README) ─────────────
+# ── boot helpers (this ESP carries three limine.conf copies + a fallback UKI;
+#    updating only one is the classic way a fix silently fails to apply) ─────
 sync_boot_files() {
-    say "rebuilding UKI + syncing all Limine copies (incl. fallback BOOTX64.EFI)"
-    sudo limine-mkinitcpio
-    sudo cp /boot/limine.conf /boot/EFI/BOOT/limine.conf
-    sudo cp /boot/limine.conf /boot/EFI/limine/limine.conf
-    sudo cp /boot/EFI/Linux/omarchy_linux.efi /boot/EFI/BOOT/BOOTX64.EFI
+    say "rebuilding UKI and syncing every boot copy"
+    sudo limine-mkinitcpio || return 1
+    sudo cp /boot/limine.conf /boot/EFI/BOOT/limine.conf 2>/dev/null
+    sudo cp /boot/limine.conf /boot/EFI/limine/limine.conf 2>/dev/null
+    sudo cp /boot/EFI/Linux/omarchy_linux.efi /boot/EFI/BOOT/BOOTX64.EFI 2>/dev/null
 }
-
-verify_embedded_cmdline() {  # $1 = pattern that MUST be present, $2 = pattern that must NOT
-    # root-owned temp: /tmp's protected_regular sysctl blocks root writing a user-owned file
+verify_cmdline() {   # $1 must be present, $2 must be absent
     local line
     line="$(sudo bash -c 'tmp=$(mktemp); trap "rm -f $tmp" EXIT; objcopy -O binary --only-section=.cmdline /boot/EFI/BOOT/BOOTX64.EFI "$tmp" && tr -d "\0" < "$tmp"')"
-    if [[ -n "${1:-}" ]] && ! grep -q "$1" <<<"$line"; then
-        echo "VERIFY FAILED: embedded cmdline missing '$1'"; echo "  got: $line"; return 1
-    fi
-    if [[ -n "${2:-}" ]] && grep -q "$2" <<<"$line"; then
-        echo "VERIFY FAILED: embedded cmdline still contains '$2'"; echo "  got: $line"; return 1
-    fi
+    [[ -n "${1:-}" ]] && ! grep -q "$1" <<<"$line" && { warn "verify: embedded cmdline missing '$1'"; return 1; }
+    [[ -n "${2:-}" ]] &&   grep -q "$2" <<<"$line" && { warn "verify: embedded cmdline still has '$2'"; return 1; }
     say "embedded cmdline verified"
 }
 
-dkms_check() {
-    if command -v dkms >/dev/null; then
-        if dkms status 2>/dev/null | grep -q "snd_hda_macbookpro.*${KREL}.*installed"; then
-            say "audio DKMS module OK for ${KREL}"
-        else
-            say "audio DKMS module NOT built for ${KREL}"
-            if confirm "Run 'dkms autoinstall' to rebuild the audio driver now?"; then
-                sudo dkms autoinstall -k "$KREL" || say "dkms autoinstall failed — check manually (see README audio section)"
-            fi
-        fi
-    fi
+# ── generic driver ─────────────────────────────────────────────────────────
+state_label() {
+    case "$1" in
+        applied)     printf '\033[1;32m✓ applied\033[0m' ;;
+        not-applied) printf '\033[0;37m· not applied\033[0m' ;;
+        partial)     printf '\033[1;33m⚠ partial\033[0m' ;;
+        n/a)         printf '\033[0;37m— n/a\033[0m' ;;
+    esac
 }
-
-# ── apply ──────────────────────────────────────────────────────────────────
-apply_5k() {
-    hdr "Apply: native 5K (amdgpu wake + stitch + genlock)"
-    preflight || { echo; echo "Fix the ✗ items above first. Nothing was changed."; return 1; }
-    echo
-    echo "This will:"
-    echo "  1. Build a patched amdgpu module for ${KREL} (~20–40 min, streamed below)"
-    echo "  2. Swap it in (stock module backed up), add amdgpu.tiled_stitch=1"
-    echo "  3. Remove the 4K fallback ${VIDEO_4K} (you confirm)"
-    echo "  4. Rebuild the UKI + full 3-way Limine sync, verify the embedded cmdline"
-    echo
-    printf '\033[1mRestore at any time:\033[0m  %s --restore-5k\n\n' "$0"
-
-    local ack
-    ack=$(choose "I have tested this on the USB clone (RULE 2)" \
-                 "Proceed on THIS system anyway — I accept software-rendering-until-restore risk" \
-                 "Abort")
-    [[ "$ack" == Abort ]] && { echo "Aborted. Nothing changed."; return 1; }
-    echo "$(date -Is) ack: $ack" >> "$LOGDIR/acknowledgments.log"
-
-    sudo -v
-    local log="$LOGDIR/apply-5k-$(date +%Y%m%d-%H%M%S).log"
-    say "building + installing (log: $log) — started $(date +%T)"
-    local t0=$SECONDS
-    sudo "$INSTALLER" 2>&1 | tee "$log"
-    say "installer finished in $(( (SECONDS-t0)/60 ))m$(( (SECONDS-t0)%60 ))s"
-
-    if grep -q "$VIDEO_4K" "$LIMINE_DEFAULT" && confirm "Remove the 4K fallback param (required for real 5K)?"; then
-        sudo cp "$LIMINE_DEFAULT" "${LIMINE_DEFAULT}.backup-pre5k-$(date +%s)"
-        sudo sed -i "s| ${VIDEO_4K}||" "$LIMINE_DEFAULT"
-        say "removed ${VIDEO_4K} (backup kept)"
-    fi
-
-    sync_boot_files
-    verify_embedded_cmdline 'amdgpu.tiled_stitch=1' "$VIDEO_4K" || return 1
-    dkms_check
-    echo
-    hdr "DONE — reboot to native 5K. If anything is wrong after reboot: $0 --restore-5k"
-    confirm "Reboot now?" && sudo systemctl reboot || true
-}
-
-# ── restore ────────────────────────────────────────────────────────────────
-restore_5k() {
-    hdr "Restore: stock amdgpu + 4K fallback"
-    sudo -v
-    local log="$LOGDIR/restore-5k-$(date +%Y%m%d-%H%M%S).log"
-    sudo "$INSTALLER" --restore 2>&1 | tee "$log"
-
-    if grep -q 'amdgpu.tiled_stitch=1' "$LIMINE_DEFAULT"; then
-        sudo cp "$LIMINE_DEFAULT" "${LIMINE_DEFAULT}.backup-restore-$(date +%s)"
-        sudo sed -i 's| amdgpu.tiled_stitch=1||' "$LIMINE_DEFAULT"
-        say "removed amdgpu.tiled_stitch=1"
-    fi
-    if ! grep -q "$VIDEO_4K" "$LIMINE_DEFAULT"; then
-        if confirm "Re-add the 4K fallback param (recommended — avoids the skewed native tile mode)?"; then
-            sudo sed -i "s|\(KERNEL_CMDLINE\[default\]=\"[^\"]*\)\"|\1 ${VIDEO_4K}\"|" "$LIMINE_DEFAULT"
-            say "re-added ${VIDEO_4K}"
-        fi
-    fi
-
-    sync_boot_files
-    verify_embedded_cmdline "$VIDEO_4K" 'amdgpu.tiled_stitch=1' || return 1
-    dkms_check
-    hdr "Restored. Reboot to return to the stock 4K-fallback setup."
-    confirm "Reboot now?" && sudo systemctl reboot || true
-}
-
-# ── entry ──────────────────────────────────────────────────────────────────
 show_status() {
-    hdr "imac-patcher — iMac18,3 patch status"
-    echo "  Machine : $product   Kernel: $KREL"
-    echo "  5K patch: $(status_5k_verbose)"
+    hdr "imac-patcher — ${product}, kernel ${KREL}"
+    local m st tier
+    for m in "${MODULES[@]}"; do
+        st="$("mod_${m}_detect")"; tier="$("mod_${m}_tier")"
+        printf '  %-32s %-22b %s\n' "$("mod_${m}_title")" "$(state_label "$st")" \
+            "$([[ $tier == boot ]] && printf '\033[0;33m[boot]\033[0m')"
+    done
+    echo
+    printf '  ids: %s\n' "${MODULES[*]}"
+}
+run_module() {   # $1 = apply|remove, $2 = id
+    local action=$1 id=$2 st
+    st="$("mod_${id}_detect")"
+    [[ $st == n/a ]] && { say "${id}: not applicable on this machine — skipping"; return 0; }
+    if [[ $action == apply && $st == applied ]]; then say "${id}: already applied — skipping"; return 0; fi
+    if [[ $action == remove && $st == not-applied ]]; then say "${id}: not applied — nothing to remove"; return 0; fi
+    hdr "$( [[ $action == apply ]] && echo Applying || echo Removing ): $("mod_${id}_title")"
+    if "mod_${id}_${action}"; then
+        say "${id}: ${action} finished — now $("mod_${id}_detect")"
+    else
+        warn "${id}: ${action} failed (see messages above)"; return 1
+    fi
 }
 
 case "${1:-}" in
-    --status)     show_status; exit 0 ;;
-    --preflight)  hdr "Preflight"; preflight; exit $? ;;
-    --apply-5k)   apply_5k; exit $? ;;
-    --restore-5k) restore_5k; exit $? ;;
-    --force|"")   ;;
-    *) echo "usage: $0 [--status|--preflight|--apply-5k|--restore-5k]"; exit 2 ;;
+    --status) show_status; exit 0 ;;
+    --apply|--remove)
+        action="${1#--}"; shift
+        [[ ${1:-} == safe ]] && { set -- ; for m in "${MODULES[@]}"; do [[ $("mod_${m}_tier") == safe ]] && set -- "$@" "$m"; done; }
+        (( $# )) || { echo "usage: $0 --${action} <id...|safe>   ids: ${MODULES[*]}" >&2; exit 2; }
+        for id in "$@"; do
+            [[ " ${MODULES[*]} " == *" $id "* ]] || { warn "unknown module: $id"; continue; }
+            run_module "$action" "$id"
+        done
+        exit 0 ;;
+    --force|"") ;;
+    *) echo "usage: $0 [--status | --apply <id...|safe> | --remove <id...|safe>]"; exit 2 ;;
 esac
 
+# ── interactive ────────────────────────────────────────────────────────────
 show_status
 echo
-sel=$(choose "Apply 5K patch" "Restore stock (undo 5K)" "Run preflight checks only" "Quit")
+if ((HAVE_GUM)); then
+    sel=$(gum choose "Apply all safe patches" "Choose patches to apply" "Remove a patch" "Quit")
+else
+    select sel in "Apply all safe patches" "Choose patches to apply" "Remove a patch" "Quit"; do break; done
+fi
 case "$sel" in
-    "Apply 5K patch")            apply_5k ;;
-    "Restore stock (undo 5K)")   restore_5k ;;
-    "Run preflight checks only") hdr "Preflight"; preflight || true ;;
+    "Apply all safe patches")
+        for m in "${MODULES[@]}"; do
+            [[ $("mod_${m}_tier") == safe ]] || continue
+            [[ $("mod_${m}_detect") == applied ]] && continue
+            run_module apply "$m"
+        done ;;
+    "Choose patches to apply")
+        avail=(); for m in "${MODULES[@]}"; do
+            st=$("mod_${m}_detect"); [[ $st == applied || $st == n/a ]] && continue
+            avail+=("${m} — $("mod_${m}_title")$([[ $("mod_${m}_tier") == boot ]] && echo '  [boot]')")
+        done
+        (( ${#avail[@]} )) || { say "everything applicable is already applied"; exit 0; }
+        if ((HAVE_GUM)); then picks=$(gum choose --no-limit "${avail[@]}"); else
+            select p in "${avail[@]}"; do picks=$p; break; done; fi
+        while read -r line; do [[ -n $line ]] && run_module apply "${line%% *}"; done <<<"$picks" ;;
+    "Remove a patch")
+        avail=(); for m in "${MODULES[@]}"; do
+            [[ $("mod_${m}_detect") =~ ^(applied|partial)$ ]] && avail+=("${m} — $("mod_${m}_title")")
+        done
+        (( ${#avail[@]} )) || { say "nothing to remove"; exit 0; }
+        if ((HAVE_GUM)); then pick=$(gum choose "${avail[@]}"); else
+            select p in "${avail[@]}"; do pick=$p; break; done; fi
+        [[ -n ${pick:-} ]] && run_module remove "${pick%% *}" ;;
     *) exit 0 ;;
 esac
