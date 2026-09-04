@@ -1,0 +1,45 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="640" viewBox="0 0 1280 640" font-family="DejaVu Sans, Helvetica, Arial, sans-serif">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#1a1b26"/>
+      <stop offset="55%" stop-color="#1f2335"/>
+      <stop offset="100%" stop-color="#24283b"/>
+    </linearGradient>
+    <linearGradient id="screen" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#7aa2f7"/>
+      <stop offset="50%" stop-color="#bb9af7"/>
+      <stop offset="100%" stop-color="#7dcfff"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="1280" height="640" fill="url(#bg)"/>
+
+  <!-- iMac silhouette, right side -->
+  <g transform="translate(830,132)">
+    <rect x="0" y="0" width="360" height="216" rx="10" fill="#15161e" stroke="#414868" stroke-width="3"/>
+    <rect x="12" y="12" width="336" height="176" rx="4" fill="url(#screen)" opacity="0.92"/>
+    <!-- the tile seam: left half lit, right half dark = the bug this fixes -->
+    <line x1="180" y1="12" x2="180" y2="188" stroke="#1a1b26" stroke-width="2.5" opacity="0.55"/>
+    <rect x="12" y="196" width="336" height="8" fill="#15161e"/>
+    <path d="M 150 216 L 210 216 L 224 268 L 136 268 Z" fill="#1f2335" stroke="#414868" stroke-width="3"/>
+    <rect x="104" y="268" width="152" height="12" rx="6" fill="#24283b" stroke="#414868" stroke-width="3"/>
+    <text x="180" y="118" font-size="46" font-weight="700" fill="#1a1b26" text-anchor="middle" opacity="0.85">5K</text>
+  </g>
+
+  <!-- title -->
+  <text x="88" y="196" font-size="70" font-weight="700" fill="#c0caf5">iMac18,3 Patch</text>
+  <text x="88" y="252" font-size="31" fill="#7aa2f7">Making the 2017 27" 5K iMac work under Linux</text>
+
+  <!-- fixes -->
+  <g font-size="26" fill="#a9b1d6">
+    <text x="90" y="330">✓  Native 5120 × 2880, genlocked</text>
+    <text x="90" y="378">✓  Fans that actually ramp</text>
+    <text x="90" y="426">✓  Working speakers, mic and colour</text>
+  </g>
+
+  <!-- command -->
+  <rect x="88" y="470" width="620" height="62" rx="8" fill="#15161e" stroke="#414868" stroke-width="2"/>
+  <text x="112" y="510" font-size="25" font-family="DejaVu Sans Mono, monospace" fill="#9ece6a">$ ./scripts/imac-patcher</text>
+
+  <text x="88" y="580" font-size="21" fill="#565f89">github.com/ahmadtv/omarchy-imac18-3-patch</text>
+</svg>
