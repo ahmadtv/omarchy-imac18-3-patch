@@ -26,6 +26,19 @@ up. Every modeset then leaves the panel exactly as a cold boot found it; the
 existing wake/train/enable-latch sequence brings it back. On reboot the
 suspend-path display teardown runs this naturally.
 
+**Why the mirror alone was not enough (measured, 2026-09-05):** over
+`/dev/drm_dp_aux0` the clear takes effect instantly — root and slave both read
+back `00` — but the panel raises HPD-RX and the detect path rewrites `01` within
+2–10 ms (`detect connection ... reason=2` followed by `root wake 0x4F1`). At
+reboot the stream-off runs before IRQs are suspended, so that interrupt wins.
+`dc.apple_5k_going_down`, set from `amdgpu_pci_shutdown()` before teardown,
+turns both wake paths into no-ops so the clear is the last word. In the test
+entry; unconfirmed on hardware until a warm reboot out of it.
+
+**If the logo is still skewed after that**, the latch theory is wrong — the
+panel state the firmware trips over is something other than 0x4F1 — and the
+whole latch-clear stack should be removed rather than extended.
+
 **First attempt, removed:** clearing the latch from `amdgpu_pci_shutdown()`.
 That ran while the shutdown splash was still being scanned out, so the splash
 itself skewed on the way down — and it did not fix the firmware logo either.
@@ -221,42 +234,32 @@ added by hand on 2026-08-30, and the shadow configs added by this repo's own
 scripts. That is why the `boot` module *detects and repairs* rather than
 assuming: on a healthy machine it reports `applied` and changes nothing.
 
-## Fixed: skewed desktop after login (genlock lost at 8-bpc)
+## Open: sheared desktop seam (slave tile loses genlock)
 
-Distinct from the two boot artifacts above, and the one that actually bit in
-daily use: after login the seam sheared, intermittently, on the *unmodified* 5K
-build.
+The artifact that actually bites in daily use, distinct from the boot-time ones.
+The mode is a correct 5120x2880 throughout; what is lost is sync — the slave
+stream's `sync_enabled` flips to 0 on some modeset and the two tiles scan out
+of phase, which reads as a skewed/sheared seam. Calibrated against the owner's
+eyes on 2026-09-05: `sync_enabled=0` in the `commit-after-dc` log line is the
+skew.
 
-Cause, from the boot log: the panel comes up genlocked at 10-bpc, and the
-compositor's own modeset then re-creates the streams at 8-bpc and the slave tile
-loses sync:
+**What was believed and is wrong:** that 8-bpc loses sync and 10-bpc keeps it.
+On a fresh boot with `bitdepth = 10` pinned from the start the slave still came
+up at `sync_enabled=0`, and a forced modeset re-locked it at 8-bit just as well.
+The earlier "fix" worked because `hyprctl reload` forced a fresh modeset, not
+because of the depth. Genlock is a coin-flip per modeset. `bitdepth = 10` stays
+in `configs/monitors.lua` because this is a 10-bit panel, not as a fix.
 
-| t | state |
-|---|---|
-| 24.9 s | peer stream added, `sync_enabled=0` |
-| 29.3 s | both streams `sync_enabled=1`, `color_depth=10-bpc` — genlocked |
-| 30.7 s | compositor modeset, `color_depth=8-bpc` |
-| 31.4 s | slave `sync_enabled=0` — genlock gone, never recovers |
+**Workaround for now:** any modeset re-rolls the dice — toggle `bitdepth` in
+`~/.config/hypr/monitors.lua` and `hyprctl reload`, check with
+`journalctl -k -b 0 | grep commit-after-dc | tail -2`, repeat until both
+streams say `sync_enabled=1`. Usually lands within two tries.
 
-Two tiles scanning out of phase is what reads as "skewed". The mode is correct
-5120x2880 throughout; only the sync is lost.
-
-**Fix:** pin the compositor to 10-bit. In `~/.config/hypr/monitors.lua`:
-
-```lua
-hl.monitor({ output = "", mode = "preferred", position = "auto", scale = 2,
-             cm = "dp3", bitdepth = 10 })
-```
-
-Verified live with `hyprctl reload`, no reboot: `currentFormat` went
-`XRGB8888` -> `XRGB2101010` and both tile streams returned to
-`sync_enabled=1`, stable on re-check. Shipped in `configs/monitors.lua`.
-
-Still unexplained: *why* the 8-bpc path fails to re-establish sync, when the
-same code genlocks fine at 10-bpc. `dm_enable_per_frame_crtc_master_sync()` is
-the place to look — see `patches/genlock-fix.patch`. Pinning 10-bit is a
-workaround, not a root-cause fix, though on a 10-bit-capable P3 panel it is
-what you want anyway.
+**Root cause to find:** `dm_enable_per_frame_crtc_master_sync()` (see
+`patches/genlock-fix.patch`) is where `triggered_crtc_reset.enabled` is set for
+the slave; something about which stream `set_master_stream()` picks, or the
+order the two tile streams land in the context, differs between the modesets
+that lock and the ones that don't. The log's `master_link[N]` field is the lead.
 
 ## Considered and rejected
 
