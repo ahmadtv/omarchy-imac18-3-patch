@@ -7,9 +7,9 @@ local omarchy_monitor_scale = 2
 hl.env("GDK_SCALE", tostring(omarchy_gdk_scale))
 -- cm = "edid": manage color against this panel's own EDID-reported gamut
 -- (wide/P3) instead of assuming generic sRGB, to fix oversaturation.
--- bitdepth = 10: the dual-tile panel keeps genlock (sync_enabled=1 on both
--- tile streams) at 10-bpc, but the compositor's default 8-bpc modeset drops
--- the slave tile out of sync, which shows up as a skewed/sheared seam.
+-- bitdepth = 10: this is a wide-gamut 10-bit panel, so ask for it. (It was
+-- once thought to fix the sheared tile seam; it does not -- genlock is lost
+-- intermittently per modeset regardless of depth. A fresh modeset re-locks it.)
 hl.monitor({ output = "", mode = "preferred", position = "auto", scale = omarchy_monitor_scale, cm = "dp3", bitdepth = 10 })
 
 -- Configure a specific monitor.
