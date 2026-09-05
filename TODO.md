@@ -159,19 +159,53 @@ absent, so testing its exit status classifies *every* PE binary as a UKI — the
 first version of the sync hook cheerfully overwrote Limine with a kernel image.
 Extract and check for actual bytes instead.
 
-### Fixed: ESP limine.conf copies went stale
+### Fixed: shadowing limine.conf copies (root cause of the invisible snapshot)
 
-`/boot` carries three copies of `limine.conf`. `limine-mkinitcpio` and
-`limine-snapper-sync` write only the ESP-root copy, while Limine reads the one
-next to its binary (`/EFI/limine/limine.conf`). Nothing in the stock packages
-propagated it, so every kernel update and every new snapshot left the copy
-Limine actually reads behind.
+There is exactly **one** limine.conf: `/boot/limine.conf`. An earlier belief in
+this repo — that the ESP "carries three copies that must be kept in sync" — was
+wrong, and was itself the bug.
 
-Observed 2026-09-05: a snapshot created at 18:58 appeared in `snapper list` and
-in `/boot/limine.conf` but never in the boot menu; the ESP copies still dated
-from 2026-09-04. `scripts/95-sync-esp-limine-conf`, installed to
-`/etc/boot/hooks/post.d/`, now propagates on every run of either tool. Verified
-by creating a snapshot and confirming all three copies matched afterwards.
+Limine >= 10.3.0 loads the **first** config in its search order, so a copy at
+`EFI/limine/` or `EFI/BOOT/` silently overrides the canonical one that
+`limine-mkinitcpio` and `limine-snapper-sync` maintain. `limine-install` detects
+these and says to delete them (see `check_limine_config_conflicts()`).
+
+This project's own scripts created them — `imac-patcher`, the 5K installer and
+`imac-test-entry` each copied `/boot/limine.conf` into both locations. The cost
+showed up on 2026-09-05: a snapshot created at 18:58 appeared in `snapper list`
+and in `/boot/limine.conf`, but the boot menu was reading a shadow copy from the
+previous day and never showed it.
+
+**Fixed:** the copies are removed (archived under
+`/boot/limine-conf-shadow-backup/`), all three scripts now delete shadows
+instead of creating them, and `scripts/95-limine-esp-hygiene` in
+`/etc/boot/hooks/post.d/` removes any that reappear. Verified by recreating a
+shadow and watching the hook delete it.
+
+### A trap worth remembering
+
+`objcopy -O binary --only-section=X file out` **exits 0 even when section X does
+not exist** — it simply writes nothing. Testing its exit status to decide "is
+this a UKI?" classifies every PE binary as one. The first version of the hygiene
+hook did exactly that and overwrote the freshly restored Limine binary with a
+74 MB kernel image on its next run. Extract and test for actual bytes instead.
+
+The same mistake was latent in `imac-patcher`'s `verify_cmdline()`, which read
+the embedded cmdline from the EFI fallback; once that path is stock Limine there
+is no `.cmdline` there at all. It now reads the UKI directly.
+
+## What a clean install actually needs
+
+None of the boot repairs above. A fresh Omarchy install puts Limine at both
+`\EFI\limine\limine_x64.efi` and `\EFI\BOOT\BOOTX64.EFI` (Omarchy sets
+`ENABLE_LIMINE_FALLBACK=yes`) with a single `/boot/limine.conf`, so the menu
+appears whichever route the firmware takes — with or without macOS or OpenCore
+in the picture.
+
+Both faults on this machine were self-inflicted: the UKI-over-fallback bypass
+added by hand on 2026-08-30, and the shadow configs added by this repo's own
+scripts. That is why the `boot` module *detects and repairs* rather than
+assuming: on a healthy machine it reports `applied` and changes nothing.
 
 ## Considered and rejected
 

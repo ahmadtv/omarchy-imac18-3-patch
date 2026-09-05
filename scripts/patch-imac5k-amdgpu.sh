@@ -176,11 +176,17 @@ fi
 say "rebuilding initramfs (bakes the patched module in)"
 if command -v limine-mkinitcpio >/dev/null; then limine-mkinitcpio; else mkinitcpio -P; fi
 
-# sync the Limine copies (this ESP has three — see the project README)
-if [[ -f /boot/limine.conf ]]; then
-	cp -f /boot/limine.conf /boot/EFI/BOOT/limine.conf 2>/dev/null || true
-	cp -f /boot/limine.conf /boot/EFI/limine/limine.conf 2>/dev/null || true
-fi
+# Remove shadowing limine.conf copies. Limine >= 10.3.0 loads the FIRST config
+# in its search order, so a copy at EFI/limine/ or EFI/BOOT/ overrides
+# /boot/limine.conf -- the file limine-mkinitcpio actually maintains. Earlier
+# versions of this script created them; `limine-install` flags them as
+# conflicts and says to delete them.
+for shadow in /boot/EFI/limine/limine.conf /boot/EFI/BOOT/limine.conf \
+	/boot/boot/limine/limine.conf /boot/limine/limine.conf; do
+	[[ -f $shadow ]] || continue
+	say "removing shadowing config $shadow"
+	rm -f "$shadow"
+done
 
 # Refresh the fallback boot path too. On this machine \EFI\BOOT\BOOTX64.EFI is a
 # COPY of the UKI (an earlier bypass of Limine), not the Limine binary — so if
@@ -190,12 +196,17 @@ fi
 # Only refresh it when it really is a UKI copy; never clobber a Limine binary.
 UKI=/boot/EFI/Linux/omarchy_linux.efi
 FALLBACK=/boot/EFI/BOOT/BOOTX64.EFI
-if [[ -f "$UKI" && -f "$FALLBACK" ]] && \
-   objcopy -O binary --only-section=.cmdline "$FALLBACK" /dev/null 2>/dev/null; then
-	if ! cmp -s "$UKI" "$FALLBACK"; then
-		say "refreshing fallback boot path $FALLBACK from the new UKI"
+# NB: `objcopy --only-section=X` exits 0 even when section X is absent -- it
+# writes nothing. Testing its exit status classifies every PE binary as a UKI,
+# which on a stock ESP means overwriting Limine with a kernel image.
+if [[ -f "$UKI" && -f "$FALLBACK" ]]; then
+	probe="$(mktemp)"
+	objcopy -O binary --only-section=.cmdline "$FALLBACK" "$probe" 2>/dev/null || true
+	if [[ -s $probe ]] && ! cmp -s "$UKI" "$FALLBACK"; then
+		say "refreshing UKI-bypass fallback $FALLBACK from the new UKI"
 		cp -f "$UKI" "$FALLBACK"
 	fi
+	rm -f "$probe"
 fi
 sync
 

@@ -1,0 +1,81 @@
+#!/usr/bin/env bash
+#
+# 95-limine-esp-hygiene — install to /etc/boot/hooks/post.d/
+#
+# Keeps the ESP in the shape Limine and Omarchy expect, after every run of
+# limine-mkinitcpio or limine-snapper-sync (both run /etc/boot/hooks/post.d/*).
+#
+# 1. Removes shadowing limine.conf copies.
+#
+#    Limine >= 10.3.0 loads the FIRST config it finds in its search order, so a
+#    copy at EFI/limine/ or EFI/BOOT/ silently overrides /boot/limine.conf --
+#    the file limine-mkinitcpio and limine-snapper-sync actually maintain.
+#    `limine-install` detects these and tells you to delete them; see
+#    check_limine_config_conflicts() in that script for the canonical list.
+#
+#    Earlier versions of this project's own scripts created exactly those
+#    copies, believing the ESP "needed three copies kept in sync". It does not.
+#    On 2026-09-05 that cost a Snapper snapshot: it existed in `snapper list`
+#    and in /boot/limine.conf, but the boot menu was reading a shadow copy from
+#    the day before and never showed it.
+#
+# 2. Refreshes \EFI\BOOT\BOOTX64.EFI *only* when it is a UKI copy rather than
+#    the Limine binary.
+#
+#    Stock Omarchy sets ENABLE_LIMINE_FALLBACK=yes, so limine-install puts
+#    Limine there and both boot routes show the menu. Some machines have a UKI
+#    copied over it instead (an old "bypass Limine" workaround); on those, the
+#    copy goes stale after a kernel rebuild and boots the previous initramfs.
+#    Restoring stock is better -- but while the bypass is in place, keep it
+#    current rather than silently stale.
+#
+# Exit codes: the hook runner treats >=100 as fatal and aborts its caller.
+# Nothing here is worth aborting a kernel install over, so always exit 0.
+
+set -uo pipefail
+
+ESP=/boot
+CANONICAL="${ESP}/limine.conf"
+UKI="${ESP}/EFI/Linux/omarchy_linux.efi"
+FALLBACK="${ESP}/EFI/BOOT/BOOTX64.EFI"
+
+# Same list limine-install checks, minus the canonical path itself.
+SHADOWS=(
+	"${ESP}/EFI/limine/limine.conf"
+	"${ESP}/EFI/BOOT/limine.conf"
+	"${ESP}/boot/limine/limine.conf"
+	"${ESP}/limine/limine.conf"
+)
+
+warn() { printf '95-limine-esp-hygiene: %s\n' "$*" >&2; }
+
+[[ -f $CANONICAL ]] || exit 0
+
+for f in "${SHADOWS[@]}"; do
+	[[ -f $f ]] || continue
+	if rm -f "$f"; then
+		printf '95-limine-esp-hygiene: removed shadowing config %s\n' "$f"
+	else
+		warn "could not remove shadowing config $f"
+	fi
+done
+
+# Is the fallback a UKI? NB: `objcopy --only-section=X` exits 0 even when
+# section X is absent -- it just writes nothing. Testing its exit status
+# classifies every PE binary as a UKI, which on a stock ESP means overwriting
+# the Limine binary with a 74 MB kernel image. Check for actual bytes.
+if [[ -f $UKI && -f $FALLBACK ]]; then
+	probe="$(mktemp)"
+	objcopy -O binary --only-section=.cmdline "$FALLBACK" "$probe" 2>/dev/null || true
+	if [[ -s $probe ]] && ! cmp -s "$UKI" "$FALLBACK"; then
+		if cp -f "$UKI" "$FALLBACK"; then
+			printf '95-limine-esp-hygiene: refreshed UKI-bypass fallback %s\n' "$FALLBACK"
+		else
+			warn "could not refresh $FALLBACK"
+		fi
+	fi
+	rm -f "$probe"
+fi
+
+sync
+exit 0

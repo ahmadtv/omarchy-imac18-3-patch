@@ -18,10 +18,11 @@
 # whichever entry you pick decides which module loads. If the test entry
 # misbehaves, reboot and take the default — nothing to restore.
 #
-# The test entry is appended to limine.conf by hand. limine.conf is fully
-# auto-generated, so a kernel update or any limine-mkinitcpio run drops the
-# entry. That is the intended failure direction: what you lose is the test,
-# and what you keep is a known-good default.
+# The test entry is appended to limine.conf by hand, and limine.conf is
+# auto-generated, so a regeneration may drop it. Observed so far: it survives
+# limine-snapper-sync (verified twice, 2026-09-05); behaviour across a full
+# limine-mkinitcpio run is untested. Either way the failure direction is the
+# safe one -- what you lose is the test, what you keep is a known-good default.
 #
 #   imac-test-entry stage <known-good-amdgpu.ko.zst>
 #       Current UKI becomes the test entry. The module you name is installed as
@@ -47,11 +48,16 @@ die() { printf '\033[1;31mERROR:\033[0m %s\n' "$*" >&2; exit 1; }
 
 need_root() { [[ $EUID -eq 0 ]] || die "run with sudo: sudo $0 $*"; }
 
-# Every limine.conf copy on this ESP must stay identical — the firmware may read
-# any of them, and a stale copy boots a stale kernel.
+# There is exactly ONE limine.conf: /boot/limine.conf. Limine >= 10.3.0 loads
+# the first config in its search order, so copies at EFI/limine/ or EFI/BOOT/
+# override it and go stale -- `limine-install` flags them as conflicts. An
+# earlier version of this script created them; now it removes them.
 sync_conf() {
-	cp -f "$CONF" "${ESP}/EFI/BOOT/limine.conf" 2>/dev/null || true
-	cp -f "$CONF" "${ESP}/EFI/limine/limine.conf" 2>/dev/null || true
+	local f
+	for f in "${ESP}/EFI/limine/limine.conf" "${ESP}/EFI/BOOT/limine.conf" \
+		"${ESP}/boot/limine/limine.conf" "${ESP}/limine/limine.conf"; do
+		[[ -f $f ]] && rm -f "$f"
+	done
 	sync
 }
 
@@ -80,8 +86,8 @@ append_test_entry() {
 	cat >> "$CONF" <<EOF
 
 ${MARKER} (remove after confirming)
-### Added by imac-test-entry. NOT auto-generated: a kernel update or any
-### limine-mkinitcpio run drops this entry, leaving the known-good default.
+### Added by imac-test-entry, not by limine-entry-tool. A config regeneration
+### may drop it; that leaves the known-good default, which is the safe outcome.
 protocol: efi
 path: boot():/EFI/Linux/$(basename "$TESTUKI")#${hash}
 cmdline: ${cmdline}
@@ -92,8 +98,21 @@ EOF
 rebuild_default_uki() {
 	say "rebuilding the default UKI around the installed module"
 	if command -v limine-mkinitcpio >/dev/null; then limine-mkinitcpio >/dev/null; else mkinitcpio -P >/dev/null; fi
-	# The fallback path the firmware may take on its own must track the default.
-	cp -f "$UKI" "${ESP}/EFI/BOOT/BOOTX64.EFI" 2>/dev/null || true
+
+	# On a stock ESP \EFI\BOOT\BOOTX64.EFI is the Limine binary and must not be
+	# touched. Only machines still running the old "UKI over the fallback"
+	# bypass need it refreshed, or that path boots a stale initramfs.
+	#
+	# NB: `objcopy --only-section=X` exits 0 even when section X is absent -- it
+	# writes nothing. Testing its exit status calls every PE binary a UKI, and
+	# this line then overwrites Limine with a 74 MB kernel image.
+	local fb="${ESP}/EFI/BOOT/BOOTX64.EFI" probe
+	if [[ -f $fb ]]; then
+		probe="$(mktemp)"
+		objcopy -O binary --only-section=.cmdline "$fb" "$probe" 2>/dev/null || true
+		[[ -s $probe ]] && cp -f "$UKI" "$fb" 2>/dev/null
+		rm -f "$probe"
+	fi
 	sync_conf
 }
 
