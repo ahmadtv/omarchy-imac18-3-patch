@@ -111,6 +111,55 @@ session, so a GPU reset costs nothing. Capture the devcoredump at
   amdgpu module. `imac-patcher` already synced it; `patch-imac5k-amdgpu.sh` now
   does too. Anything that rebuilds the UKI must refresh it.
 
+## Boot chain on this machine
+
+Three EFI system partitions exist, but only one belongs to Omarchy:
+
+| Partition | Disk | Contents |
+|---|---|---|
+| `nvme0n1p1` (2 GB, `OMARCHY`) | internal WD Blue SN5000 | Limine — Omarchy's own, stock |
+| `sdb1` (200 MB, `EFI`) | USB "My Passport" | OpenCore (`EFI/OC/OpenCore.efi`), for macOS |
+| `sdc1` (200 MB, `EFI`) | USB "WDC WD20NMVW" | Empty; same filesystem UUID as sdb1, i.e. a clone |
+
+Firmware `BootOrder` is `0001,0080,0081` — `Boot0001 Omarchy` points at
+`\EFI\limine\limine_x64.efi` and is first; the two `Mac OS X` entries follow.
+
+### Non-stock: the Limine fallback bypass
+
+Stock Omarchy sets `ENABLE_LIMINE_FALLBACK=yes` (see
+`/etc/limine-entry-tool.d/omarchy-defaults.conf`), and `limine-install` acts on
+it by placing **Limine** at `\EFI\BOOT\BOOTX64.EFI`.
+
+On this machine that file is a copy of the UKI instead, with the real Limine
+renamed `BOOTX64.LIMINE.EFI.unused`. Timestamps date the change: Limine was
+written to both locations on 2026-08-28 12:29 (install), and `BOOTX64.UKI.BACKUP`
+— a 75 MB UKI — appeared 2026-08-30 17:01, during the black-screen
+troubleshooting. It was done to work around a "no config found" failure.
+
+**Consequence:** booting via the ESP's default path (which the Mac's startup
+picker uses when you select the EFI volume) shows *no menu at all* — a UKI has
+none — and boots straight into whatever that copy holds. That is why a chosen
+boot entry can appear to be ignored.
+
+**Fix:** restore stock by putting `BOOTX64.LIMINE.EFI.unused` back as
+`BOOTX64.EFI`. The original "no config found" was most likely the stale-copy bug
+below, which is now fixed — `/boot/EFI/BOOT/limine.conf` exists and is in sync.
+Keep `BOOTX64.UKI.BACKUP` until this is confirmed on hardware.
+
+### Fixed: ESP limine.conf copies went stale
+
+`/boot` carries three copies of `limine.conf`. `limine-mkinitcpio` and
+`limine-snapper-sync` write only the ESP-root copy, while Limine reads the one
+next to its binary (`/EFI/limine/limine.conf`). Nothing in the stock packages
+propagated it, so every kernel update and every new snapshot left the copy
+Limine actually reads behind.
+
+Observed 2026-09-05: a snapshot created at 18:58 appeared in `snapper list` and
+in `/boot/limine.conf` but never in the boot menu; the ESP copies still dated
+from 2026-09-04. `scripts/95-sync-esp-limine-conf`, installed to
+`/etc/boot/hooks/post.d/`, now propagates on every run of either tool. Verified
+by creating a snapshot and confirming all three copies matched afterwards.
+
 ## Considered and rejected
 
 **Fan curve daemon.** Measured 85 °C with the fan at its 1200 RPM minimum and
