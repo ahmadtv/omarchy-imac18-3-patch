@@ -18,9 +18,18 @@ Applies on top of imac5k-amdgpu-7.2.2.patch.
    it back. On reboot, the display teardown in the suspend path runs this
    naturally, so the firmware gets a single-link panel.
 
-   An earlier version cleared the latch from amdgpu_pci_shutdown() instead.
+   Clearing alone is not enough: measured over the DP AUX chardev, the
+   clear takes effect instantly (root and slave both read back 0) but the
+   panel raises HPD-RX and the detect path wakes the tile straight back up
+   within 2-10 ms. At reboot the stream-off runs before IRQs are suspended,
+   so that same interrupt wins the race. dc.apple_5k_going_down, set from
+   amdgpu_pci_shutdown() before the display is torn down, turns the wake
+   paths (root latch pulse, slave stream-enable latch) into no-ops, so the
+   clear done by the teardown is the last word the panel hears.
+
+   An earlier version cleared the latch from amdgpu_pci_shutdown() itself.
    That ran while the shutdown splash was still being scanned out, so the
-   splash itself skewed, and it did not fix the firmware logo. Removed.
+   splash skewed, and it did not fix the firmware logo. Removed.
 
 2. Half-dark panel at the disk-encryption password prompt
    The slave tile only gets a DC stream during an atomic modeset (see the
@@ -44,12 +53,13 @@ Both changes are no-ops on hardware without the tiled-panel quirk.
 
 --- a/drivers/gpu/drm/amd/amdgpu/amdgpu.h
 +++ b/drivers/gpu/drm/amd/amdgpu/amdgpu.h
-@@ -271,6 +271,9 @@
+@@ -271,6 +271,10 @@
  
  extern uint amdgpu_hdmi_hpd_debounce_delay_ms;
  
 +/* Apple 5K dual-tile panel (amdgpu_dm.c); false on other hardware. */
 +bool amdgpu_dm_has_tiled_stitch_panel(struct amdgpu_device *adev);
++void amdgpu_dm_apple5k_going_down(struct amdgpu_device *adev);
 +
  #define AMDGPU_VM_MAX_NUM_CTX			4096
  #define AMDGPU_SG_THRESHOLD			(256*1024*1024)
@@ -93,12 +103,33 @@ Both changes are no-ops on hardware without the tiled-panel quirk.
  	}
  
  	ret = amdgpu_debugfs_init(adev);
+@@ -2581,6 +2604,9 @@
+ 	 */
+ 	if (!amdgpu_passthrough(adev))
+ 		adev->mp1_state = PP_MP1_STATE_UNLOAD;
++	/* Apple 5K dual-tile panel: the display teardown below clears the panel
++	 * latch on stream disable; stop the wake paths from undoing it. */
++	amdgpu_dm_apple5k_going_down(adev);
+ 	amdgpu_device_prepare(dev);
+ 	amdgpu_device_suspend(dev, true);
+ 	adev->mp1_state = PP_MP1_STATE_NONE;
 --- a/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.c
 +++ b/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.c
-@@ -2988,6 +2988,30 @@
+@@ -2988,6 +2988,41 @@
  	return 0;
  }
  
++/*
++ * The machine is going down for firmware. From here on the Apple 5K tile wake
++ * paths are no-ops, so the latch clear done on stream disable is not undone by
++ * the HPD-RX re-detect the panel raises in response. See dc.apple_5k_going_down.
++ */
++void amdgpu_dm_apple5k_going_down(struct amdgpu_device *adev)
++{
++	if (adev && adev->dm.dc)
++		adev->dm.dc->apple_5k_going_down = true;
++}
++
 +/*
 + * True when this device drives an Apple dual-tile panel through the tiled
 + * stitch, i.e. one crtc feeds a root tile stream plus a peer slave-tile stream.
@@ -126,9 +157,37 @@ Both changes are no-ops on hardware without the tiled-panel quirk.
  static void amdgpu_dm_fini(struct amdgpu_device *adev)
  {
  	int i;
+--- a/drivers/gpu/drm/amd/display/dc/dc.h
++++ b/drivers/gpu/drm/amd/display/dc/dc.h
+@@ -1800,6 +1800,14 @@
+ 	struct dc_phy_addr_space_config vm_pa_config;
+ 
+ 	uint8_t link_count;
++
++	/* Apple 5K dual-tile panel: set once the machine is going down for
++	 * firmware (PCI shutdown). Clearing the panel latch makes the panel raise
++	 * HPD-RX, and the detect path would otherwise wake the tile straight
++	 * back up -- within 2-10 ms on hardware -- so the firmware inherits a
++	 * woken tile and draws its boot logo skewed. Once set, the wake paths
++	 * are no-ops and the latch stays cleared. */
++	bool apple_5k_going_down;
+ 	struct dc_link *links[MAX_LINKS];
+ 	uint8_t lowest_dpia_link_index;
+ 	struct link_service *link_srv;
 --- a/drivers/gpu/drm/amd/display/dc/link/link_dpms.c
 +++ b/drivers/gpu/drm/amd/display/dc/link/link_dpms.c
-@@ -115,6 +115,41 @@
+@@ -91,6 +91,10 @@
+ 	if (!dc_link_needs_tiled_stream_enable_latch(link) || !link->local_sink)
+ 		return;
+ 
++	/* Going down: leave the panel in its cold-boot state for the firmware. */
++	if (link->dc && link->dc->apple_5k_going_down)
++		return;
++
+ 	DC_LOGGER_INIT(link->ctx->logger);
+ 
+ 	root_link = link->tiled_peer;
+@@ -115,6 +119,41 @@
  		    link->local_sink);
  }
  
@@ -170,7 +229,7 @@ Both changes are no-ops on hardware without the tiled-panel quirk.
  void link_blank_all_dp_displays(struct dc *dc)
  {
  	unsigned int i;
-@@ -2244,6 +2279,10 @@
+@@ -2244,6 +2283,10 @@
  	update_psp_stream_config(pipe_ctx, true);
  	dc->hwss.blank_stream(pipe_ctx);
  
@@ -183,10 +242,17 @@ Both changes are no-ops on hardware without the tiled-panel quirk.
  
 --- a/drivers/gpu/drm/amd/display/dc/link/protocols/link_dpcd.c
 +++ b/drivers/gpu/drm/amd/display/dc/link/protocols/link_dpcd.c
-@@ -264,3 +264,21 @@
- 	return core_link_write_dpcd(root_link, APPLE_5K_DPCD_ROOT_PANEL_LATCH,
- 				    &payload, sizeof(payload));
- }
+@@ -261,6 +261,28 @@
+ 	if (!dc_link_has_tiled_root_panel_patch(root_link))
+ 		return DC_OK;
+ 
++	/* Going down: leave the panel in its cold-boot state for the firmware. */
++	if (root_link->dc && root_link->dc->apple_5k_going_down)
++		return DC_OK;
++
++	return core_link_write_dpcd(root_link, APPLE_5K_DPCD_ROOT_PANEL_LATCH,
++				    &payload, sizeof(payload));
++}
 +
 +/*
 + * Teardown counterpart of the pulse above. Apple's firmware expects the panel
@@ -202,9 +268,9 @@ Both changes are no-ops on hardware without the tiled-panel quirk.
 +	if (!dc_link_has_tiled_root_panel_patch(root_link))
 +		return DC_OK;
 +
-+	return core_link_write_dpcd(root_link, APPLE_5K_DPCD_ROOT_PANEL_LATCH,
-+				    &payload, sizeof(payload));
-+}
+ 	return core_link_write_dpcd(root_link, APPLE_5K_DPCD_ROOT_PANEL_LATCH,
+ 				    &payload, sizeof(payload));
+ }
 --- a/drivers/gpu/drm/amd/display/dc/link/protocols/link_dpcd.h
 +++ b/drivers/gpu/drm/amd/display/dc/link/protocols/link_dpcd.h
 @@ -47,4 +47,11 @@
