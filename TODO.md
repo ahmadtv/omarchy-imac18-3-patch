@@ -18,10 +18,24 @@ warm reboot, and Apple's firmware — which assumes the factory single-link stat
 draws its boot logo into a panel configuration it doesn't expect. A cold boot
 power-cycles the panel, which is why it looks correct then.
 
-**Fix, implemented:** `link_apple_5k_root_panel_latch_clear()` writes `0x4F1 = 0`,
-called from `amdgpu_pci_shutdown()` (reboot/poweroff, while AUX still works) and
-from `amdgpu_dm_fini()` (module unload, so `--remove 5k` also leaves the panel
-in the state the firmware expects). Low risk — only runs as the device goes down.
+**Fix, second attempt (in the test entry now):** mirror the enable path.
+`dp_write_tiled_stream_disable_latch()` writes `0x4F1 = 0` on root and slave
+from `link_set_dpms_off()`, after `blank_stream()` and before `disable_link()`
+— the stream is already dark, so nothing on screen can skew, and AUX is still
+up. Every modeset then leaves the panel exactly as a cold boot found it; the
+existing wake/train/enable-latch sequence brings it back. On reboot the
+suspend-path display teardown runs this naturally.
+
+**First attempt, removed:** clearing the latch from `amdgpu_pci_shutdown()`.
+That ran while the shutdown splash was still being scanned out, so the splash
+itself skewed on the way down — and it did not fix the firmware logo either.
+It also logged only at `DC_LOG_DC` (debug), so it could never be confirmed
+from the journal. The replacement logs at info level; after a warm reboot out
+of the test entry, this proves it fired at the previous shutdown:
+
+```
+journalctl -k -b -1 | grep 'stream-disable latch'
+```
 
 ### Half-dark panel at the disk-encryption password prompt
 

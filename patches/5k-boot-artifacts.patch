@@ -4,17 +4,23 @@ Applies on top of imac5k-amdgpu-7.2.2.patch.
 
 1. Skewed Apple logo on a WARM reboot
    The stitch paths wake the slave tile by writing the vendor panel-latch
-   DPCD (0x4F1 = 1) in four places and never clear it -- there is no
-   shutdown hook, .remove or suspend handler anywhere in the stack. The
-   woken state therefore survives a warm reboot, and Apple's firmware,
+   DPCD (0x4F1 = 1) when the slave stream is enabled, and never clear it.
+   The woken state therefore survives a warm reboot, and Apple's firmware,
    which assumes the factory single-link state, draws its boot logo into a
-   panel configuration it does not expect. A cold boot power-cycles the
-   panel, which is why it only shows up on warm reboots.
+   dual-tile panel and skews it. A cold boot power-cycles the panel, which
+   is why it only shows up on warm reboots.
 
-   Fix: clear the latch on the way down -- from amdgpu_pci_shutdown()
-   (reboot/poweroff, while AUX still works) and from amdgpu_dm_fini()
-   (module unload, so `imac-patcher --remove 5k` also leaves the panel in
-   the state the firmware expects).
+   Fix: mirror the enable path. dp_write_tiled_stream_disable_latch() writes
+   0x4F1 = 0 on the root and slave links from link_set_dpms_off(), after
+   blank_stream() (nothing on screen to skew) and before disable_link()
+   (AUX still up). Every modeset then leaves the panel exactly as a cold
+   boot found it and the existing wake/train/enable-latch sequence brings
+   it back. On reboot, the display teardown in the suspend path runs this
+   naturally, so the firmware gets a single-link panel.
+
+   An earlier version cleared the latch from amdgpu_pci_shutdown() instead.
+   That ran while the shutdown splash was still being scanned out, so the
+   splash itself skewed, and it did not fix the firmware logo. Removed.
 
 2. Half-dark panel at the disk-encryption password prompt
    The slave tile only gets a DC stream during an atomic modeset (see the
@@ -31,19 +37,18 @@ Applies on top of imac5k-amdgpu-7.2.2.patch.
    Fix: once fbdev is set up, if this device drives a stitched tile panel,
    issue a second client hotplug. That takes the dev->fb_helper path, which
    does commit, so the peer tile stream is created during probe instead of
-   whenever something else happens to trigger a modeset.
+   whenever something else happens to trigger a modeset. Confirmed on
+   hardware: peer stream added 3 ms after fb0, down from 1160 ms.
 
 Both changes are no-ops on hardware without the tiled-panel quirk.
 
 --- a/drivers/gpu/drm/amd/amdgpu/amdgpu.h
 +++ b/drivers/gpu/drm/amd/amdgpu/amdgpu.h
-@@ -271,6 +271,11 @@
+@@ -271,6 +271,9 @@
  
  extern uint amdgpu_hdmi_hpd_debounce_delay_ms;
  
-+/* Apple 5K dual-tile panel helpers (amdgpu_dm.c). Both are no-ops on hardware
-+ * without the tiled-panel quirk. */
-+void amdgpu_dm_apple5k_panel_latch_teardown(struct amdgpu_device *adev);
++/* Apple 5K dual-tile panel (amdgpu_dm.c); false on other hardware. */
 +bool amdgpu_dm_has_tiled_stitch_panel(struct amdgpu_device *adev);
 +
  #define AMDGPU_VM_MAX_NUM_CTX			4096
@@ -88,43 +93,12 @@ Both changes are no-ops on hardware without the tiled-panel quirk.
  	}
  
  	ret = amdgpu_debugfs_init(adev);
-@@ -2574,6 +2597,12 @@
- 	if (adev->in_s4 && adev->in_suspend)
- 		return;
- 
-+	/* Put the Apple 5K dual-tile panel back to its factory single-link
-+	 * state before the device goes down; AUX is still usable here. Without
-+	 * this the woken state survives a warm reboot and Apple's firmware
-+	 * draws its boot logo skewed. No-op on other hardware. */
-+	amdgpu_dm_apple5k_panel_latch_teardown(adev);
-+
- 	/* if we are running in a VM, make sure the device
- 	 * torn down properly on reboot/shutdown.
- 	 * unfortunately we can't detect certain
 --- a/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.c
 +++ b/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.c
-@@ -2988,10 +2988,54 @@
+@@ -2988,6 +2988,30 @@
  	return 0;
  }
  
-+/*
-+ * Return the Apple 5K dual-tile panel to its factory single-link state.
-+ *
-+ * The tiled-stitch paths wake the slave tile with a vendor DPCD write and never
-+ * clear it, so the woken state survives a warm reboot into Apple's firmware,
-+ * which then draws its boot logo skewed. Clear the latch while AUX still works:
-+ * on shutdown/reboot (amdgpu_pci_shutdown) and on module unload (below).
-+ *
-+ * No-op on hardware without the tiled-panel quirk.
-+ */
-+void amdgpu_dm_apple5k_panel_latch_teardown(struct amdgpu_device *adev)
-+{
-+	if (!adev || !adev->dm.dc)
-+		return;
-+
-+	dc_apple_5k_panel_latch_teardown(adev->dm.dc);
-+}
-+
 +/*
 + * True when this device drives an Apple dual-tile panel through the tiled
 + * stitch, i.e. one crtc feeds a root tile stream plus a peer slave-tile stream.
@@ -152,72 +126,61 @@ Both changes are no-ops on hardware without the tiled-panel quirk.
  static void amdgpu_dm_fini(struct amdgpu_device *adev)
  {
  	int i;
- 
-+	amdgpu_dm_apple5k_panel_latch_teardown(adev);
-+
- 	if (adev->dm.vblank_control_workqueue) {
- 		destroy_workqueue(adev->dm.vblank_control_workqueue);
- 		adev->dm.vblank_control_workqueue = NULL;
---- a/drivers/gpu/drm/amd/display/dc/core/dc.c
-+++ b/drivers/gpu/drm/amd/display/dc/core/dc.c
-@@ -62,6 +62,7 @@
- #include "grph_object_id.h"
- 
- #include "link_service.h"
-+#include "link/protocols/link_dpcd.h"
- #include "dm_helpers.h"
- #include "mem_input.h"
- 
-@@ -7707,3 +7708,34 @@
- 			? update_planes_and_stream_cleanup_v3(scratch)
- 			: update_planes_and_stream_cleanup_v2(scratch);
+--- a/drivers/gpu/drm/amd/display/dc/link/link_dpms.c
++++ b/drivers/gpu/drm/amd/display/dc/link/link_dpms.c
+@@ -115,6 +115,41 @@
+ 		    link->local_sink);
  }
-+
+ 
 +/*
-+ * Apple 5K dual-tile panel teardown.
++ * Mirror of dp_write_tiled_stream_enable_latch(): clear the panel latch when
++ * the slave tile stream is turned off. Apple's firmware assumes the factory
++ * single-link state on the next boot; leaving 0x4F1 = 1 behind across a warm
++ * reboot makes it draw the boot logo into a dual-tile panel and skew it.
 + *
-+ * The tiled-stitch paths wake the slave tile by writing the vendor panel-latch
-+ * DPCD (0x4F1 = 1) and never clear it. Apple's firmware assumes the factory
-+ * single-link state on the next boot, so after a warm reboot it draws its boot
-+ * logo into a panel configuration it does not expect and the logo comes out
-+ * skewed. Clearing the latch on the way down restores that state.
-+ *
-+ * Called from the shutdown/reboot path and from module unload, while AUX is
-+ * still usable. No-op on any machine without the tiled-panel quirk.
++ * Done here, on the stream-disable path, rather than at PCI shutdown: by this
++ * point the stream is already blanked, so there is nothing on screen to skew,
++ * and AUX is still up because disable_link() has not run yet. Every modeset
++ * then leaves the panel exactly as a cold boot found it, and the existing
++ * wake/train/enable-latch sequence brings it back.
 + */
-+void dc_apple_5k_panel_latch_teardown(struct dc *dc)
++static void dp_write_tiled_stream_disable_latch(struct dc_link *link)
 +{
-+	int i;
++	struct dc_link *root_link;
++	uint8_t payload = 0;
++	enum dc_status status;
++	enum dc_status root_status = DC_OK;
 +
-+	if (!dc)
++	if (!dc_link_needs_tiled_stream_enable_latch(link) || !link->local_sink)
 +		return;
 +
-+	for (i = 0; i < dc->link_count; i++) {
-+		struct dc_link *link = dc->links[i];
++	DC_LOGGER_INIT(link->ctx->logger);
 +
-+		if (!dc_link_has_tiled_root_panel_patch(link))
-+			continue;
++	root_link = link->tiled_peer;
++	if (dc_link_has_tiled_root_panel_patch(root_link))
++		root_status = link_apple_5k_root_panel_latch_clear(root_link);
 +
-+		DC_LOG_DC("APPLE5K: panel latch teardown 0x4F1=0 root_link[%u] status=%d\n",
-+			  link->link_index,
-+			  link_apple_5k_root_panel_latch_clear(link));
-+	}
++	status = core_link_write_dpcd(link, APPLE_5K_DPCD_PANEL_LATCH,
++				      &payload, sizeof(payload));
++	DC_LOG_INFO("APPLE5K: stream-disable latch 0x4F1=0 link[%u] status=%d root_link[%d] root_status=%d\n",
++		    link->link_index, status,
++		    root_link ? (int)root_link->link_index : -1, root_status);
 +}
---- a/drivers/gpu/drm/amd/display/dc/dc.h
-+++ b/drivers/gpu/drm/amd/display/dc/dc.h
-@@ -2750,6 +2750,12 @@
- 	return &link->local_sink->edid_caps.panel_patch;
- }
- 
-+/*
-+ * Clear the Apple 5K panel-latch on every tiled root link, returning the panel
-+ * to its factory single-link state. Call on shutdown/reboot and module unload.
-+ */
-+void dc_apple_5k_panel_latch_teardown(struct dc *dc);
 +
- static inline bool dc_link_has_tiled_root_panel_patch(const struct dc_link *link)
+ void link_blank_all_dp_displays(struct dc *dc)
  {
- 	const struct dc_panel_patch *patch = dc_link_get_panel_patch(link);
+ 	unsigned int i;
+@@ -2244,6 +2279,10 @@
+ 	update_psp_stream_config(pipe_ctx, true);
+ 	dc->hwss.blank_stream(pipe_ctx);
+ 
++	/* Stream is dark now and the link is still up: return the Apple 5K
++	 * panel latch to its cold-boot state before the link goes away. */
++	dp_write_tiled_stream_disable_latch(link);
++
+ 	if (pipe_ctx->link_config.dp_tunnel_settings.should_use_dp_bw_allocation)
+ 		deallocate_usb4_bandwidth(pipe_ctx->stream);
+ 
 --- a/drivers/gpu/drm/amd/display/dc/link/protocols/link_dpcd.c
 +++ b/drivers/gpu/drm/amd/display/dc/link/protocols/link_dpcd.c
 @@ -264,3 +264,21 @@
