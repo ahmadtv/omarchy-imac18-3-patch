@@ -141,10 +141,23 @@ picker uses when you select the EFI volume) shows *no menu at all* — a UKI has
 none — and boots straight into whatever that copy holds. That is why a chosen
 boot entry can appear to be ignored.
 
-**Fix:** restore stock by putting `BOOTX64.LIMINE.EFI.unused` back as
-`BOOTX64.EFI`. The original "no config found" was most likely the stale-copy bug
-below, which is now fixed — `/boot/EFI/BOOT/limine.conf` exists and is in sync.
-Keep `BOOTX64.UKI.BACKUP` until this is confirmed on hardware.
+Confirmed by the owner from the two observed routes:
+
+| Route | Lands on | Menu? |
+|---|---|---|
+| Alt at startup → "EFI" disk | `\EFI\BOOT\BOOTX64.EFI` (was a UKI copy) | none — boots straight in |
+| No Alt → OpenCore → Omarchy | `\EFI\limine\limine_x64.efi` via `OpenLinuxBoot.efi` | Limine menu |
+
+**Fixed 2026-09-05:** `BOOTX64.LIMINE.EFI.unused` restored as `BOOTX64.EFI`, so
+both routes now reach Limine. The UKI copy is kept as `BOOTX64.UKI-bypass.backup`
+until this is confirmed on hardware. The original "no config found" was most
+likely the stale-copy bug below; `/boot/EFI/BOOT/limine.conf` now exists and is
+in sync beside the binary.
+
+Note the hook guard: `objcopy --only-section=X` exits 0 even when section X is
+absent, so testing its exit status classifies *every* PE binary as a UKI — the
+first version of the sync hook cheerfully overwrote Limine with a kernel image.
+Extract and check for actual bytes instead.
 
 ### Fixed: ESP limine.conf copies went stale
 
