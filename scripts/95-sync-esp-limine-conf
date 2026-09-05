@@ -49,10 +49,22 @@ for dest in "${ESP}/EFI/limine/limine.conf" "${ESP}/EFI/BOOT/limine.conf"; do
 	fi
 done
 
-# Only touch the fallback when it is already a UKI (it has a .cmdline section).
-if [[ -f $UKI && -f $FALLBACK ]] \
-	&& objcopy -O binary --only-section=.cmdline "$FALLBACK" /dev/null 2>/dev/null \
-	&& ! cmp -s "$UKI" "$FALLBACK"; then
+# Only touch the fallback when it is already a UKI copy — never when it is the
+# Limine binary, which is what stock Omarchy puts there.
+#
+# NB: `objcopy --only-section=X` EXITS 0 even when section X does not exist; it
+# just writes nothing. Testing its exit status therefore treats every PE binary
+# as a UKI, and the hook happily overwrites Limine with a kernel image. Extract
+# and check that we actually got bytes.
+is_uki=0
+if [[ -f $FALLBACK ]]; then
+	probe="$(mktemp)"
+	objcopy -O binary --only-section=.cmdline "$FALLBACK" "$probe" 2>/dev/null || true
+	[[ -s $probe ]] && is_uki=1
+	rm -f "$probe"
+fi
+
+if [[ -f $UKI && $is_uki -eq 1 ]] && ! cmp -s "$UKI" "$FALLBACK"; then
 	if cp -f "$UKI" "$FALLBACK"; then
 		printf '95-sync-esp-limine-conf: refreshed %s from the current UKI\n' "$FALLBACK"
 	else
