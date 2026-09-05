@@ -35,7 +35,7 @@ EQ_DEST="${HOME}/.config/pipewire/filter-chain.conf.d/eq6.conf"
 SLEEP_TARGETS=(suspend.target hibernate.target hybrid-sleep.target suspend-then-hibernate.target)
 mkdir -p "$LOGDIR" "$CACHE"
 
-MODULES=(audio eq color suspend 5k)
+MODULES=(audio eq color suspend boot 5k)
 
 HAVE_GUM=0; command -v gum >/dev/null && HAVE_GUM=1
 say()  { printf '\033[1;33m==>\033[0m %s\n' "$*"; }
@@ -174,6 +174,79 @@ mod_suspend_detect() {
 mod_suspend_apply()  { sudo systemctl mask "${SLEEP_TARGETS[@]}"; }
 mod_suspend_remove() { sudo systemctl unmask "${SLEEP_TARGETS[@]}"; warn "sleep re-enabled — it is known to hang this machine"; }
 
+# ═══════════════════════ module: boot ══════════════════════════════════════
+HYGIENE_HOOK=/etc/boot/hooks/post.d/95-limine-esp-hygiene
+LIMINE_PKG_EFI=/usr/share/limine/BOOTX64.EFI
+
+mod_boot_title() { echo "Boot config hygiene"; }
+mod_boot_tier()  { echo boot; }
+mod_boot_desc()  { echo "Repairs two ways the boot menu goes wrong on this machine: stray limine.conf copies that silently override the real one (so new snapshots never appear), and a UKI copied over the EFI fallback (so that boot route shows no menu at all). Installs a hook that keeps it that way."; }
+
+# Everything here lives under /boot, which is root-only, so probe in one
+# non-interactive sudo and fall back to n/a rather than prompting from a
+# status listing.
+mod_boot_detect() {
+    sudo -n true 2>/dev/null || { echo n/a; return; }
+    local shadows fallback_uki hook
+    shadows="$(sudo -n bash -c 'n=0; for f in /boot/EFI/limine/limine.conf /boot/EFI/BOOT/limine.conf /boot/boot/limine/limine.conf /boot/limine/limine.conf; do [[ -f $f ]] && n=$((n+1)); done; echo $n')"
+    fallback_uki="$(sudo -n bash -c 'f=/boot/EFI/BOOT/BOOTX64.EFI
+        [[ -f $f ]] || { echo no; exit; }
+        p=$(mktemp); trap "rm -f $p" EXIT
+        objcopy -O binary --only-section=.cmdline "$f" "$p" 2>/dev/null
+        [[ -s $p ]] && echo yes || echo no')"
+    hook=no; [[ -x $HYGIENE_HOOK ]] && hook=yes
+
+    if [[ $shadows == 0 && $fallback_uki == no && $hook == yes ]]; then echo applied
+    elif [[ $shadows == 0 && $fallback_uki == no ]]; then echo partial
+    else echo not-applied; fi
+}
+
+mod_boot_apply() {
+    cat <<'EOF'
+
+What this changes, and how to undo it:
+  * deletes stray limine.conf copies under /boot/EFI (the real one at
+    /boot/limine.conf is untouched; copies are archived first)
+  * if the EFI fallback is a UKI, restores the Limine binary there
+    (the UKI is kept as BOOTX64.UKI-bypass.backup)
+  * installs a post.d hook so both stay correct after kernel updates
+
+Recovery: boot the OpenCore route or a Snapshot entry; restore with
+  sudo cp /boot/EFI/BOOT/BOOTX64.UKI-bypass.backup /boot/EFI/BOOT/BOOTX64.EFI
+EOF
+    confirm "Repair the boot configuration?" || return 1
+
+    sudo mkdir -p /boot/limine-conf-shadow-backup
+    local f
+    for f in "${LIMINE_SHADOW_CONFIGS[@]}"; do
+        sudo test -f "$f" || continue
+        sudo cp -f "$f" "/boot/limine-conf-shadow-backup/$(printf '%s' "${f#/boot/}" | tr / _)"
+        sudo rm -f "$f" && say "removed shadowing config $f"
+    done
+
+    if fallback_is_uki; then
+        local src="$LIMINE_PKG_EFI"
+        sudo test -f /boot/EFI/BOOT/BOOTX64.LIMINE.EFI.unused && src=/boot/EFI/BOOT/BOOTX64.LIMINE.EFI.unused
+        sudo test -f "$src" || { warn "no Limine binary found to restore (looked in $LIMINE_PKG_EFI)"; return 1; }
+        say "restoring Limine at the EFI fallback (was a UKI copy)"
+        sudo cp -f "$FALLBACK_PATH" /boot/EFI/BOOT/BOOTX64.UKI-bypass.backup
+        sudo cp -f "$src" "$FALLBACK_PATH"
+    fi
+
+    say "installing the ESP hygiene hook"
+    sudo install -m755 "${SCRIPT_DIR}/95-limine-esp-hygiene" "$HYGIENE_HOOK"
+    sudo sync
+    say "done — the boot menu will now show on every boot route"
+}
+
+mod_boot_remove() {
+    # The repaired layout is what stock Omarchy installs, so there is nothing
+    # sensible to "undo" there; only the hook is ours to take back.
+    sudo rm -f "$HYGIENE_HOOK"
+    say "hygiene hook removed; the ESP layout is left as stock Omarchy installs it"
+    warn "to restore the old UKI-over-fallback bypass: sudo cp /boot/EFI/BOOT/BOOTX64.UKI-bypass.backup ${FALLBACK_PATH}"
+}
+
 # ═══════════════════════ module: 5k ════════════════════════════════════════
 mod_5k_title() { echo "Native 5K display"; }
 mod_5k_tier()  { echo boot; }
@@ -266,18 +339,59 @@ mod_5k_remove() {
     say "reboot to return to stock"
 }
 
-# ── boot helpers (this ESP carries three limine.conf copies + a fallback UKI;
-#    updating only one is the classic way a fix silently fails to apply) ─────
+# ── boot helpers ───────────────────────────────────────────────────────────
+#
+# Limine >= 10.3.0 loads the FIRST config in its search order, so a copy at
+# EFI/limine/ or EFI/BOOT/ silently overrides /boot/limine.conf -- the file
+# limine-mkinitcpio and limine-snapper-sync actually maintain. Earlier versions
+# of this script *created* those copies, believing the ESP needed three kept in
+# sync. It does not, and the copies cost a Snapper snapshot its boot entry on
+# 2026-09-05. `limine-install` flags them; the fix is to delete them.
+LIMINE_SHADOW_CONFIGS=(
+    /boot/EFI/limine/limine.conf
+    /boot/EFI/BOOT/limine.conf
+    /boot/boot/limine/limine.conf
+    /boot/limine/limine.conf
+)
+UKI_PATH=/boot/EFI/Linux/omarchy_linux.efi
+FALLBACK_PATH=/boot/EFI/BOOT/BOOTX64.EFI
+
+remove_shadow_configs() {
+    local f
+    for f in "${LIMINE_SHADOW_CONFIGS[@]}"; do
+        sudo test -f "$f" || continue
+        sudo rm -f "$f" && say "removed shadowing config $f"
+    done
+    return 0
+}
+
+# True when the EFI fallback is a UKI copy rather than the Limine binary.
+# NB: `objcopy --only-section=X` exits 0 even when section X is absent -- it
+# writes nothing. Testing its exit status calls every PE binary a UKI, which on
+# a stock ESP means overwriting Limine with a kernel image. Check for bytes.
+fallback_is_uki() {
+    sudo bash -c 'p=$(mktemp); trap "rm -f $p" EXIT
+        objcopy -O binary --only-section=.cmdline '"$FALLBACK_PATH"' "$p" 2>/dev/null
+        [[ -s $p ]]' 2>/dev/null
+}
+
 sync_boot_files() {
-    say "rebuilding UKI and syncing every boot copy"
+    say "rebuilding UKI"
     sudo limine-mkinitcpio || return 1
-    sudo cp /boot/limine.conf /boot/EFI/BOOT/limine.conf 2>/dev/null
-    sudo cp /boot/limine.conf /boot/EFI/limine/limine.conf 2>/dev/null
-    sudo cp /boot/EFI/Linux/omarchy_linux.efi /boot/EFI/BOOT/BOOTX64.EFI 2>/dev/null
+    remove_shadow_configs
+    # Only relevant on machines still running the old "UKI over the fallback"
+    # bypass; on a stock ESP that path is Limine and must not be touched.
+    if fallback_is_uki; then
+        say "refreshing UKI-bypass fallback ${FALLBACK_PATH}"
+        sudo cp -f "$UKI_PATH" "$FALLBACK_PATH" 2>/dev/null
+    fi
+    sudo sync
 }
 verify_cmdline() {   # $1 must be present, $2 must be absent
+    # Read the UKI itself, not the EFI fallback: on a stock ESP the fallback is
+    # the Limine binary and carries no .cmdline at all.
     local line
-    line="$(sudo bash -c 'tmp=$(mktemp); trap "rm -f $tmp" EXIT; objcopy -O binary --only-section=.cmdline /boot/EFI/BOOT/BOOTX64.EFI "$tmp" && tr -d "\0" < "$tmp"')"
+    line="$(sudo bash -c 'tmp=$(mktemp); trap "rm -f $tmp" EXIT; objcopy -O binary --only-section=.cmdline '"$UKI_PATH"' "$tmp" && tr -d "\0" < "$tmp"')"
     [[ -n "${1:-}" ]] && ! grep -q "$1" <<<"$line" && { warn "verify: embedded cmdline missing '$1'"; return 1; }
     [[ -n "${2:-}" ]] &&   grep -q "$2" <<<"$line" && { warn "verify: embedded cmdline still has '$2'"; return 1; }
     say "embedded cmdline verified"
