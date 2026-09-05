@@ -207,6 +207,43 @@ added by hand on 2026-08-30, and the shadow configs added by this repo's own
 scripts. That is why the `boot` module *detects and repairs* rather than
 assuming: on a healthy machine it reports `applied` and changes nothing.
 
+## Fixed: skewed desktop after login (genlock lost at 8-bpc)
+
+Distinct from the two boot artifacts above, and the one that actually bit in
+daily use: after login the seam sheared, intermittently, on the *unmodified* 5K
+build.
+
+Cause, from the boot log: the panel comes up genlocked at 10-bpc, and the
+compositor's own modeset then re-creates the streams at 8-bpc and the slave tile
+loses sync:
+
+| t | state |
+|---|---|
+| 24.9 s | peer stream added, `sync_enabled=0` |
+| 29.3 s | both streams `sync_enabled=1`, `color_depth=10-bpc` — genlocked |
+| 30.7 s | compositor modeset, `color_depth=8-bpc` |
+| 31.4 s | slave `sync_enabled=0` — genlock gone, never recovers |
+
+Two tiles scanning out of phase is what reads as "skewed". The mode is correct
+5120x2880 throughout; only the sync is lost.
+
+**Fix:** pin the compositor to 10-bit. In `~/.config/hypr/monitors.lua`:
+
+```lua
+hl.monitor({ output = "", mode = "preferred", position = "auto", scale = 2,
+             cm = "dp3", bitdepth = 10 })
+```
+
+Verified live with `hyprctl reload`, no reboot: `currentFormat` went
+`XRGB8888` -> `XRGB2101010` and both tile streams returned to
+`sync_enabled=1`, stable on re-check. Shipped in `configs/monitors.lua`.
+
+Still unexplained: *why* the 8-bpc path fails to re-establish sync, when the
+same code genlocks fine at 10-bpc. `dm_enable_per_frame_crtc_master_sync()` is
+the place to look — see `patches/genlock-fix.patch`. Pinning 10-bit is a
+workaround, not a root-cause fix, though on a 10-bit-capable P3 panel it is
+what you want anyway.
+
 ## Considered and rejected
 
 **Fan curve daemon.** Measured 85 °C with the fan at its 1200 RPM minimum and
