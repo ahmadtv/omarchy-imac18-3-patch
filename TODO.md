@@ -308,7 +308,19 @@ differs between boots must be downstream: whether the GSL trigger-reset in
 own response to the phase. Making the eDP root the master instead is a cheap
 experiment, not a diagnosis.
 
-**Root cause to find:** `dm_enable_per_frame_crtc_master_sync()` (see
+**Root cause found (2026-09-06)** — and it is exactly the design flaw, not
+the panel. `set_master_stream()` only considers streams whose per-frame reset
+is *already* enabled and falls back to stream[0]; the stitch adds the slave's
+peer stream first, so on a clean commit the slave is picked as its own master
+and never gets the reset. The DCE sync group is built from streams that carry
+the reset, so the slave tile is left out. Seven modesets in one boot: every
+commit with BOTH tiles flagged locked, every one with only the root flagged
+sheared; the outcome depended on a stale flag surviving from the previous
+commit. **Fix:** `patches/5k-genlock-deterministic.patch` flags both tile
+streams before the master pick. In the test entry; if `hyprctl reload` locks
+every time there, promote it and return `bitdepth` to 10.
+
+**Earlier note, kept for the record:** `dm_enable_per_frame_crtc_master_sync()` (see
 `patches/genlock-fix.patch`) is where `triggered_crtc_reset.enabled` is set for
 the slave; something about which stream `set_master_stream()` picks, or the
 order the two tile streams land in the context, differs between the modesets

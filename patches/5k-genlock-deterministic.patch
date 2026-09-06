@@ -1,0 +1,54 @@
+iMac 5K dual-tile panel: make genlock deterministic.
+
+Applies on top of imac5k-amdgpu-7.2.2.patch and 5k-early-modeset.patch.
+
+set_master_stream() only considers streams whose per-frame CRTC reset is
+already enabled and falls back to stream[0]. The stitch adds the slave
+tile's peer stream before the root, so on a clean commit -- nothing
+enabled yet -- the slave becomes its own master and never gets the reset.
+The hardware sync group is built from streams that carry the reset, so
+the slave tile is left out and the two halves scan out of phase: the
+sheared seam after login.
+
+Measured on hardware (7 modesets in one boot): every commit where BOTH
+tile streams carried the reset locked; every one where only the root did
+was sheared. Whether it locked depended on a stale flag surviving from
+the previous commit -- a coin flip, at any bit depth.
+
+Enable the reset on both tile streams before the master pick.
+
+--- a/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.c
++++ b/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.c
+@@ -7825,6 +7825,32 @@
+ 		 */
+ 	}
+ 
++	/*
++	 * Apple iMac 5K dual-tile genlock, made deterministic.
++	 *
++	 * set_master_stream() only considers streams whose per-frame reset is
++	 * ALREADY enabled and falls back to stream[0] -- which is the slave
++	 * tile, since the stitch adds the peer stream before the root. On a
++	 * clean commit nothing is enabled yet, so the slave is picked as its
++	 * own master and, being the master, never gets the reset itself. The
++	 * hardware sync group (enable_timing_multisync) is built from streams
++	 * with the reset enabled, so the slave tile is left out of it and the
++	 * two halves scan out of phase: a sheared seam.
++	 *
++	 * Measured on hardware (2026-09-06, 7 modesets in one boot): every
++	 * commit where BOTH tile streams carried the reset locked; every one
++	 * where only the root did was sheared. Whether it locked depended on
++	 * a stale flag surviving from the previous commit -- a coin flip.
++	 *
++	 * Enable the reset on both tile streams up front, so the master pick
++	 * is deterministic and both tiles are always in the sync group.
++	 */
++	for (i = 0; i < context->stream_count; i++) {
++		stream = context->streams[i];
++		if (stream && stream->link && stream->link->tiled_pair_apple)
++			stream->triggered_crtc_reset.enabled = true;
++	}
++
+ 	set_master_stream(context->streams, context->stream_count);
+ 
+ 	for (i = 0; i < context->stream_count ; i++) {
