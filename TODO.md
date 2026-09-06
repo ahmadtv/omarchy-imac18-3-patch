@@ -402,6 +402,19 @@ assuming: on a healthy machine it reports `applied` and changes nothing.
 
 ## Fixed: sheared desktop seam (slave tile loses genlock)
 
+**Seen again 2026-09-07 00:01, default build** (boot 1a2565…-successor, kernel
+7.1.9-arch1-2, full stack + all five increments): desktop sheared after login
+while the driver reports both tile streams `sync_enabled=1` from the 22.3 s
+commit onward and the 250 ms settle re-sync agreed; no later modeset, no
+re-detect loop (7 detects, 0 re-trainings). So the driver's bookkeeping and
+the panel disagree — the same shape as before the settle-resync. The two
+lean-pair boots just before it (23:59, 00:00, same logic minus logging and
+DPCD read-backs, plus the 9-byte tile-group fix) were clean; one sample each,
+not evidence of a difference yet. Worth running the lean entry for several
+boots to see whether the shear ever shows there. Workaround unchanged:
+`hyprctl reload` forces a modeset.
+
+
 The artifact that actually bites in daily use, distinct from the boot-time ones.
 The mode is a correct 5120x2880 throughout; what is lost is sync — the slave
 stream's `sync_enabled` flips to 0 on some modeset and the two tiles scan out
