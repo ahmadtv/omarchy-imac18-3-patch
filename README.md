@@ -97,7 +97,7 @@ sudo systemctl mask suspend.target hibernate.target hybrid-sleep.target suspend-
 ## 🚧 Known rough edges
 
 - 🌗 **Skewed Apple logo on *warm* reboots** with 5K active — cold boots are fine. The patch wakes the panel's second tile and Apple's firmware inherits that state. Root-caused; an experimental fix is under test behind its own boot entry (`patches/5k-latch-clear.patch`). The half-dark password prompt that used to accompany it is **fixed** and ships by default (`patches/5k-early-modeset.patch`).
-- 🪞 **Sheared seam after login, intermittently** — the two tiles lose genlock on some modesets. Any fresh modeset re-locks them (toggle `bitdepth` in `monitors.lua` and `hyprctl reload`). Root cause under investigation; see `TODO.md`.
+- 🪞 **Sheared seam after login, intermittently** — the two tiles lose genlock on some modesets. Root-caused (the master pick left the slave tile out of the hardware sync group); fix in `patches/5k-genlock-deterministic.patch`, under test behind its own boot entry. Until it ships, any fresh modeset re-rolls it (toggle `bitdepth` in `monitors.lua` and `hyprctl reload`).
 - 🎬 **Video encode (VCE)** hangs the GPU on certain transcodes, taking the session down. Under investigation.
 - 📺 **YouTube 4K is CPU-decoded** — Polaris has no VP9/AV1 silicon. Hardware limit, not fixable.
 
