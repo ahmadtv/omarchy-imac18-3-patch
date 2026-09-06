@@ -71,7 +71,18 @@ experimental entry was dropped and the test entry recreated as an exact clone
 of `Omarchy → linux`; the harness is removed. The latch-clear work stays in
 `patches/5k-latch-clear.patch` for whoever picks it up.
 
-**Control experiment, still to run:** boot the pre-5K `Snapshots › 2` entry
+**Control experiment, run 2026-09-06:** warm reboot out of `Snapshots › 2`
+(stock amdgpu, 4K fallback): Apple logo **straight but soft** — the firmware
+fell back to single-link cleanly. After a 5K session it skews. So the patch is
+the cause, and the state left behind is more than `0x4F1`: a shutdown clear of
+that latch alone (with the wake paths gated) did not help. Prime remaining
+suspect is the vendor source-table write at DPCD 0x310 on the slave link, which
+stock never touches. Next step is evidence, not another guess: a silent kmsg
+dump into reserved RAM at reboot is now armed on the default cmdline
+(`printk.always_kmsg_dump=1` + ramoops; `/etc/default/limine`), readable from
+`/sys/fs/pstore/dmesg-ramoops-*` on the following boot.
+
+**Control experiment (original note):** boot the pre-5K `Snapshots › 2` entry
 (stock amdgpu, `video=eDP-1:3840x2160@60e`, overlayfs root) and warm-reboot out
 of it. If the Apple logo skews even then, the 5K patch is not the cause, and
 the entire latch-clear stack should be removed.
