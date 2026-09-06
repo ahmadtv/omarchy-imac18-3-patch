@@ -1,0 +1,25 @@
+--- a/drivers/gpu/drm/amd/display/dc/link/link_dpms.c
++++ b/drivers/gpu/drm/amd/display/dc/link/link_dpms.c
+@@ -143,6 +143,22 @@
+ 	if (!dc_link_needs_tiled_stream_enable_latch(link) || !link->local_sink)
+ 		return;
+ 
++	/*
++	 * Only for the firmware handoff. Writing the wake latch toggles the
++	 * slave's HPD line, and an HPD pulse on the slave runs a full
++	 * re-detect that drops its sink, invalidates the trained link and
++	 * reports a hotplug to userspace -- so the next commit tears the tile
++	 * down and re-trains it, which writes the latch again. Clearing it on
++	 * every ordinary stream-off made that loop self-sustaining (30-40
++	 * slave re-detects and ~36 re-trainings per boot instead of 4 and 14):
++	 * visible as repeated black flashes on the second tile around the
++	 * boot-splash handoffs and a brief skew as the session exits. Nothing
++	 * needs the latch clear while the OS keeps the panel; the stream
++	 * enable path re-asserts it anyway.
++	 */
++	if (!link->dc || !link->dc->apple_5k_going_down)
++		return;
++
+ 	DC_LOGGER_INIT(link->ctx->logger);
+ 
+ 	root_link = link->tiled_peer;
