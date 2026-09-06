@@ -121,6 +121,29 @@ latch cleared and the second tile down — the state every earlier attempt was
 aiming for and never reached. Cost: ~1.7 s of futile AUX polling at shutdown,
 trimmable by also gating the pre-detect poll once the logo result is in.
 
+**Captured 21:16 (`evidence/shutdown-kmsg-2026-09-06-f.log`), corrected test
+build — and the owner saw a straight Apple logo.** Teardown in order:
+`atomic-disable` (116.31 s) → `going-down slave reset 0x310=00 00 00, 0x10A=00`
+(116.38, both OK) → `stream-disable latch 0x4F1=0` (116.38, OK on both links)
+→ `going-down root eDP power off, holding T12` (116.45) → S5 at 117.16 →
+reboot. No re-detect, no wake: the `link_detect()` gate held. One sample so
+far; the fix is in the test entry (`patches/5k-latch-clear.patch`), default
+untouched, pending the owner's decision to promote.
+
+Two earlier attempts on the same day failed for reasons that had nothing to do
+with the panel: capture -d showed the pre-detect poll skip made the shutdown
+re-detect drop the slave sink before its stream disable ran, and the test
+cycle before that ran the untouched default. The lesson is in the evidence
+directory: never judge a shutdown-path change without the capture.
+
+**Cosmetic, noted:** right after the disk-encryption password is accepted the
+whole prompt box visibly shifts, goes black, then the 5K desktop comes up
+clean. The boot log shows a burst of fbdev/Plymouth commits at ~14.7 s each
+followed by `manual-trigger-sync` — the 250 ms settle-and-resync doing its
+one-shot CRTC alignment on a live picture. It is the re-sync working, seen.
+Refinement if wanted: run the alignment before the first frame is shown
+instead of after.
+
 **Control experiment (original note):** boot the pre-5K `Snapshots › 2` entry
 (stock amdgpu, `video=eDP-1:3840x2160@60e`, overlayfs root) and warm-reboot out
 of it. If the Apple logo skews even then, the 5K patch is not the cause, and
