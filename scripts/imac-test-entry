@@ -69,11 +69,25 @@ has_test_entry() { grep -qF "$MARKER" "$CONF" 2>/dev/null; }
 
 remove_test_entry() {
 	[[ -f $CONF ]] || return 0
-	# Drop from the marker line to end of file — the entry is always appended
-	# last, after everything limine-entry-tool generates.
-	sed -i "/^${MARKER//\//\\/}/,\$d" "$CONF"
-	# Trim the blank lines the append left behind.
-	printf '%s\n' "$(cat "$CONF")" > "$CONF"
+	# Drop ONLY this entry's block: from the marker line up to (not including)
+	# the next top-level entry, or end of file. Another tool (imac-alt-entry)
+	# keeps its own hand-added entry in the same file; deleting "marker to end
+	# of file" would take that one with it whenever ours sits above it.
+	python3 - "$CONF" "$MARKER" <<'PY2'
+import sys
+p, marker = sys.argv[1], sys.argv[2]
+lines = open(p).read().split("\n")
+out, skip = [], False
+for ln in lines:
+    if ln.startswith(marker):
+        skip = True; continue
+    if skip and ln.startswith("/"):
+        skip = False
+    if not skip:
+        out.append(ln)
+text = "\n".join(out).rstrip("\n") + "\n"
+open(p, "w").write(text)
+PY2
 	sync_conf
 }
 
