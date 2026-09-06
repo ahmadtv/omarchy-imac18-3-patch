@@ -59,10 +59,11 @@ layer is functionally the same three-layer stack as `imac5k-amdgpu-7.2.2.patch`
 (the full-stack patch the default module is built from), minus the logging.
 
 **Test status: boot-tested 2026-09-06** on the iMac18,3 (`7.1.9-arch1-2`),
-from its own boot entry (`/Test - 5K-lean`, made with `scripts/imac-alt-entry`).
-Reached the desktop at native 5120x2880 under Hyprland, seamless, no GPU
-resets or errors. The full-stack module remains the default for now; promote
-the lean build when convenient.
+from its own boot entry made with `scripts/imac-alt-entry`. Reached the
+desktop at native 5120x2880 under Hyprland, seamless, no GPU resets or
+errors. The entry has since been dropped; the daily default is the full-stack
+module plus the incremental patches above (early modeset, deterministic
+genlock, settle-resync, latch clear), which the lean pair does not yet carry.
 
 ## Booting any build from its own entry: `scripts/imac-alt-entry`
 
