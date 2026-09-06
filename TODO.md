@@ -110,6 +110,17 @@ through a normal atomic commit, which runs the stream-disable latch clear, and
 the re-detect can no longer re-wake the tile. Folded into
 `patches/5k-latch-clear.patch`. The next dump will show whether it ran.
 
+**Captured again, 20:38 (`evidence/shutdown-kmsg-2026-09-06-b.log`), from the
+test build with the display shutdown:** it works as designed. `atomic-disable`
+runs at 83.00 s, `stream-disable latch 0x4F1=0` at 83.08 s (status OK on both
+links), then the HPD-RX re-detect fires as before — but with the wake paths
+gated it finds the slave's AUX **dead for 300 ms** and gives up (`slave AUX
+poll failed`, then the DP fallback candidates fail too), i.e. the tile stayed
+asleep. Reboot at 84.86 s. So the panel is handed to the firmware with the
+latch cleared and the second tile down — the state every earlier attempt was
+aiming for and never reached. Cost: ~1.7 s of futile AUX polling at shutdown,
+trimmable by also gating the pre-detect poll once the logo result is in.
+
 **Control experiment (original note):** boot the pre-5K `Snapshots › 2` entry
 (stock amdgpu, `video=eDP-1:3840x2160@60e`, overlayfs root) and warm-reboot out
 of it. If the Apple logo skews even then, the 5K patch is not the cause, and
