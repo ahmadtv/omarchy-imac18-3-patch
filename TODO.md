@@ -330,7 +330,9 @@ sheared; the outcome depended on a stale flag surviving from the previous
 commit. **Fix, shipped 2026-09-06:** `patches/5k-genlock-deterministic.patch` flags both
 tile streams before the master pick. Proven on hardware: six modesets in one
 boot of the fixed build, every one locked at the first stage including the boot
-commit. Promoted to the default; `bitdepth` back to 10.
+commit. Promoted to the default; `bitdepth` back to 10 on 2026-09-06 — that modeset
+locked first time on the promoted build (`XRGB2101010`, both streams
+`sync_enabled=1`), and every commit of its first boot locked (6/6).
 
 **Earlier note, kept for the record:** `dm_enable_per_frame_crtc_master_sync()` (see
 `patches/genlock-fix.patch`) is where `triggered_crtc_reset.enabled` is set for

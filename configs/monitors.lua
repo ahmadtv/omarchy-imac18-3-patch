@@ -10,7 +10,7 @@ hl.env("GDK_SCALE", tostring(omarchy_gdk_scale))
 -- Bit depth: this is a 10-bit wide-gamut panel. NB: depth has nothing to do
 -- with the sheared tile seam -- genlock is lost intermittently per modeset at
 -- any depth, and any fresh modeset re-rolls it. Left at whatever last locked.
-hl.monitor({ output = "", mode = "preferred", position = "auto", scale = omarchy_monitor_scale, cm = "dp3", bitdepth = 8 })
+hl.monitor({ output = "", mode = "preferred", position = "auto", scale = omarchy_monitor_scale, cm = "dp3", bitdepth = 10 })
 
 -- Configure a specific monitor.
 -- hl.monitor({ output = "DP-2", mode = "2560x1440@144", position = "0x0", scale = 1 })
