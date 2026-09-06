@@ -25,6 +25,14 @@ IDs) that:
     disabled in mainline); the panel TCON only latches dual-tile mode when the
     tiles are genlocked, and enabling the reset after the pick left the lock
     to chance (a stale flag from the previous commit).
+  * puts the panel back the way the firmware expects it at reboot: the wake
+    leaves the second tile latched on, and Apple's firmware then draws its
+    boot logo skewed on the next warm boot (verified against a stock control).
+    amdgpu_pci_shutdown() never disables the streams on the reboot path, so
+    for a tiled panel it now runs drm_atomic_helper_shutdown() with a
+    going-down flag set (wake paths and tiled re-detects become no-ops), the
+    slave's stream-off clears 0x4F1 / 0x310 / 0x10A, and the root eDP panel
+    is powered off and held for T12.
 
 Both connectors then carry correct DisplayID tile metadata and the compositor
 stitches them (Mutter today; KWin in progress). Tested on iMac18,3
@@ -34,13 +42,59 @@ sync_enabled=1, seamless under motion. Also builds against 7.1.x.
 This is a lean rework of the community patch series (mcirsta/linux-imac-5k,
 ported by taprobane99): all bring-up instrumentation/logging removed, the
 dead plumbing that only fed it stripped, and the no-op refactor of
-dc/core/dc.c dropped. 641 added lines vs 1631.
+dc/core/dc.c dropped. 770 added lines vs 1631.
 
 Not-Yet-Signed-off-by: mr_projects
 ---
-diff -ruN -x '.*' pristine7.2.2/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.c lean722/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.c
+diff -ruN -x '.*' pristine7.2.2/drivers/gpu/drm/amd/amdgpu/amdgpu_drv.c core2/drivers/gpu/drm/amd/amdgpu/amdgpu_drv.c
+--- a/drivers/gpu/drm/amd/amdgpu/amdgpu_drv.c	2026-08-28 09:25:22.000000000 +0300
++++ b/drivers/gpu/drm/amd/amdgpu/amdgpu_drv.c	2026-09-06 23:41:58.568210173 +0300
+@@ -24,6 +24,7 @@
+ 
+ #include <drm/amdgpu_drm.h>
+ #include <drm/clients/drm_client_setup.h>
++#include <drm/drm_atomic_helper.h>
+ #include <drm/drm_drv.h>
+ #include <drm/drm_fbdev_ttm.h>
+ #include <drm/drm_gem.h>
+@@ -2581,6 +2582,19 @@
+ 	 */
+ 	if (!amdgpu_passthrough(adev))
+ 		adev->mp1_state = PP_MP1_STATE_UNLOAD;
++	/*
++	 * Apple 5K dual-tile panel: amdgpu_device_suspend() below never
++	 * disables the streams on the reboot path, so the firmware would
++	 * inherit a woken second tile and draw its boot logo skewed. Shut the
++	 * display down through a normal atomic commit first, with the
++	 * going-down flag set so the HPD-RX re-detect cannot wake the tile
++	 * back up, then power the root panel off for T12.
++	 */
++	if (amdgpu_dm_has_apple_tiled_panel(adev)) {
++		amdgpu_dm_apple5k_going_down(adev);
++		drm_atomic_helper_shutdown(dev);
++		amdgpu_dm_apple5k_panel_power_off(adev);
++	}
+ 	amdgpu_device_prepare(dev);
+ 	amdgpu_device_suspend(dev, true);
+ 	adev->mp1_state = PP_MP1_STATE_NONE;
+diff -ruN -x '.*' pristine7.2.2/drivers/gpu/drm/amd/amdgpu/amdgpu.h core2/drivers/gpu/drm/amd/amdgpu/amdgpu.h
+--- a/drivers/gpu/drm/amd/amdgpu/amdgpu.h	2026-08-28 09:25:22.000000000 +0300
++++ b/drivers/gpu/drm/amd/amdgpu/amdgpu.h	2026-09-06 23:41:58.566906620 +0300
+@@ -322,6 +322,11 @@
+ 
+ struct amdgpu_xcp_mgr;
+ struct amdgpu_device;
++
++/* Apple 5K dual-tile panel (amdgpu_dm.c); false / no-ops on other hardware. */
++bool amdgpu_dm_has_apple_tiled_panel(struct amdgpu_device *adev);
++void amdgpu_dm_apple5k_going_down(struct amdgpu_device *adev);
++void amdgpu_dm_apple5k_panel_power_off(struct amdgpu_device *adev);
+ struct amdgpu_irq_src;
+ struct amdgpu_fpriv;
+ struct amdgpu_bo_va_mapping;
+diff -ruN -x '.*' pristine7.2.2/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.c core2/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.c
 --- a/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.c	2026-08-28 09:25:22.000000000 +0300
-+++ b/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.c	2026-09-06 22:32:23.329844566 +0300
++++ b/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.c	2026-09-06 23:41:58.570011093 +0300
 @@ -61,6 +61,7 @@
  #include "amdgpu_dm_irq.h"
  #include "dm_helpers.h"
@@ -72,7 +126,59 @@ diff -ruN -x '.*' pristine7.2.2/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.
  
  static void amdgpu_dm_backlight_set_level(struct amdgpu_display_manager *dm,
  					 int bl_idx,
-@@ -5951,6 +5960,8 @@
+@@ -2040,6 +2049,51 @@
+ 			   msecs_to_jiffies(dm->hdmi_frl_status_polling_delay_ms));
+ }
+ 
++/* True when a link on this device is wired as an Apple 5K tile pair. */
++bool amdgpu_dm_has_apple_tiled_panel(struct amdgpu_device *adev)
++{
++	struct dc *dc = adev ? adev->dm.dc : NULL;
++	int i;
++
++	if (!dc)
++		return false;
++	for (i = 0; i < dc->link_count; i++)
++		if (dc->links[i] && dc->links[i]->tiled_peer)
++			return true;
++	return false;
++}
++
++/*
++ * Going down for the firmware: from here on the tile wake paths are no-ops,
++ * so the latch clear done on stream disable is not undone by the HPD-RX
++ * re-detect the panel raises in response. See dc.apple_5k_going_down.
++ */
++void amdgpu_dm_apple5k_going_down(struct amdgpu_device *adev)
++{
++	if (adev && adev->dm.dc)
++		adev->dm.dc->apple_5k_going_down = true;
++}
++
++/*
++ * After the display has been shut down, power the root eDP panel off and hold
++ * it for a full T12, so the firmware finds the panel as a cold boot does.
++ */
++void amdgpu_dm_apple5k_panel_power_off(struct amdgpu_device *adev)
++{
++	struct dc *dc = adev ? adev->dm.dc : NULL;
++	int i;
++
++	if (!dc || !dc->hwss.edp_power_control)
++		return;
++
++	for (i = 0; i < dc->link_count; i++) {
++		if (!dc_link_has_tiled_root_panel_patch(dc->links[i]))
++			continue;
++		dc->hwss.edp_power_control(dc->links[i], false);
++		msleep(600);
++	}
++}
++
+ static int amdgpu_dm_init(struct amdgpu_device *adev)
+ {
+ 	struct dc_init_data init_data;
+@@ -5951,6 +6005,8 @@
  		amdgpu_set_panel_orientation(&aconnector->base);
  	}
  
@@ -81,7 +187,7 @@ diff -ruN -x '.*' pristine7.2.2/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.
  	/* Debug dump: list all DC links and their associated sinks after detection
  	 * is complete for all connectors. This provides a comprehensive view of the
  	 * final state without repeating the dump for each connector.
-@@ -7245,6 +7256,25 @@
+@@ -7245,6 +7301,25 @@
  		 */
  	}
  
@@ -107,7 +213,7 @@ diff -ruN -x '.*' pristine7.2.2/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.
  	set_master_stream(context->streams, context->stream_count);
  
  	for (i = 0; i < context->stream_count ; i++) {
-@@ -8426,6 +8456,165 @@
+@@ -8426,6 +8501,165 @@
  	return dc_result;
  }
  
@@ -273,7 +379,7 @@ diff -ruN -x '.*' pristine7.2.2/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.
  struct dc_stream_state *
  create_validate_stream_for_sink(struct drm_connector *connector,
  				const struct drm_display_mode *drm_mode,
-@@ -8546,6 +8735,11 @@
+@@ -8546,6 +8780,11 @@
  			(mode->flags & DRM_MODE_FLAG_DBLSCAN))
  		return result;
  
@@ -285,7 +391,7 @@ diff -ruN -x '.*' pristine7.2.2/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.
  	/*
  	 * Only run this the first time mode_valid is called to initilialize
  	 * EDID mgmt
-@@ -8575,6 +8769,9 @@
+@@ -8575,6 +8814,9 @@
  	if (stream) {
  		dc_stream_release(stream);
  		result = MODE_OK;
@@ -295,7 +401,7 @@ diff -ruN -x '.*' pristine7.2.2/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.
  	}
  
  fail:
-@@ -9291,6 +9488,9 @@
+@@ -9291,6 +9533,9 @@
  			amdgpu_dm_connector_add_common_modes(encoder, connector);
  		amdgpu_dm_connector_add_freesync_modes(connector, drm_edid);
  	}
@@ -305,9 +411,9 @@ diff -ruN -x '.*' pristine7.2.2/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.
  	amdgpu_dm_fbc_init(connector);
  
  	return amdgpu_dm_connector->num_modes;
-diff -ruN -x '.*' pristine7.2.2/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm_helpers.c lean722/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm_helpers.c
+diff -ruN -x '.*' pristine7.2.2/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm_helpers.c core2/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm_helpers.c
 --- a/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm_helpers.c	2026-08-28 09:25:22.000000000 +0300
-+++ b/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm_helpers.c	2026-09-06 22:32:23.318550586 +0300
++++ b/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm_helpers.c	2026-09-06 23:38:41.634517152 +0300
 @@ -95,12 +95,64 @@
  	       (u32)EDID_PRODUCT_ID(edid);
  }
@@ -439,9 +545,9 @@ diff -ruN -x '.*' pristine7.2.2/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm_
  
  	sad_count = drm_edid_to_sad((struct edid *) edid->raw_edid, &sads);
  	if (sad_count <= 0)
-diff -ruN -x '.*' pristine7.2.2/drivers/gpu/drm/amd/display/dc/dc.h lean722/drivers/gpu/drm/amd/display/dc/dc.h
+diff -ruN -x '.*' pristine7.2.2/drivers/gpu/drm/amd/display/dc/dc.h core2/drivers/gpu/drm/amd/display/dc/dc.h
 --- a/drivers/gpu/drm/amd/display/dc/dc.h	2026-08-28 09:25:22.000000000 +0300
-+++ b/drivers/gpu/drm/amd/display/dc/dc.h	2026-09-06 22:32:23.318830723 +0300
++++ b/drivers/gpu/drm/amd/display/dc/dc.h	2026-09-06 23:40:21.249122858 +0300
 @@ -1847,6 +1847,13 @@
  	struct dc_dpia_bw_alloc dpia_bw_alloc_config;
  	bool skip_implict_edp_power_control;
@@ -456,7 +562,22 @@ diff -ruN -x '.*' pristine7.2.2/drivers/gpu/drm/amd/display/dc/dc.h lean722/driv
  };
  
  struct dc {
-@@ -2860,6 +2867,91 @@
+@@ -1862,6 +1869,14 @@
+ 	struct dc_phy_addr_space_config vm_pa_config;
+ 
+ 	uint8_t link_count;
++
++	/* Apple 5K dual-tile panel: set once the machine is going down for
++	 * firmware (PCI shutdown). Clearing the panel latch makes the panel raise
++	 * HPD-RX, and the detect path would otherwise wake the tile straight
++	 * back up -- within 2-10 ms on hardware -- so the firmware inherits a
++	 * woken tile and draws its boot logo skewed. Once set, the wake paths
++	 * are no-ops and the latch stays cleared. */
++	bool apple_5k_going_down;
+ 	struct dc_link *links[MAX_LINKS];
+ 	uint8_t lowest_dpia_link_index;
+ 	struct link_service *link_srv;
+@@ -2860,6 +2875,91 @@
  void dc_sink_retain(struct dc_sink *sink);
  void dc_sink_release(struct dc_sink *sink);
  
@@ -548,9 +669,9 @@ diff -ruN -x '.*' pristine7.2.2/drivers/gpu/drm/amd/display/dc/dc.h lean722/driv
  struct dc_sink_init_data {
  	enum signal_type sink_signal;
  	struct dc_link *link;
-diff -ruN -x '.*' pristine7.2.2/drivers/gpu/drm/amd/display/dc/dc_types.h lean722/drivers/gpu/drm/amd/display/dc/dc_types.h
+diff -ruN -x '.*' pristine7.2.2/drivers/gpu/drm/amd/display/dc/dc_types.h core2/drivers/gpu/drm/amd/display/dc/dc_types.h
 --- a/drivers/gpu/drm/amd/display/dc/dc_types.h	2026-08-28 09:25:22.000000000 +0300
-+++ b/drivers/gpu/drm/amd/display/dc/dc_types.h	2026-09-06 22:32:23.319060760 +0300
++++ b/drivers/gpu/drm/amd/display/dc/dc_types.h	2026-09-06 23:38:41.637517216 +0300
 @@ -192,6 +192,18 @@
  	bool oled_optimize_display_on;
  	unsigned int force_mst_blocked_discovery;
@@ -570,9 +691,9 @@ diff -ruN -x '.*' pristine7.2.2/drivers/gpu/drm/amd/display/dc/dc_types.h lean72
  };
  
  /**
-diff -ruN -x '.*' pristine7.2.2/drivers/gpu/drm/amd/display/dc/link/link_detection.c lean722/drivers/gpu/drm/amd/display/dc/link/link_detection.c
+diff -ruN -x '.*' pristine7.2.2/drivers/gpu/drm/amd/display/dc/link/link_detection.c core2/drivers/gpu/drm/amd/display/dc/link/link_detection.c
 --- a/drivers/gpu/drm/amd/display/dc/link/link_detection.c	2026-08-28 09:25:22.000000000 +0300
-+++ b/drivers/gpu/drm/amd/display/dc/link/link_detection.c	2026-09-06 22:32:23.319206558 +0300
++++ b/drivers/gpu/drm/amd/display/dc/link/link_detection.c	2026-09-06 23:41:58.574792109 +0300
 @@ -48,9 +48,12 @@
  #include "link_enc_cfg.h"
  #include "dm_helpers.h"
@@ -757,9 +878,26 @@ diff -ruN -x '.*' pristine7.2.2/drivers/gpu/drm/amd/display/dc/link/link_detecti
  		// Check if edid is the same
  		if ((prev_sink) &&
  		    (edid_status == EDID_THE_SAME || edid_status == EDID_OK))
-diff -ruN -x '.*' pristine7.2.2/drivers/gpu/drm/amd/display/dc/link/link_dpms.c lean722/drivers/gpu/drm/amd/display/dc/link/link_dpms.c
+@@ -1578,6 +1717,16 @@
+ 	bool is_delegated_to_mst_top_mgr = false;
+ 	enum dc_connection_type pre_link_type = link->type;
+ 
++	/*
++	 * Going down for the firmware: a re-detect of a tiled link now can only
++	 * wake the tile back up, or conclude "disconnected" and drop the slave's
++	 * sink before its stream disable has run. Report no change instead.
++	 */
++	if (link->dc && link->dc->apple_5k_going_down &&
++	    (dc_link_has_tiled_root_panel_patch(link) ||
++	     dc_link_has_tiled_slave_panel_patch(link)))
++		return false;
++
+ 	is_local_sink_detect_success = detect_link_and_local_sink(link, reason);
+ 
+ 	if (is_local_sink_detect_success && link->local_sink) {
+diff -ruN -x '.*' pristine7.2.2/drivers/gpu/drm/amd/display/dc/link/link_dpms.c core2/drivers/gpu/drm/amd/display/dc/link/link_dpms.c
 --- a/drivers/gpu/drm/amd/display/dc/link/link_dpms.c	2026-08-28 09:25:22.000000000 +0300
-+++ b/drivers/gpu/drm/amd/display/dc/link/link_dpms.c	2026-09-06 22:32:23.319389818 +0300
++++ b/drivers/gpu/drm/amd/display/dc/link/link_dpms.c	2026-09-06 23:41:58.573450601 +0300
 @@ -58,6 +58,7 @@
  #include "clk_mgr.h"
  #include "atomfirmware.h"
@@ -768,11 +906,13 @@ diff -ruN -x '.*' pristine7.2.2/drivers/gpu/drm/amd/display/dc/link/link_dpms.c 
  
  #define DC_LOGGER \
  	dc_logger
-@@ -79,6 +80,20 @@
+@@ -79,6 +80,52 @@
  #define MAX_MTP_SLOT_COUNT 64
  #define LINK_TRAINING_ATTEMPTS 4
  #define PEAK_FACTOR_X1000 1006
 +#define APPLE_5K_DPCD_PANEL_LATCH 0x4F1
++#define APPLE_5K_DPCD_SOURCE_TABLE 0x310   /* what the stitch publishes as 04 1d 03 */
++#define APPLE_5K_DPCD_EDP_CONFIG_SET 0x10A /* eDP ASSR route forced on the slave */
 +
 +static void dp_write_tiled_stream_enable_latch(struct dc_link *link)
 +{
@@ -780,16 +920,46 @@ diff -ruN -x '.*' pristine7.2.2/drivers/gpu/drm/amd/display/dc/link/link_dpms.c 
 +
 +	if (!dc_link_needs_tiled_stream_enable_latch(link) || !link->local_sink)
 +		return;
++	/* Going down: leave the panel in its cold-boot state for the firmware. */
++	if (link->dc && link->dc->apple_5k_going_down)
++		return;
 +
 +	/* Re-assert the root panel latch, then latch the slave stream. */
 +	link_apple_5k_root_panel_latch_pulse(link->tiled_peer);
 +	core_link_write_dpcd(link, APPLE_5K_DPCD_PANEL_LATCH,
 +			     &payload, sizeof(payload));
 +}
++
++/*
++ * Counterpart of the above, run only while the machine is going down for the
++ * firmware -- from link_set_dpms_off(), after blank_stream() and before
++ * disable_link(): nothing on screen, AUX still up. Apple's firmware expects
++ * the panel in its factory single-link state on the next boot; a woken tile
++ * left behind across a warm reboot skews the boot logo. Not done on ordinary
++ * stream-off: the latch write toggles the slave's HPD line and the re-detect
++ * that follows tears the tile down and re-trains it, which re-asserts the
++ * latch -- a self-sustaining loop.
++ */
++static void dp_write_tiled_stream_disable_latch(struct dc_link *link)
++{
++	static const uint8_t zero3[3] = { 0, 0, 0 };
++	uint8_t zero = 0;
++
++	if (!dc_link_needs_tiled_stream_enable_latch(link) || !link->local_sink)
++		return;
++	if (!link->dc || !link->dc->apple_5k_going_down)
++		return;
++
++	/* Undo what the wake path wrote into the slave that stock never touches. */
++	core_link_write_dpcd(link, APPLE_5K_DPCD_SOURCE_TABLE, zero3, sizeof(zero3));
++	core_link_write_dpcd(link, APPLE_5K_DPCD_EDP_CONFIG_SET, &zero, sizeof(zero));
++	link_apple_5k_root_panel_latch_clear(link->tiled_peer);
++	core_link_write_dpcd(link, APPLE_5K_DPCD_PANEL_LATCH, &zero, sizeof(zero));
++}
  
  void link_blank_all_dp_displays(struct dc *dc)
  {
-@@ -1015,6 +1030,7 @@
+@@ -1015,6 +1062,7 @@
  				&new_downspread.raw, sizeof(new_downspread));
  		}
  
@@ -797,9 +967,20 @@ diff -ruN -x '.*' pristine7.2.2/drivers/gpu/drm/amd/display/dc/link/link_dpms.c 
  	} else {
  		dm_helpers_mst_enable_stream_features(stream);
  	}
-diff -ruN -x '.*' pristine7.2.2/drivers/gpu/drm/amd/display/dc/link/protocols/link_dp_capability.c lean722/drivers/gpu/drm/amd/display/dc/link/protocols/link_dp_capability.c
+@@ -2401,6 +2449,10 @@
+ 	update_psp_stream_config(pipe_ctx, true);
+ 	dc->hwss.blank_stream(pipe_ctx);
+ 
++	/* Stream is dark now and the link is still up: return the Apple 5K
++	 * panel latch to its cold-boot state before the link goes away. */
++	dp_write_tiled_stream_disable_latch(link);
++
+ 	if (pipe_ctx->link_config.dp_tunnel_settings.should_use_dp_bw_allocation)
+ 		deallocate_usb4_bandwidth(pipe_ctx->stream);
+ 
+diff -ruN -x '.*' pristine7.2.2/drivers/gpu/drm/amd/display/dc/link/protocols/link_dp_capability.c core2/drivers/gpu/drm/amd/display/dc/link/protocols/link_dp_capability.c
 --- a/drivers/gpu/drm/amd/display/dc/link/protocols/link_dp_capability.c	2026-08-28 09:25:22.000000000 +0300
-+++ b/drivers/gpu/drm/amd/display/dc/link/protocols/link_dp_capability.c	2026-09-06 22:32:23.319597101 +0300
++++ b/drivers/gpu/drm/amd/display/dc/link/protocols/link_dp_capability.c	2026-09-06 23:38:41.640517281 +0300
 @@ -50,12 +50,16 @@
  #include "link_enc_cfg.h"
  #include "dc_dmub_srv.h"
@@ -891,10 +1072,10 @@ diff -ruN -x '.*' pristine7.2.2/drivers/gpu/drm/amd/display/dc/link/protocols/li
  }
  
  void dpcd_write_cable_id_to_dprx(struct dc_link *link)
-diff -ruN -x '.*' pristine7.2.2/drivers/gpu/drm/amd/display/dc/link/protocols/link_dpcd.c lean722/drivers/gpu/drm/amd/display/dc/link/protocols/link_dpcd.c
+diff -ruN -x '.*' pristine7.2.2/drivers/gpu/drm/amd/display/dc/link/protocols/link_dpcd.c core2/drivers/gpu/drm/amd/display/dc/link/protocols/link_dpcd.c
 --- a/drivers/gpu/drm/amd/display/dc/link/protocols/link_dpcd.c	2026-08-28 09:25:22.000000000 +0300
-+++ b/drivers/gpu/drm/amd/display/dc/link/protocols/link_dpcd.c	2026-09-06 22:32:23.319757754 +0300
-@@ -249,3 +249,18 @@
++++ b/drivers/gpu/drm/amd/display/dc/link/protocols/link_dpcd.c	2026-09-06 23:40:21.252788269 +0300
+@@ -249,3 +249,40 @@
  	}
  	return status;
  }
@@ -910,13 +1091,35 @@ diff -ruN -x '.*' pristine7.2.2/drivers/gpu/drm/amd/display/dc/link/protocols/li
 +	if (!dc_link_has_tiled_root_panel_patch(root_link))
 +		return DC_OK;
 +
++	/* Going down: leave the panel in its cold-boot state for the firmware. */
++	if (root_link->dc && root_link->dc->apple_5k_going_down)
++		return DC_OK;
++
 +	return core_link_write_dpcd(root_link, APPLE_5K_DPCD_ROOT_PANEL_LATCH,
 +				    &payload, sizeof(payload));
 +}
-diff -ruN -x '.*' pristine7.2.2/drivers/gpu/drm/amd/display/dc/link/protocols/link_dpcd.h lean722/drivers/gpu/drm/amd/display/dc/link/protocols/link_dpcd.h
++
++/*
++ * Teardown counterpart of the pulse above. Apple's firmware expects the panel
++ * back in its factory single-link state at power-off/reboot; we wake the slave
++ * tile and, without this, never put it back. A warm reboot then hands the
++ * firmware a panel configuration it does not expect, which is what skews the
++ * boot logo. Cold boot is unaffected because the panel is power-cycled.
++ */
++enum dc_status link_apple_5k_root_panel_latch_clear(struct dc_link *root_link)
++{
++	uint8_t payload = 0;
++
++	if (!dc_link_has_tiled_root_panel_patch(root_link))
++		return DC_OK;
++
++	return core_link_write_dpcd(root_link, APPLE_5K_DPCD_ROOT_PANEL_LATCH,
++				    &payload, sizeof(payload));
++}
+diff -ruN -x '.*' pristine7.2.2/drivers/gpu/drm/amd/display/dc/link/protocols/link_dpcd.h core2/drivers/gpu/drm/amd/display/dc/link/protocols/link_dpcd.h
 --- a/drivers/gpu/drm/amd/display/dc/link/protocols/link_dpcd.h	2026-08-28 09:25:22.000000000 +0300
-+++ b/drivers/gpu/drm/amd/display/dc/link/protocols/link_dpcd.h	2026-09-06 22:32:23.319846126 +0300
-@@ -39,4 +39,12 @@
++++ b/drivers/gpu/drm/amd/display/dc/link/protocols/link_dpcd.h	2026-09-06 23:40:21.253097121 +0300
+@@ -39,4 +39,19 @@
  		uint32_t address,
  		const uint8_t *data,
  		uint32_t size);
@@ -928,10 +1131,17 @@ diff -ruN -x '.*' pristine7.2.2/drivers/gpu/drm/amd/display/dc/link/protocols/li
 + */
 +enum dc_status link_apple_5k_root_panel_latch_pulse(struct dc_link *root_link);
 +
++/*
++ * Clear the Apple 5K root panel-latch DPCD (0x4F1 = 0), returning the panel to
++ * its factory single-link state. Called on shutdown/reboot and module unload.
++ * Safe to call with NULL or non-root link -- no-op.
++ */
++enum dc_status link_apple_5k_root_panel_latch_clear(struct dc_link *root_link);
++
  #endif
-diff -ruN -x '.*' pristine7.2.2/drivers/gpu/drm/amd/display/dc/link/protocols/link_dp_training.c lean722/drivers/gpu/drm/amd/display/dc/link/protocols/link_dp_training.c
+diff -ruN -x '.*' pristine7.2.2/drivers/gpu/drm/amd/display/dc/link/protocols/link_dp_training.c core2/drivers/gpu/drm/amd/display/dc/link/protocols/link_dp_training.c
 --- a/drivers/gpu/drm/amd/display/dc/link/protocols/link_dp_training.c	2026-08-28 09:25:22.000000000 +0300
-+++ b/drivers/gpu/drm/amd/display/dc/link/protocols/link_dp_training.c	2026-09-06 22:32:23.319945129 +0300
++++ b/drivers/gpu/drm/amd/display/dc/link/protocols/link_dp_training.c	2026-09-06 23:38:41.642296286 +0300
 @@ -1091,12 +1091,70 @@
  	return status;
  }
@@ -1143,9 +1353,9 @@ diff -ruN -x '.*' pristine7.2.2/drivers/gpu/drm/amd/display/dc/link/protocols/li
  		fail_count++;
  		dp_trace_lt_fail_count_update(link, fail_count, false);
  		if (link->ep_type == DISPLAY_ENDPOINT_PHY) {
-diff -ruN -x '.*' pristine7.2.2/drivers/gpu/drm/amd/display/dc/link/protocols/link_edp_panel_control.c lean722/drivers/gpu/drm/amd/display/dc/link/protocols/link_edp_panel_control.c
+diff -ruN -x '.*' pristine7.2.2/drivers/gpu/drm/amd/display/dc/link/protocols/link_edp_panel_control.c core2/drivers/gpu/drm/amd/display/dc/link/protocols/link_edp_panel_control.c
 --- a/drivers/gpu/drm/amd/display/dc/link/protocols/link_edp_panel_control.c	2026-08-28 09:25:22.000000000 +0300
-+++ b/drivers/gpu/drm/amd/display/dc/link/protocols/link_edp_panel_control.c	2026-09-06 22:32:23.320132098 +0300
++++ b/drivers/gpu/drm/amd/display/dc/link/protocols/link_edp_panel_control.c	2026-09-06 23:38:41.643174142 +0300
 @@ -28,6 +28,8 @@
   * as PSR and ABM and it also manages specs defined eDP panel power sequences.
   */
