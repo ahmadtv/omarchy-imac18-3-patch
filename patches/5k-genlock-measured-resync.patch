@@ -1,0 +1,135 @@
+iMac 5K dual-tile panel: only re-sync the tiles when they are measurably out of step.
+
+Applies on top of the whole stack (main, early-modeset, genlock-deterministic,
+genlock-settle-resync, latch-clear). Refinement of the settle-and-resync.
+
+The hardware alignment (dc_trigger_sync -> enable_timing_synchronization)
+resets the slave tile's scan position, which is a visible one-frame jump.
+Running it unconditionally 250 ms after every tiled commit is what the owner
+sees as a jump at the boot-splash handoff after the disk password, and again
+for a moment before a reboot when the session hands the display to the
+shutdown splash.
+
+Read both tile timing generators' scan positions (tg->funcs->get_position,
+guarded by is_counter_moving) and compare the vertical counts modulo the
+frame. Align immediately after each tiled commit, before the first visible
+frames, only if they differ; keep the delayed pass as a backstop that skips
+itself when the pair is already aligned. Both deltas are logged, so the
+journal shows what each pass measured and did.
+
+--- a/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.c
++++ b/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.c
+@@ -850,6 +850,7 @@
+ static void amdgpu_dm_fini(struct amdgpu_device *adev);
+ static void amdgpu_dm_tiled_resync_work(struct work_struct *work);
+ static void amdgpu_dm_queue_tiled_resync(struct amdgpu_device *adev);
++static void amdgpu_dm_apple5k_resync_locked(struct amdgpu_device *adev, const char *why);
+ static bool is_freesync_video_mode(const struct drm_display_mode *mode, struct amdgpu_dm_connector *aconnector);
+ static void reset_freesync_config_for_crtc(struct dm_crtc_state *new_crtc_state);
+ static struct amdgpu_i2c_adapter *
+@@ -12634,6 +12635,10 @@
+ 	dc_exit_ips_for_hw_access(dm->dc);
+ 	WARN_ON(!dc_commit_streams(dm->dc, &params));
+ 	amdgpu_dm_log_apple5k_dc_streams(dev, dc_state, "commit-after-dc");
++	/* Apple 5K: align the tiles now, before the first visible frames, if
++	 * the commit left them out of step; the delayed pass is the backstop. */
++	if (amdgpu_dm_has_tiled_stitch_panel(adev))
++		amdgpu_dm_apple5k_resync_locked(adev, "post-commit");
+ 
+ 	/* Allow idle optimization when vblank count is 0 for display off */
+ 	if ((dm->active_vblank_irq_count == 0) && amdgpu_dm_is_headless(dm->adev))
+@@ -15783,13 +15788,93 @@
+  * So: after every commit that touches the tiled pair, re-run the sync a short
+  * while later, via the same routine the debugfs force_timing_sync knob uses.
+  */
++/*
++ * Are the two tile timing generators scanning in step? Reads both scan
++ * positions back to back and compares the vertical counts (modulo the frame).
++ * Returns false when either counter is not running, so that a re-sync is
++ * attempted rather than skipped in that case.
++ */
++static bool amdgpu_dm_apple5k_tiles_aligned(struct amdgpu_device *adev, int *delta_out)
++{
++	struct dc *dc = adev->dm.dc;
++	struct dc_state *ctx = dc ? dc->current_state : NULL;
++	struct timing_generator *tg[2] = { NULL, NULL };
++	struct crtc_position pos[2];
++	int v_total = 0, n = 0, i, d;
++
++	*delta_out = 0;
++	if (!ctx)
++		return true;
++
++	for (i = 0; i < dc->res_pool->pipe_count && n < 2; i++) {
++		struct pipe_ctx *p = &ctx->res_ctx.pipe_ctx[i];
++
++		if (!p->stream || !p->stream->link || !p->stream->link->tiled_pair_apple)
++			continue;
++		if (p->top_pipe || !p->stream_res.tg)
++			continue;
++		tg[n++] = p->stream_res.tg;
++		v_total = p->stream->timing.v_total;
++	}
++	if (n < 2)
++		return true;			/* nothing to align */
++	if (!tg[0]->funcs->get_position || !tg[0]->funcs->is_counter_moving)
++		return false;
++	if (!tg[0]->funcs->is_counter_moving(tg[0]) ||
++	    !tg[1]->funcs->is_counter_moving(tg[1]))
++		return false;			/* not running yet: let the sync run */
++
++	tg[0]->funcs->get_position(tg[0], &pos[0]);
++	tg[1]->funcs->get_position(tg[1], &pos[1]);
++	d = pos[0].vertical_count - pos[1].vertical_count;
++	if (v_total > 0) {
++		if (d > v_total / 2)
++			d -= v_total;
++		else if (d < -v_total / 2)
++			d += v_total;
++	}
++	*delta_out = d;
++	return abs(d) <= 4;			/* two back-to-back reads are within a line or two */
++}
++
++/*
++ * Re-sync the tiled pair -- but only when they are measurably out of step.
++ * The hardware alignment resets the slave tile's scan position, which is a
++ * visible one-frame jump; running it on an already-aligned pair is the jump
++ * the owner sees at the boot-splash handoff and again at session exit. Both
++ * deltas are logged so the journal shows what each pass found and did.
++ * Caller holds dm->dc_lock.
++ */
++static void amdgpu_dm_apple5k_resync_locked(struct amdgpu_device *adev, const char *why)
++{
++	struct dc *dc = adev->dm.dc;
++	int before = 0, after = 0;
++	bool aligned;
++
++	if (!dc || !dc->current_state)
++		return;
++
++	aligned = amdgpu_dm_apple5k_tiles_aligned(adev, &before);
++	if (aligned) {
++		drm_info(adev_to_drm(adev), "APPLE5K: tiles aligned (%s) delta=%d, no re-sync\n", why, before);
++		return;
++	}
++
++	dm_enable_per_frame_crtc_master_sync(dc->current_state);
++	dc_trigger_sync(dc, dc->current_state);
++	amdgpu_dm_apple5k_tiles_aligned(adev, &after);
++	drm_info(adev_to_drm(adev), "APPLE5K: re-sync (%s) delta before=%d after=%d\n", why, before, after);
++}
++
+ static void amdgpu_dm_tiled_resync_work(struct work_struct *work)
+ {
+ 	struct amdgpu_display_manager *dm =
+ 		container_of(to_delayed_work(work), struct amdgpu_display_manager,
+ 			     tiled_resync_work);
+ 
+-	amdgpu_dm_trigger_timing_sync(adev_to_drm(dm->adev));
++	mutex_lock(&dm->dc_lock);
++	amdgpu_dm_apple5k_resync_locked(dm->adev, "delayed");
++	mutex_unlock(&dm->dc_lock);
+ }
+ 
+ static void amdgpu_dm_queue_tiled_resync(struct amdgpu_device *adev)
