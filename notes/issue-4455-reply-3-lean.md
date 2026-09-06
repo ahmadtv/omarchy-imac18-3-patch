@@ -22,7 +22,9 @@ if (stream->link && stream->link->tiled_peer &&
 
 in `dm_enable_per_frame_crtc_master_sync()` before `set_multisync_trigger_params()`. That's the piece that gets `sync_enabled=1` so the tiles are hardware-locked — on the two-output path it should take care of the centre-seam tear at the source rather than in Mutter/KWin; would be very interested whether it makes your MutterTearFix unnecessary.
 
-Two honest caveats: (1) mechanically the lean version is the same logic as yours minus logging, and it builds — but I have **not yet booted this exact lean build**; my working machine runs the stitched variant. I'll boot-test it next. (2) I left the debugging out entirely rather than behind a knob — if you'd rather keep a `drm_dbg` or two for the Vega/iMac Pro hunt, easy to add back.
+Boot-tested since: on the iMac18,3 (7.1.9-arch1-2), the lean core with erik2's stitch layered on top comes up at native 5120x2880 under Hyprland, seamless, no GPU resets or errors in the log — the same result as the verbose build it replaces. The core is byte-for-byte the same under both, so that covers the two-tile path as far as the panel bring-up goes; I can't demonstrate the compositor-stitched variant here because Hyprland has no tile support.
+
+One honest caveat: I left the debugging out entirely rather than behind a knob — if you'd rather keep a `drm_dbg` or two for the Vega/iMac Pro hunt, easy to add back.
 
 Patch (with a proper commit message; happy to rebase onto your 7.3-rc1 tree too):
 https://github.com/ahmadtv/omarchy-imac18-3/blob/main/patches/imac5k-lean-core-7.2.x.patch
