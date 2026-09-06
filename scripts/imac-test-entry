@@ -148,7 +148,7 @@ extract_module() {   # extract_module <uki> <dest>
 # rather than just printing file sizes.
 describe_module() {  # describe_module <path-to-.ko.zst>
 	local ko syms marks=()
-	ko="$(mktemp)"
+	ko="$(mktemp --suffix=.ko)"   # modinfo only reads files named *.ko
 	zstd -dcf "$1" > "$ko" 2>/dev/null || { rm -f "$ko"; echo "unreadable"; return; }
 	# NB: capture then match. "strings ... | grep -q" is unsafe under
 	# `set -o pipefail`: grep -q exits on the first match, strings takes
