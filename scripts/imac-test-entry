@@ -155,13 +155,14 @@ describe_module() {  # describe_module <path-to-.ko.zst>
 	# SIGPIPE, and pipefail then reports the pipeline as failed even though
 	# the match succeeded — so every module reads as "stock".
 	syms="$(strings "$ko" 2>/dev/null || true)"
+	# Two builds can carry the same fix strings and differ only in code, so
+	# always show the module's srcversion as well. modinfo needs the
+	# decompressed module: a temp file without a .ko.zst suffix is opaque to it.
+	local sv; sv="$(modinfo -F srcversion "$ko" 2>/dev/null || echo '?')"
 	rm -f "$ko"
 	[[ $syms == *tiled_stitch* ]]                 && marks+=("5K stitch")
 	[[ $syms == *"stream-disable latch"* ]]       && marks+=("latch clear")
 	[[ $syms == *"forcing initial modeset"* ]]    && marks+=("early modeset")
-	# Two builds can carry the same fix strings and differ only in code, so
-	# always show the module's srcversion as well.
-	local sv; sv="$(modinfo -F srcversion "$1" 2>/dev/null || echo '?')"
 	((${#marks[@]})) && (IFS=', '; echo "${marks[*]} [${sv:0:8}]") || echo "stock [${sv:0:8}]"
 }
 
