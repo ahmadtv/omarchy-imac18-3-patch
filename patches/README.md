@@ -27,6 +27,11 @@ sudo ../scripts/patch-imac5k-amdgpu.sh --restore  # undo everything
 The script rebuilds **only the amdgpu module** for your *running* kernel and
 swaps it in (stock module backed up first). Re-run it after a kernel update.
 
+Since 2026-09-07 the installer builds the **lean pair** (`imac5k-lean-core-7.2.x.patch`
++ `imac5k-stitch-layer-7.x.patch`). The verbose stack (full-stack patch + the
+five `5k-*.patch` increments) is still available: `IMAC5K_STACK=verbose sudo
+../scripts/patch-imac5k-amdgpu.sh`.
+
 ## Lean mainline candidate: `imac5k-lean-core-7.2.x.patch`
 
 A human-edited strip-down of taprobane99's base patch (no stitch layer), now

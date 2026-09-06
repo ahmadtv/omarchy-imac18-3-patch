@@ -28,9 +28,23 @@ set -euo pipefail
 
 PATCH_KVER_SUPPORTED="7.1 7.2"   # kernel series this patch is verified to apply to
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PATCH_FILE="${SCRIPT_DIR}/../patches/imac5k-amdgpu-7.2.2.patch"
-# Applied in order, on top of PATCH_FILE. Each must apply cleanly or we abort.
-EXTRA_PATCHES=("${SCRIPT_DIR}/../patches/5k-early-modeset.patch" "${SCRIPT_DIR}/../patches/5k-genlock-deterministic.patch" "${SCRIPT_DIR}/../patches/5k-genlock-settle-resync.patch" "${SCRIPT_DIR}/../patches/5k-latch-clear.patch" "${SCRIPT_DIR}/../patches/5k-latch-clear-going-down-only.patch")
+# Which stack to build. "lean" (default since 2026-09-07): the lean core (the
+# upstream candidate) plus the stitch layer -- same features as the verbose
+# stack minus its logging. "verbose": the original full-stack patch plus the
+# five increments, kept as a fallback (IMAC5K_STACK=verbose).
+IMAC5K_STACK="${IMAC5K_STACK:-lean}"
+case "$IMAC5K_STACK" in
+lean)
+	PATCH_FILE="${SCRIPT_DIR}/../patches/imac5k-lean-core-7.2.x.patch"
+	EXTRA_PATCHES=("${SCRIPT_DIR}/../patches/imac5k-stitch-layer-7.x.patch")
+	;;
+verbose)
+	PATCH_FILE="${SCRIPT_DIR}/../patches/imac5k-amdgpu-7.2.2.patch"
+	# Applied in order, on top of PATCH_FILE. Each must apply cleanly or we abort.
+	EXTRA_PATCHES=("${SCRIPT_DIR}/../patches/5k-early-modeset.patch" "${SCRIPT_DIR}/../patches/5k-genlock-deterministic.patch" "${SCRIPT_DIR}/../patches/5k-genlock-settle-resync.patch" "${SCRIPT_DIR}/../patches/5k-latch-clear.patch" "${SCRIPT_DIR}/../patches/5k-latch-clear-going-down-only.patch")
+	;;
+*) echo "IMAC5K_STACK must be 'lean' or 'verbose'" >&2; exit 1 ;;
+esac
 WORK="${IMAC5K_WORK:-/home/${SUDO_USER:-$USER}/.cache/kernel-5k-build}"
 KREL="$(uname -r)"                        # e.g. 7.2.2-arch1-1
 KVER="${KREL%%-*}"                        # e.g. 7.2.2

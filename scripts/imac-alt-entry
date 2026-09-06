@@ -16,6 +16,7 @@
 # amdgpu loads. Nothing under / changes except the new .efi and the entry.
 #
 #   sudo imac-alt-entry add  <name> <amdgpu.ko | amdgpu.ko.zst>
+#   sudo imac-alt-entry promote <name>   make that build the default; keeps the old module as .prev-promote
 #   sudo imac-alt-entry drop <name>
 #        imac-alt-entry list
 #
@@ -101,6 +102,21 @@ open(p,"w").write(s)
 PY
 }
 
+# limine-mkinitcpio regenerates limine.conf and may drop our hand-added entries.
+# Any of our UKIs still on disk without an entry gets its entry back, hash-pinned.
+repin_orphans() {
+	local efi name cmdline
+	cmdline="$(grep -m1 '^  cmdline:' "$CONF" | sed 's/^  cmdline: //')"
+	for efi in "$UKIDIR"/omarchy_linux-*.efi; do
+		[[ -f $efi ]] || continue
+		name="$(basename "$efi" .efi)"; name="${name#omarchy_linux-}"
+		[[ $name == 5ktest ]] && continue      # imac-test-entry's slot, not ours
+		grep -qF "$(marker "$name")" "$CONF" && continue
+		say "re-pinning '$(marker "$name")' after the config regeneration"
+		add_entry "$name" "$efi" "$cmdline" "(re-pinned)"
+	done
+}
+
 module_desc() {   # module_desc <.ko.zst>
 	local syms marks=()
 	syms="$(zstd -dcf "$1" 2>/dev/null | strings || true)"
@@ -168,6 +184,42 @@ add)
 	"$0" list
 	;;
 
+promote)
+	need_root; NAME="${2:-}"; check_name "$NAME"
+	UKI="$(uki_path "$NAME")"; [[ -f $UKI ]] || die "no UKI for '$NAME' at $UKI"
+	grep -qF "$(marker "$NAME")" "$CONF" || die "no entry '$(marker "$NAME")' in $CONF"
+	WORK="$(mktemp -d)"; trap 'rm -rf "$WORK"' EXIT
+	CUR="/usr/lib/modules/$KREL/$MODREL"
+
+	say "extracting the module that '$(marker "$NAME")' boots"
+	uki_module "$UKI" "$WORK/new.ko.zst" || die "no amdgpu module inside $UKI"
+	vm="$(modinfo -F vermagic "$WORK/new.ko.zst" 2>/dev/null | awk '{print $1}')"
+	[[ $vm == "$KREL" ]] || die "module vermagic '$vm' != running kernel '$KREL'"
+
+	say "keeping the current default module beside it as amdgpu.ko.zst.prev-promote"
+	cp -f "$CUR" "$CUR.prev-promote"
+	install -m644 "$WORK/new.ko.zst" "$CUR"
+	depmod "$KREL"
+
+	say "rebuilding the default UKI the normal way (limine-mkinitcpio)"
+	if command -v limine-mkinitcpio >/dev/null; then
+		limine-mkinitcpio >"$WORK/mk.log" 2>&1 || { tail -20 "$WORK/mk.log"; die "limine-mkinitcpio failed; previous module kept at $CUR.prev-promote"; }
+	else
+		mkinitcpio -P >"$WORK/mk.log" 2>&1 || die "mkinitcpio failed; previous module kept at $CUR.prev-promote"
+	fi
+
+	say "verifying the rebuilt default UKI carries the promoted module"
+	uki_module "$UKIDIR/omarchy_linux.efi" "$WORK/def.ko.zst" || die "no module in the rebuilt default UKI"
+	[[ "$(zstd -dcf "$WORK/def.ko.zst" | b2sum)" == "$(zstd -dcf "$WORK/new.ko.zst" | b2sum)" ]] \
+		|| die "rebuilt default UKI does not carry the promoted module (see $WORK/mk.log); previous module at $CUR.prev-promote"
+
+	remove_entry "$NAME"; rm -f "$UKI"
+	repin_orphans
+	sync_conf
+	say "done — the default now boots what '$(marker "$NAME")' booted; that entry removed. Undo: sudo $0 add <name> $CUR.prev-promote, then promote it."
+	"$0" list
+	;;
+
 drop)
 	need_root; NAME="${2:-}"; check_name "$NAME"
 	remove_entry "$NAME"; rm -f "$(uki_path "$NAME")"; sync_conf
@@ -200,5 +252,5 @@ list)
 	[[ $jl == *"stream-disable latch"* ]] && run+="+latch-clear"
 	printf '\n  running now: %s (tiled_stitch=%s)\n\n' "$run" "$(cat /sys/module/amdgpu/parameters/tiled_stitch 2>/dev/null || echo n/a)"
 	;;
-*) die "usage: add <name> <module> | drop <name> | list" ;;
+*) die "usage: add <name> <module> | promote <name> | drop <name> | list" ;;
 esac
