@@ -29,41 +29,51 @@ swaps it in (stock module backed up first). Re-run it after a kernel update.
 
 ## Lean mainline candidate: `imac5k-lean-core-7.2.x.patch`
 
-A human-edited strip-down of taprobane99's base patch (no stitch layer):
-**1146 diff lines / +641 added / 11 files** vs 2107 / +1631 / 12.
-All bring-up logging and its plumbing removed, the no-op `dc/core/dc.c`
-refactor dropped, two empty blocks the strip left behind removed, and the
-genlock fix folded in (deterministic form: both tile streams flagged
-before the master pick, gated on `tiled_peer`). Compiles clean; applies with
-zero rejects to pristine 7.1.9 and 7.2.2. Kernel exposes two proper tiles;
-the compositor stitches (Mutter today, KWin in progress). Posted upstream in
-drm/amd#4455.
+A human-edited strip-down of taprobane99's base patch (no stitch layer), now
+carrying everything core-side that this machine runs:
+**+770 added lines / 13 files** (his base: +1631 / 12, and it lacks the last two items).
+
+- the panel-ID quirk table, tile-peer wiring, `0x4F1` latch pulse, slave AUX
+  pre-detect, source-table revision, stream-enable latch, root EDID re-read
+  (his mechanism, logging and its plumbing removed, `dc/core/dc.c` no-op
+  refactor dropped);
+- **deterministic genlock**: both tile streams flagged before the master pick
+  (the earlier one-sided form was a coin flip per modeset);
+- **clean firmware handoff at reboot**: `amdgpu_pci_shutdown()` runs
+  `drm_atomic_helper_shutdown()` for a tiled panel with a going-down flag set
+  (wake paths and tiled re-detects become no-ops), the slave's stream-off
+  clears `0x4F1` / `0x310` / `0x10A`, and the root eDP panel is powered off
+  and held for T12. Without this Apple's firmware draws a skewed boot logo on
+  every warm reboot (patch-caused: a stock warm reboot is straight).
+
+Compiles clean; applies with zero rejects to pristine 7.1.9 and 7.2.2. Kernel
+exposes two proper tiles; the compositor stitches (Mutter today, KWin in
+progress). Posted upstream in drm/amd#4455.
 
 ## Stitch layer on top of it: `imac5k-stitch-layer-7.x.patch`
 
-erik2's single-display stitch, unchanged, re-expressed as a layer that applies
-**on top of** the lean core (`amdgpu.tiled_stitch` parameter, slave tile
-non-desktop). Needed only for compositors without tile support — Hyprland.
-Upstream will not take this layer; the lean core is the mainline candidate.
+erik2's single-display stitch (`amdgpu.tiled_stitch`, slave tile non-desktop)
+as a layer that applies **on top of** the lean core, plus the two
+stitch-specific boot fixes: the early modeset before Plymouth (full-width
+disk-password prompt) and the settle-and-resync after tiled commits.
+**+1315 added lines / 10 files.** Needed only for compositors without tile
+support — Hyprland. Upstream will not take this layer.
 
 ```bash
-patch -p1 < patches/imac5k-lean-core-7.2.x.patch     # core (+ genlock)
-patch -p1 < patches/imac5k-stitch-layer-7.x.patch    # Hyprland stitch
+patch -p1 < patches/imac5k-lean-core-7.2.x.patch     # core (+ genlock + reboot handoff)
+patch -p1 < patches/imac5k-stitch-layer-7.x.patch    # Hyprland stitch (+ early modeset, resync)
 ```
 
 Applies cleanly on pristine 7.1.9 and 7.2.2 after the core. One fix over
-erik2's original: the saved tile-group id buffer is now 9 bytes like DRM's
-(`drm_tile_group.group_data[9]`); it was 8, so a restored slave connector could
-land in a fresh, mismatched tile group. gcc flagged it (`-Wstringop-overread`). Lean core +
-layer is functionally the same three-layer stack as `imac5k-amdgpu-7.2.2.patch`
-(the full-stack patch the default module is built from), minus the logging.
+erik2's original: the saved tile-group id buffer is 9 bytes like DRM's
+(`drm_tile_group.group_data[9]`); it was 8. erik2's own logging is still in
+this layer; leaning it is a later pass.
 
-**Test status: boot-tested 2026-09-06** on the iMac18,3 (`7.1.9-arch1-2`),
-from its own boot entry made with `scripts/imac-alt-entry`. Reached the
-desktop at native 5120x2880 under Hyprland, seamless, no GPU resets or
-errors. The entry has since been dropped; the daily default is the full-stack
-module plus the incremental patches above (early modeset, deterministic
-genlock, settle-resync, latch clear), which the lean pair does not yet carry.
+**Equivalence:** core + layer is the same feature set as the default stack
+(`imac5k-amdgpu-7.2.2.patch` + the five `5k-*.patch` increments), minus the
+core-side logging. The lean pair has not yet been booted in this form; the
+first lean pair (core + stitch, before the reboot/early-modeset/resync
+additions) was boot-tested 2026-09-06 from its own entry.
 
 ## Booting any build from its own entry: `scripts/imac-alt-entry`
 
