@@ -33,7 +33,26 @@ back `00` — but the panel raises HPD-RX and the detect path rewrites `01` with
 reboot the stream-off runs before IRQs are suspended, so that interrupt wins.
 `dc.apple_5k_going_down`, set from `amdgpu_pci_shutdown()` before teardown,
 turns both wake paths into no-ops so the clear is the last word. In the test
-entry; unconfirmed on hardware until a warm reboot out of it.
+entry. **Tested once, 2026-09-06: the Apple logo was still skewed** after a
+warm reboot out of the test build (build identity confirmed from the
+`stream-disable latch` lines that boot logged — not from the early-boot marker,
+which that boot's truncated journal had lost).
+
+Two readings remain, and reasoning cannot separate them: the clear did not run
+in the final teardown (which happens after journald is gone, so it has never
+been observed), or clearing the latch is not enough. To settle it, `ramoops` is
+armed on the test entry only: `memmap=1M$0xa6b000000 ramoops.mem_address=…
+ramoops.console_size=0x80000 ignore_loglevel` on its cmdline, plus
+`/etc/systemd/system/ramoops-test.service` (conditional on that cmdline) to
+load the module. After the next warm reboot out of the test entry,
+`/sys/fs/pstore/console-ramoops-0` should hold the previous kernel's last
+messages, including the teardown. Secure Boot is off, so `systemd-stub` honours
+Limine's cmdline.
+
+**Control experiment, still to run:** boot the pre-5K `Snapshots › 2` entry
+(stock amdgpu, `video=eDP-1:3840x2160@60e`, overlayfs root) and warm-reboot out
+of it. If the Apple logo skews even then, the 5K patch is not the cause, and
+the entire latch-clear stack should be removed.
 
 **If the logo is still skewed after that**, the latch theory is wrong — the
 panel state the firmware trips over is something other than 0x4F1 — and the
