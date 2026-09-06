@@ -255,6 +255,18 @@ in `configs/monitors.lua` because this is a 10-bit panel, not as a fix.
 `journalctl -k -b 0 | grep commit-after-dc | tail -2`, repeat until both
 streams say `sync_enabled=1`. Usually lands within two tries.
 
+**Checked 2026-09-06, not the cause:** master selection. `set_master_stream()`
+only considers streams that already have `triggered_crtc_reset.enabled`, and
+on a fresh context none do, so the master is always index 0 — here the DP
+slave tile (`master_link[1]` in every boot, good or bad). The root then resets
+to the slave's VSYNC. That is identical between locked and unlocked boots, so
+it does not explain the coin-flip; the `sync_enabled=0` on stream[0] in a bad
+boot is that same master (event_source == itself) and is expected. What
+differs between boots must be downstream: whether the GSL trigger-reset in
+`dce110_enable_per_frame_crtc_position_reset()` actually took, or the panel's
+own response to the phase. Making the eDP root the master instead is a cheap
+experiment, not a diagnosis.
+
 **Root cause to find:** `dm_enable_per_frame_crtc_master_sync()` (see
 `patches/genlock-fix.patch`) is where `triggered_crtc_reset.enabled` is set for
 the slave; something about which stream `set_master_stream()` picks, or the

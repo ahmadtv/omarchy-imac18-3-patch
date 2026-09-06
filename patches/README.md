@@ -30,13 +30,50 @@ swaps it in (stock module backed up first). Re-run it after a kernel update.
 ## Lean mainline candidate: `imac5k-lean-core-7.2.x.patch`
 
 A human-edited strip-down of taprobane99's base patch (no stitch layer):
-**1147 diff lines / +643 non-blank added / 11 files** vs 2107 / +1631 / 12.
+**1141 diff lines / +636 added / 11 files** vs 2107 / +1631 / 12.
 All bring-up logging and its plumbing removed, the no-op `dc/core/dc.c`
-refactor dropped, and the genlock fix folded in (gated on `tiled_peer`).
-Compiles clean; applies with zero rejects to pristine 7.1.9 and 7.2.2.
-Kernel exposes two proper tiles; the compositor stitches (Mutter today,
-KWin in progress). Not yet boot-tested as the lean build — the stitched
-variant is what runs on this machine. Posted upstream in drm/amd#4455.
+refactor dropped, two empty blocks the strip left behind removed, and the
+genlock fix folded in (gated on `tiled_peer`). Compiles clean; applies with
+zero rejects to pristine 7.1.9 and 7.2.2. Kernel exposes two proper tiles;
+the compositor stitches (Mutter today, KWin in progress). Posted upstream in
+drm/amd#4455.
+
+## Stitch layer on top of it: `imac5k-stitch-layer-7.x.patch`
+
+erik2's single-display stitch, unchanged, re-expressed as a layer that applies
+**on top of** the lean core (`amdgpu.tiled_stitch` parameter, slave tile
+non-desktop). Needed only for compositors without tile support — Hyprland.
+Upstream will not take this layer; the lean core is the mainline candidate.
+
+```bash
+patch -p1 < patches/imac5k-lean-core-7.2.x.patch     # core (+ genlock)
+patch -p1 < patches/imac5k-stitch-layer-7.x.patch    # Hyprland stitch
+```
+
+Applies cleanly on pristine 7.1.9 and 7.2.2 after the core. One fix over
+erik2's original: the saved tile-group id buffer is now 9 bytes like DRM's
+(`drm_tile_group.group_data[9]`); it was 8, so a restored slave connector could
+land in a fresh, mismatched tile group. gcc flagged it (`-Wstringop-overread`). Lean core +
+layer is functionally the same three-layer stack as `imac5k-amdgpu-7.2.2.patch`
+(the full-stack patch the default module is built from), minus the logging.
+
+**Test status:** built for `7.1.9-arch1-2` and staged as a separate boot
+entry (`/Test - 5K-lean`) via `scripts/imac-alt-entry`; awaiting a boot.
+The full-stack module stays the default until it has been seen working.
+
+## Booting any build from its own entry: `scripts/imac-alt-entry`
+
+```bash
+sudo scripts/imac-alt-entry add  5K-lean path/to/amdgpu.ko   # new UKI + Limine entry
+sudo scripts/imac-alt-entry list
+sudo scripts/imac-alt-entry drop 5K-lean
+```
+
+Builds a separate UKI from a private copy of the running kernel's module tree
+(`mkinitcpio --moduleroot`), so `/usr/lib/modules`, the default UKI and any
+other test entry are untouched. Refuses a module whose vermagic is not the
+running kernel, and verifies the module inside the built UKI is the one given.
+The entry is hash-pinned like the others.
 
 ## The rules
 
