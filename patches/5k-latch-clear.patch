@@ -43,6 +43,12 @@ Removed.
    display shutdown. If this does not fix the logo, the panel controller
    keeps its dual-tile state until a physical power cycle.
 
+5. Capture 2026-09-06-d: with the pre-detect poll skipped, the shutdown-time
+   HPD-RX re-detect concluded "disconnected" instantly and dropped the slave
+   sink before the slave stream disable ran, so the reset and latch clear
+   never executed. link_detect() is now a no-op for tiled links while going
+   down (keeps the sink, no wake), and the poll skip is gone.
+
 No-op on hardware without the tiled-panel quirk.
 
 --- a/drivers/gpu/drm/amd/amdgpu/amdgpu.h
@@ -253,17 +259,27 @@ No-op on hardware without the tiled-panel quirk.
  
 --- a/drivers/gpu/drm/amd/display/dc/link/link_detection.c
 +++ b/drivers/gpu/drm/amd/display/dc/link/link_detection.c
-@@ -147,6 +147,10 @@
- 	if (!link || !link->ddc)
- 		return false;
+@@ -1692,6 +1692,20 @@
  
-+	/* Going down: the tile was deliberately put to sleep; do not poll it. */
-+	if (link->dc && link->dc->apple_5k_going_down)
+ bool link_detect(struct dc_link *link, enum dc_detect_reason reason)
+ {
++	/*
++	 * Going down for the firmware: a re-detect at this point can only do
++	 * harm. Left to run, it either wakes the tile back up (wake paths
++	 * ungated) or, with its AUX poll skipped, concludes "disconnected" and
++	 * drops the slave's sink before the slave stream's own disable has run
++	 * -- which is exactly what capture 2026-09-06-d shows, and why the
++	 * going-down slave reset and latch clear never executed. Report no
++	 * change and keep every tiled link exactly as it is.
++	 */
++	if (link && link->dc && link->dc->apple_5k_going_down &&
++	    (dc_link_has_tiled_root_panel_patch(link) ||
++	     dc_link_has_tiled_slave_panel_patch(link)))
 +		return false;
 +
- 	old_transaction_type = link->ddc->transaction_type;
- 	old_aux_mode = link->aux_mode;
- 
+ 	bool is_local_sink_detect_success;
+ 	bool is_delegated_to_mst_top_mgr = false;
+ 	enum dc_connection_type pre_link_type = link->type;
 --- a/drivers/gpu/drm/amd/display/dc/link/protocols/link_dpcd.c
 +++ b/drivers/gpu/drm/amd/display/dc/link/protocols/link_dpcd.c
 @@ -261,6 +261,28 @@
