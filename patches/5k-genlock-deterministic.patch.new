@@ -16,13 +16,6 @@ was sheared. Whether it locked depended on a stale flag surviving from
 the previous commit -- a coin flip, at any bit depth.
 
 Enable the reset on both tile streams before the master pick.
-
-That alone is not sufficient: dc_commit_state_no_check() runs the one-shot
-CRTC alignment right after apply_ctx_to_hw(), which on a full modeset is
-before the re-trained slave tile is actually running, so the driver reports
-both tiles synced while the seam is sheared (seen after login). Re-run the
-sync 250 ms after every commit that touches the tiled pair, via the same
-routine the debugfs force_timing_sync knob uses.
 --- a/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.c
 +++ b/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.c
 @@ -848,6 +848,8 @@

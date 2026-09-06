@@ -327,7 +327,19 @@ and never gets the reset. The DCE sync group is built from streams that carry
 the reset, so the slave tile is left out. Seven modesets in one boot: every
 commit with BOTH tiles flagged locked, every one with only the root flagged
 sheared; the outcome depended on a stale flag surviving from the previous
-commit. **Fix, shipped 2026-09-06:** `patches/5k-genlock-deterministic.patch` flags both
+commit. **Second finding, 2026-09-06 evening:** with both tiles flagged, login on the
+promoted build *still* sheared, and the 10-bit switch (a later modeset) cured
+it. `dc_commit_state_no_check()` runs `dc_trigger_sync()` right after
+`apply_ctx_to_hw()`; on a full modeset the slave tile is re-woken and
+re-trained inside that same commit, so the one-shot alignment
+(`enable_timing_synchronization`) fires before both timing generators are
+running. Note also that `enable_timing_multisync()` excludes the master, so
+with two streams it programs no per-frame reset at all -- the visible lock
+comes entirely from the one-shot alignment. Fix in the test entry: a delayed
+re-sync 250 ms after every tiled commit via `amdgpu_dm_trigger_timing_sync()`
+(the debugfs knob's routine); it logs `manual-trigger-sync`.
+
+**Fix, shipped 2026-09-06:** `patches/5k-genlock-deterministic.patch` flags both
 tile streams before the master pick. Proven on hardware: six modesets in one
 boot of the fixed build, every one locked at the first stage including the boot
 commit. Promoted to the default; `bitdepth` back to 10 on 2026-09-06 — that modeset
