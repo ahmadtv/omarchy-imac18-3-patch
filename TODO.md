@@ -82,6 +82,14 @@ dump into reserved RAM at reboot is now armed on the default cmdline
 (`printk.always_kmsg_dump=1` + ramoops; `/etc/default/limine`), readable from
 `/sys/fs/pstore/dmesg-ramoops-*` on the following boot.
 
+Gotcha found the hard way (first capture reboot came back empty): `ramoops`
+refuses kmsg dumps above its `max_reason`, which defaults to OOPS (2); a
+reboot dumps with reason SHUTDOWN (4). It needs `ramoops.max_reason=4` as well
+as `printk.always_kmsg_dump=1`. Both are now on the cmdline. This kernel has
+no `CONFIG_PSTORE_PMSG`, so there is no marker channel to test RAM survival
+separately -- an empty dump on the next boot means the firmware does not
+preserve that RAM across a warm reboot.
+
 **Control experiment (original note):** boot the pre-5K `Snapshots › 2` entry
 (stock amdgpu, `video=eDP-1:3840x2160@60e`, overlayfs root) and warm-reboot out
 of it. If the Apple logo skews even then, the 5K patch is not the cause, and
