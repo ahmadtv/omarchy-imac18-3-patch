@@ -27,6 +27,17 @@ sudo ../scripts/patch-imac5k-amdgpu.sh --restore  # undo everything
 The script rebuilds **only the amdgpu module** for your *running* kernel and
 swaps it in (stock module backed up first). Re-run it after a kernel update.
 
+## Lean mainline candidate: `imac5k-lean-core-7.2.x.patch`
+
+A human-edited strip-down of taprobane99's base patch (no stitch layer):
+**1147 diff lines / +643 non-blank added / 11 files** vs 2107 / +1631 / 12.
+All bring-up logging and its plumbing removed, the no-op `dc/core/dc.c`
+refactor dropped, and the genlock fix folded in (gated on `tiled_peer`).
+Compiles clean; applies with zero rejects to pristine 7.1.9 and 7.2.2.
+Kernel exposes two proper tiles; the compositor stitches (Mutter today,
+KWin in progress). Not yet boot-tested as the lean build — the stitched
+variant is what runs on this machine. Posted upstream in drm/amd#4455.
+
 ## The rules
 
 - **RULE 1 — version gate.** The patch is verified against kernel **7.1.x and 7.2.x source** (same diff applies to both).
