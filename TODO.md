@@ -61,6 +61,16 @@ load the module. After the next warm reboot out of the test entry,
 messages, including the teardown. Secure Boot is off, so `systemd-stub` honours
 Limine's cmdline.
 
+**Capture attempt 2026-09-06, lost:** the boot after the warm reboot landed on
+`Omarchy → linux` (no `memmap` reservation, ramoops never loaded), so the
+reserved region was reused and the teardown log with it. The owner also
+reported the capture boot as "numbers on black" — that was `ignore_loglevel`
+spraying the kernel log over the console — and a sheared desktop after login
+(the intermittent genlock loss, not specific to that build). On request the
+experimental entry was dropped and the test entry recreated as an exact clone
+of `Omarchy → linux`; the harness is removed. The latch-clear work stays in
+`patches/5k-latch-clear.patch` for whoever picks it up.
+
 **Control experiment, still to run:** boot the pre-5K `Snapshots › 2` entry
 (stock amdgpu, `video=eDP-1:3840x2160@60e`, overlayfs root) and warm-reboot out
 of it. If the Apple logo skews even then, the 5K patch is not the cause, and
