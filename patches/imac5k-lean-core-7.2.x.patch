@@ -1,0 +1,1185 @@
+drm/amd/display: enable the second tile on Apple 27" 5K iMac internal panels (lean)
+
+The 27" 5K iMac internal panel (iMac15,1 / 17,1 / 18,3 / 19,1 / 20,x /
+iMacPro1,1) is a 2x1 tiled display driven over two links: an eDP root tile
+and a DP second tile. Mac firmware only brings the second link up for macOS
+and Windows; on Linux it stays powered down (HPD low, AUX dead), so amdgpu
+sees a single 2560x2880 tile and the panel scales it, or falls back to the
+3840x2160 timing.
+
+Per the Windows driver's EnableSecondaryTileIfRequired path, writing 1 to
+the vendor DPCD register 0x4F1 on the eDP root wakes the second tile's link.
+This patch adds a panel quirk (apply_edid_quirks, keyed on the Apple panel
+IDs) that:
+
+  * wires the eDP root and its DP sibling as a tile pair (link->tiled_peer),
+  * pulses the root latch (0x4F1) before probing / link-training the slave,
+    polls the slave's DPCD until AUX answers, and treats it as connected even
+    with HPD low,
+  * publishes the source-DPCD table revision the Boot Camp driver uses,
+    re-pulses the latch at stream enable, and re-reads the root EDID once the
+    slave exposes its tile block (the root's EDID flips to its tile identity),
+  * prefers the tile-native mode on both connectors,
+  * enables the per-frame CRTC reset for the slave tile so the two tiles scan
+    out in lockstep (multi_sync is otherwise left disabled in mainline); the
+    panel TCON only latches dual-tile mode when the tiles are genlocked.
+
+Both connectors then carry correct DisplayID tile metadata and the compositor
+stitches them (Mutter today; KWin in progress). Tested on iMac18,3
+(Radeon Pro 575 / POLARIS10 / DCE 11.2): native 5120x2880, both tiles HBR2x4,
+sync_enabled=1, seamless under motion. Also builds against 7.1.x.
+
+This is a lean rework of the community patch series (mcirsta/linux-imac-5k,
+ported by taprobane99): all bring-up instrumentation/logging removed, the
+dead plumbing that only fed it stripped, and the no-op refactor of
+dc/core/dc.c dropped. 644 added lines vs 1631.
+
+Not-Yet-Signed-off-by: mr_projects
+---
+--- a/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.c	2026-08-28 09:25:22.000000000 +0300
++++ b/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.c	2026-09-06 15:16:47.983643352 +0300
+@@ -61,6 +61,7 @@
+ #include "amdgpu_dm_irq.h"
+ #include "dm_helpers.h"
+ #include "amdgpu_dm_mst_types.h"
++#include "grph_object_id.h"
+ #if defined(CONFIG_DEBUG_FS)
+ #include "amdgpu_dm_debugfs.h"
+ #endif
+@@ -78,7 +79,9 @@
+ #include <linux/power_supply.h>
+ #include <linux/firmware.h>
+ #include <linux/component.h>
++#include <linux/dmi.h>
+ #include <linux/sort.h>
++#include <generated/utsrelease.h>
+ 
+ #include <drm/drm_privacy_screen_consumer.h>
+ #include <drm/display/drm_dp_mst_helper.h>
+@@ -244,6 +247,12 @@
+ 
+ static void handle_hpd_irq_helper(struct amdgpu_dm_connector *aconnector);
+ static void handle_hpd_rx_irq(void *param);
++static bool amdgpu_dm_mode_matches_tile_size(
++		const struct drm_connector *connector,
++		const struct drm_display_mode *mode);
++
++static void amdgpu_dm_reprobe_tiled_root_after_slave(
++		struct amdgpu_device *adev);
+ 
+ static void amdgpu_dm_backlight_set_level(struct amdgpu_display_manager *dm,
+ 					 int bl_idx,
+@@ -5951,6 +5960,8 @@
+ 		amdgpu_set_panel_orientation(&aconnector->base);
+ 	}
+ 
++	amdgpu_dm_reprobe_tiled_root_after_slave(adev);
++
+ 	/* Debug dump: list all DC links and their associated sinks after detection
+ 	 * is complete for all connectors. This provides a comprehensive view of the
+ 	 * final state without repeating the dump for each connector.
+@@ -7253,6 +7264,20 @@
+ 		if (!stream)
+ 			continue;
+ 
++		/*
++		 * Apple iMac 5K dual-tile panel: the two tile streams must scan
++		 * out in lockstep or the panel TCON never latches dual-tile mode
++		 * (black screen / endless re-modeset). Mainline leaves per-frame
++		 * CRTC master sync disabled (multi_sync_enabled TODO above); for
++		 * a link wired as a tile pair, enable the per-frame reset on the
++		 * slave so it hard-syncs to the master's VSYNC. The master
++		 * (event_source == itself) stays free-running as timing source.
++		 */
++		if (stream->link && stream->link->tiled_peer &&
++		    stream->triggered_crtc_reset.event_source &&
++		    stream->triggered_crtc_reset.event_source != stream)
++			stream->triggered_crtc_reset.enabled = true;
++
+ 		set_multisync_trigger_params(stream);
+ 	}
+ }
+@@ -8426,6 +8451,165 @@
+ 	return dc_result;
+ }
+ 
++static bool
++amdgpu_dm_connector_has_tiled_slave_patch(
++		const struct amdgpu_dm_connector *aconnector)
++{
++	return aconnector && dc_link_has_tiled_slave_panel_patch(aconnector->dc_link);
++}
++
++static bool
++amdgpu_dm_connector_has_tiled_root_patch(
++		const struct amdgpu_dm_connector *aconnector)
++{
++	return aconnector && dc_link_has_tiled_root_panel_patch(aconnector->dc_link);
++}
++
++static bool
++amdgpu_dm_connector_has_tiled_patch(
++		const struct amdgpu_dm_connector *aconnector)
++{
++	return amdgpu_dm_connector_has_tiled_root_patch(aconnector) ||
++	       amdgpu_dm_connector_has_tiled_slave_patch(aconnector);
++}
++
++static bool
++amdgpu_dm_connector_is_tiled_slave_tile(
++		const struct amdgpu_dm_connector *aconnector)
++{
++	const struct drm_connector *connector;
++
++	if (!amdgpu_dm_connector_has_tiled_slave_patch(aconnector))
++		return false;
++
++	connector = &aconnector->base;
++	if (!connector->has_tile)
++		return false;
++
++	return connector->tile_h_size && connector->tile_v_size &&
++	       (connector->tile_h_loc || connector->tile_v_loc);
++}
++
++static bool
++amdgpu_dm_mode_matches_tile_size(const struct drm_connector *connector,
++				 const struct drm_display_mode *mode)
++{
++	return connector &&
++	       connector->has_tile &&
++	       connector->tile_h_size &&
++	       connector->tile_v_size &&
++	       mode &&
++	       mode->hdisplay == connector->tile_h_size &&
++	       mode->vdisplay == connector->tile_v_size;
++}
++
++static bool
++amdgpu_dm_connector_prefers_tile_native_mode(
++		const struct amdgpu_dm_connector *aconnector)
++{
++	return aconnector && dc_link_prefers_tile_native_mode(aconnector->dc_link);
++}
++
++/*
++ * Some tiled panels advertise fallback modes as preferred. For patched panels,
++ * make the mode matching DRM tile metadata the sole preferred mode.
++ */
++static void
++amdgpu_dm_make_tile_mode_preferred(struct drm_connector *connector)
++{
++	struct amdgpu_dm_connector *aconnector =
++			to_amdgpu_dm_connector(connector);
++	struct drm_display_mode *mode;
++	bool have_tile_mode = false;
++
++	if (!amdgpu_dm_connector_has_tiled_patch(aconnector) ||
++	    !amdgpu_dm_connector_prefers_tile_native_mode(aconnector))
++		return;
++
++	list_for_each_entry(mode, &connector->probed_modes, head) {
++		if (amdgpu_dm_mode_matches_tile_size(connector, mode)) {
++			have_tile_mode = true;
++			break;
++		}
++	}
++
++	if (!have_tile_mode)
++		return;
++
++	list_for_each_entry(mode, &connector->probed_modes, head) {
++		if (amdgpu_dm_mode_matches_tile_size(connector, mode))
++			mode->type |= DRM_MODE_TYPE_PREFERRED;
++		else if (mode->type & DRM_MODE_TYPE_PREFERRED)
++			mode->type &= ~DRM_MODE_TYPE_PREFERRED;
++	}
++}
++
++static void
++amdgpu_dm_reprobe_tiled_root_after_slave(struct amdgpu_device *adev)
++{
++	struct drm_device *dev = adev_to_drm(adev);
++	struct amdgpu_display_manager *dm = &adev->dm;
++	struct drm_connector_list_iter iter;
++	struct drm_connector *connector;
++	struct amdgpu_dm_connector *primary = NULL;
++	struct amdgpu_dm_connector *secondary = NULL;
++	struct dc_link *primary_link;
++	struct dc_sink *sink;
++
++	drm_connector_list_iter_begin(dev, &iter);
++	drm_for_each_connector_iter(connector, &iter) {
++		struct amdgpu_dm_connector *aconnector;
++
++		if (connector->connector_type == DRM_MODE_CONNECTOR_WRITEBACK)
++			continue;
++
++		aconnector = to_amdgpu_dm_connector(connector);
++		if (amdgpu_dm_connector_has_tiled_root_patch(aconnector))
++			primary = aconnector;
++		else if (amdgpu_dm_connector_has_tiled_slave_patch(aconnector))
++			secondary = aconnector;
++	}
++	drm_connector_list_iter_end(&iter);
++
++	if (!primary || !secondary) {
++		return;
++	}
++
++	/* Re-read only after the slave exposes tile metadata. */
++	if (!amdgpu_dm_connector_is_tiled_slave_tile(secondary)) {
++		return;
++	}
++
++	primary_link = primary->dc_link;
++	if (!primary_link || !primary_link->local_sink) {
++		return;
++	}
++	sink = primary_link->local_sink;
++
++	if (primary->base.has_tile) {
++		return;
++	}
++
++	mutex_lock(&dm->dc_lock);
++	dc_exit_ips_for_hw_access(dm->dc);
++	dm_helpers_read_local_edid(primary_link->ctx, primary_link, sink);
++	mutex_unlock(&dm->dc_lock);
++
++	/* Keep aconnector->drm_edid (the cache consumed by get_modes) coherent
++	 * with the freshly-read sink EDID. */
++	if (sink->dc_edid.length) {
++		const struct edid *edid =
++			(const struct edid *)sink->dc_edid.raw_edid;
++
++		drm_edid_free(primary->drm_edid);
++		primary->drm_edid = drm_edid_alloc(edid, sink->dc_edid.length);
++		mutex_lock(&dev->mode_config.mutex);
++		drm_edid_connector_update(&primary->base, primary->drm_edid);
++		mutex_unlock(&dev->mode_config.mutex);
++	}
++
++}
++
+ struct dc_stream_state *
+ create_validate_stream_for_sink(struct drm_connector *connector,
+ 				const struct drm_display_mode *drm_mode,
+@@ -8485,6 +8669,7 @@
+ 			dc_stream_release(stream);
+ 			stream = NULL;
+ 			requested_bpc -= 2; /* lower bpc to retry validation */
++		} else {
+ 		}
+ 
+ 	} while (stream == NULL && requested_bpc >= bpc_limit);
+@@ -8546,6 +8731,11 @@
+ 			(mode->flags & DRM_MODE_FLAG_DBLSCAN))
+ 		return result;
+ 
++	if (amdgpu_dm_connector_is_tiled_slave_tile(aconnector) &&
++	    !amdgpu_dm_mode_matches_tile_size(connector, mode)) {
++		return MODE_PANEL;
++	}
++
+ 	/*
+ 	 * Only run this the first time mode_valid is called to initilialize
+ 	 * EDID mgmt
+@@ -8575,6 +8765,9 @@
+ 	if (stream) {
+ 		dc_stream_release(stream);
+ 		result = MODE_OK;
++	} else if (amdgpu_dm_connector_is_tiled_slave_tile(aconnector) &&
++		   amdgpu_dm_mode_matches_tile_size(connector, mode)) {
++		result = MODE_OK;
+ 	}
+ 
+ fail:
+@@ -9291,6 +9484,9 @@
+ 			amdgpu_dm_connector_add_common_modes(encoder, connector);
+ 		amdgpu_dm_connector_add_freesync_modes(connector, drm_edid);
+ 	}
++
++	amdgpu_dm_make_tile_mode_preferred(connector);
++
+ 	amdgpu_dm_fbc_init(connector);
+ 
+ 	return amdgpu_dm_connector->num_modes;
+--- a/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm_helpers.c	2026-08-28 09:25:22.000000000 +0300
++++ b/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm_helpers.c	2026-09-06 15:14:36.554206029 +0300
+@@ -95,12 +95,73 @@
+ 	       (u32)EDID_PRODUCT_ID(edid);
+ }
+ 
+-static void apply_edid_quirks(struct dc_link *link, struct edid *edid,
+-			      struct dc_edid_caps *edid_caps)
++/*
++ * Called from dm_helpers_parse_edid_caps() after apply_edid_quirks() has
++ * (possibly) set the tiled_root_* / tiled_slave_* flags on this link's
++ * edid_caps. If so, walk the dc's links and cross-wire tiled_peer between
++ * this link and its tile-pair peer so DC-core consumers on the slave's
++ * pre-detect path (where slave's local_sink is NULL) can still reach the
++ * root's panel-patch.
++ *
++ * Current supported wiring has one eDP root and one internal DP slave.
++ * From the root side, pick the first DP sibling. From the slave side,
++ * pick the first eDP sibling already carrying the root flag.
++ */
++static void dm_helpers_wire_tiled_peer(struct drm_device *dev,
++				       struct dc_link *link,
++				       const struct dc_edid_caps *edid_caps)
+ {
+-	struct amdgpu_dm_connector *aconnector = link->priv;
+-	struct drm_device *dev = aconnector->base.dev;
+-	uint32_t panel_id = edid_extract_panel_id(edid);
++	const struct dc_panel_patch *pp = &edid_caps->panel_patch;
++	bool is_root = pp->tiled_root_force_edid_reread &&
++		       link->connector_signal == SIGNAL_TYPE_EDP;
++	bool is_slave = pp->tiled_slave_root_wake &&
++			link->connector_signal == SIGNAL_TYPE_DISPLAY_PORT;
++	uint32_t i;
++
++	if (!link->dc || (!is_root && !is_slave))
++		return;
++	if (link->tiled_peer) {
++		return; /* already wired */
++	}
++
++	for (i = 0; i < link->dc->link_count; i++) {
++		struct dc_link *other = link->dc->links[i];
++
++		if (!other || other == link)
++			continue;
++
++	}
++
++	for (i = 0; i < link->dc->link_count; i++) {
++		struct dc_link *other = link->dc->links[i];
++
++		if (!other || other == link || other->tiled_peer)
++			continue;
++
++		if (is_root && other->connector_signal == SIGNAL_TYPE_DISPLAY_PORT) {
++			link->tiled_peer = other;
++			other->tiled_peer = link;
++			return;
++		}
++		if (is_slave && other->connector_signal == SIGNAL_TYPE_EDP &&
++		    other->local_sink &&
++		    other->local_sink->edid_caps.panel_patch.tiled_root_force_edid_reread) {
++			link->tiled_peer = other;
++			other->tiled_peer = link;
++			return;
++		}
++	}
++
++}
++
++static void apply_edid_quirks(struct drm_device *dev,
++			      struct dc_link *link,
++			      struct edid *edid,
++			      struct dc_edid_caps *edid_caps)
++ {
++	enum signal_type connector_signal =
++		link ? link->connector_signal : SIGNAL_TYPE_NONE;
++ 	uint32_t panel_id = edid_extract_panel_id(edid);
+ 
+ 	switch (panel_id) {
+ 	/* Workaround for monitors that need a delay after detecting the link */
+@@ -134,6 +195,42 @@
+ 		drm_dbg_driver(dev, "Skip PHY SSC reduction on panel id %X\n", panel_id);
+ 		link->wa_flags.skip_phy_ssc_reduction = true;
+ 		break;
++	/*
++	 * Apple 27" 5K dual-tile internal panel (iMac15,1 / 17,1 / 18,3 / 19,1 / 20,x / iMacPro1,1).
++	 * Older family: AE01 root-compat, AE02 tile identity.
++	 * iMac17,1 family: AE05 root-compat, AE06 tile identity.
++	 * iMac18,3 family: AE11 root-compat, AE12 tile identity; AE13 is the
++	 * DisplayID tiled-display product ID, not a base EDID panel ID.
++	 * iMac Pro family: AE1D root-compat, AE1E tile identity.
++	 * Newer family: AE25 root-compat, AE26 tile identity.
++	 * 2020 family: AE31 root-compat, AE32 tile identity; AE33 is the
++	 * DisplayID tiled-display product ID, not a base EDID panel ID.
++	 * Role discrimination is by connector_signal (eDP=root, DP=slave) — not by
++	 * panel-id alone, since the primary can flip after the wake.
++	 */
++	case drm_edid_encode_panel_id('A', 'P', 'P', 0xAE01):
++	case drm_edid_encode_panel_id('A', 'P', 'P', 0xAE02):
++	case drm_edid_encode_panel_id('A', 'P', 'P', 0xAE05):
++	case drm_edid_encode_panel_id('A', 'P', 'P', 0xAE06):
++	case drm_edid_encode_panel_id('A', 'P', 'P', 0xAE11):
++	case drm_edid_encode_panel_id('A', 'P', 'P', 0xAE12):
++	case drm_edid_encode_panel_id('A', 'P', 'P', 0xAE1D):
++	case drm_edid_encode_panel_id('A', 'P', 'P', 0xAE1E):
++	case drm_edid_encode_panel_id('A', 'P', 'P', 0xAE25):
++	case drm_edid_encode_panel_id('A', 'P', 'P', 0xAE26):
++	case drm_edid_encode_panel_id('A', 'P', 'P', 0xAE31):
++	case drm_edid_encode_panel_id('A', 'P', 'P', 0xAE32):
++		if (connector_signal == SIGNAL_TYPE_EDP) {
++			edid_caps->panel_patch.tiled_root_force_edid_reread = 1;
++			edid_caps->panel_patch.prefer_tile_native_mode = 1;
++		} else if (connector_signal == SIGNAL_TYPE_DISPLAY_PORT) {
++			edid_caps->panel_patch.tiled_slave_root_wake = 1;
++			edid_caps->panel_patch.tiled_slave_source_table_rev = 1;
++			edid_caps->panel_patch.tiled_stream_enable_latch = 1;
++			edid_caps->panel_patch.aux_ready_before_link_training = 1;
++			edid_caps->panel_patch.prefer_tile_native_mode = 1;
++		}
++		break;
+ 	default:
+ 		return;
+ 	}
+@@ -155,6 +252,7 @@
+ {
+ 	struct amdgpu_dm_connector *aconnector = link->priv;
+ 	struct drm_connector *connector = &aconnector->base;
++	struct drm_device *dev = connector->dev;
+ 	struct edid *edid_buf = edid ? (struct edid *) edid->raw_edid : NULL;
+ 	struct cea_sad *sads;
+ 	int sad_count = -1;
+@@ -195,7 +293,8 @@
+ 					edid_caps->frl_dsc_max_frl_rate, edid_caps->frl_dsc_total_chunk_kbytes);
+ 	}
+ 
+-	apply_edid_quirks(link, edid_buf, edid_caps);
++	apply_edid_quirks(dev, link, edid_buf, edid_caps);
++	dm_helpers_wire_tiled_peer(dev, link, edid_caps);
+ 
+ 	sad_count = drm_edid_to_sad((struct edid *) edid->raw_edid, &sads);
+ 	if (sad_count <= 0)
+--- a/drivers/gpu/drm/amd/display/dc/dc.h	2026-08-28 09:25:22.000000000 +0300
++++ b/drivers/gpu/drm/amd/display/dc/dc.h	2026-09-06 15:14:36.556427058 +0300
+@@ -1847,6 +1847,13 @@
+ 	struct dc_dpia_bw_alloc dpia_bw_alloc_config;
+ 	bool skip_implict_edp_power_control;
+ 	enum backlight_control_type backlight_control_type;
++
++	/*
++	 * Peer link of a paired tiled panel. Set symmetrically by amdgpu_dm
++	 * at EDID-parse time so pre-sink slave paths can consult the root's
++	 * panel-patch.
++	 */
++	struct dc_link *tiled_peer;
+ };
+ 
+ struct dc {
+@@ -2860,6 +2867,91 @@
+ void dc_sink_retain(struct dc_sink *sink);
+ void dc_sink_release(struct dc_sink *sink);
+ 
++static inline const struct dc_panel_patch *
++dc_link_get_panel_patch(const struct dc_link *link)
++{
++	if (!link || !link->local_sink)
++		return NULL;
++
++	return &link->local_sink->edid_caps.panel_patch;
++}
++
++static inline bool dc_link_has_tiled_root_panel_patch(const struct dc_link *link)
++{
++	const struct dc_panel_patch *patch = dc_link_get_panel_patch(link);
++
++	return link &&
++	       link->connector_signal == SIGNAL_TYPE_EDP &&
++	       patch &&
++	       patch->tiled_root_force_edid_reread;
++}
++
++static inline bool dc_link_has_tiled_slave_panel_patch(const struct dc_link *link)
++{
++	const struct dc_panel_patch *patch;
++
++	if (!link || link->connector_signal != SIGNAL_TYPE_DISPLAY_PORT)
++		return false;
++
++	patch = dc_link_get_panel_patch(link);
++	if (patch && patch->tiled_slave_root_wake)
++		return true;
++
++	/* Pre-sink slave paths can still inherit the root's tiled-panel quirk. */
++	return dc_link_has_tiled_root_panel_patch(link->tiled_peer);
++}
++
++static inline bool dc_link_needs_tiled_slave_root_wake(const struct dc_link *link)
++{
++	const struct dc_panel_patch *patch;
++
++	if (!link || link->connector_signal != SIGNAL_TYPE_DISPLAY_PORT)
++		return false;
++
++	patch = dc_link_get_panel_patch(link);
++	if (patch && patch->tiled_slave_root_wake)
++		return true;
++
++	return dc_link_has_tiled_root_panel_patch(link->tiled_peer);
++}
++
++static inline bool dc_link_needs_pre_training_aux_ready(const struct dc_link *link)
++{
++	const struct dc_panel_patch *patch = dc_link_get_panel_patch(link);
++
++	if (patch && patch->aux_ready_before_link_training)
++		return true;
++
++	return dc_link_needs_tiled_slave_root_wake(link);
++}
++
++static inline bool dc_link_needs_tiled_slave_source_table_rev(const struct dc_link *link)
++{
++	const struct dc_panel_patch *patch = dc_link_get_panel_patch(link);
++
++	return link &&
++	       link->connector_signal == SIGNAL_TYPE_DISPLAY_PORT &&
++	       patch &&
++	       patch->tiled_slave_source_table_rev;
++}
++
++static inline bool dc_link_needs_tiled_stream_enable_latch(const struct dc_link *link)
++{
++	const struct dc_panel_patch *patch = dc_link_get_panel_patch(link);
++
++	return link &&
++	       link->connector_signal == SIGNAL_TYPE_DISPLAY_PORT &&
++	       patch &&
++	       patch->tiled_stream_enable_latch;
++}
++
++static inline bool dc_link_prefers_tile_native_mode(const struct dc_link *link)
++{
++	const struct dc_panel_patch *patch = dc_link_get_panel_patch(link);
++
++	return patch && patch->prefer_tile_native_mode;
++}
++
+ struct dc_sink_init_data {
+ 	enum signal_type sink_signal;
+ 	struct dc_link *link;
+--- a/drivers/gpu/drm/amd/display/dc/dc_types.h	2026-08-28 09:25:22.000000000 +0300
++++ b/drivers/gpu/drm/amd/display/dc/dc_types.h	2026-09-06 15:14:36.558232753 +0300
+@@ -192,6 +192,18 @@
+ 	bool oled_optimize_display_on;
+ 	unsigned int force_mst_blocked_discovery;
+ 	unsigned int wait_after_dpcd_poweroff_ms;
++	unsigned int aux_ready_before_link_training; /* require observed AUX response before LT */
++	unsigned int prefer_tile_native_mode;        /* prefer modes matching DRM tile size */
++
++	/*
++	 * Internal tiled-panel quirks. EDID quirks identify the panel once and
++	 * set these role flags; consumers combine them with connector signal,
++	 * DRM tile metadata and link->tiled_peer where ordering requires it.
++	 */
++	unsigned int tiled_slave_root_wake;          /* DP slave: pulse root 0x4F1 before AUX */
++	unsigned int tiled_slave_source_table_rev;   /* DP slave: publish source-DPCD 0x310 = 04 1d 03 */
++	unsigned int tiled_root_force_edid_reread;   /* eDP root: re-read EDID after slave exposes tile metadata */
++	unsigned int tiled_stream_enable_latch;      /* DP slave: 0x4F1=1 at stream-enable */
+ };
+ 
+ /**
+--- a/drivers/gpu/drm/amd/display/dc/link/link_detection.c	2026-08-28 09:25:22.000000000 +0300
++++ b/drivers/gpu/drm/amd/display/dc/link/link_detection.c	2026-09-06 15:14:36.559278973 +0300
+@@ -48,9 +48,12 @@
+ #include "link_enc_cfg.h"
+ #include "dm_helpers.h"
+ #include "clk_mgr.h"
++#include "grph_object_id.h"
+ 
+  // Offset DPCD 050Eh == 0x5A
+ #define MST_HUB_ID_0x5A  0x5A
++#define TILED_SLAVE_AUX_WAKE_TIMEOUT_MS 300
++#define TILED_SLAVE_AUX_WAKE_POLL_MS 30
+ 
+ #define DC_LOGGER \
+ 	link->ctx->logger
+@@ -105,6 +108,120 @@
+ 	return transaction_type;
+ }
+ 
++static enum dc_status tiled_root_write_panel_wake(struct dc_link *link)
++{
++	if (!dc_link_has_tiled_root_panel_patch(link) ||
++	    !link->ddc || !link->local_sink)
++		return DC_OK;
++
++	/* Detection-time only: force the DDC into AUX mode before the latch
++	 * pulse. Unlike the secondary's pre-detect AUX poll, we don't restore
++	 * the prior transaction type here -- DC expects the root to stay in
++	 * AUX mode for subsequent reads. */
++	set_ddc_transaction_type(link->ddc, DDC_TRANSACTION_TYPE_I2C_OVER_AUX);
++	link->aux_mode = link_is_in_aux_transaction_mode(link->ddc);
++
++	return link_apple_5k_root_panel_latch_pulse(link);
++}
++
++static bool tiled_slave_poll_aux(struct dc_link *link,
++				 struct dc_link *root_link)
++{
++	enum ddc_transaction_type old_transaction_type;
++	bool old_aux_mode;
++	enum dc_status status;
++	uint8_t dpcd_rev = 0;
++	unsigned int elapsed_ms;
++
++	if (!link || !link->ddc)
++		return false;
++
++	old_transaction_type = link->ddc->transaction_type;
++	old_aux_mode = link->aux_mode;
++
++	set_ddc_transaction_type(link->ddc, DDC_TRANSACTION_TYPE_I2C_OVER_AUX);
++	link->aux_mode = link_is_in_aux_transaction_mode(link->ddc);
++
++	/*
++	 * Re-wake the panel via the root panel-latch before polling. A
++	 * secondary-only HPDRX re-detect doesn't run the root's own detect, so
++	 * the post-root-edid wake never fires on that path. Without this, the
++	 * slave's AUX stays dead, the poll below times out, and the tile is
++	 * torn down. At initial boot this is an idempotent re-assert.
++	 */
++	if (root_link)
++		tiled_root_write_panel_wake(root_link);
++
++	for (elapsed_ms = 0; ; elapsed_ms += TILED_SLAVE_AUX_WAKE_POLL_MS) {
++		dpcd_rev = 0;
++		status = core_link_read_dpcd(link, DP_DPCD_REV,
++					    &dpcd_rev, sizeof(dpcd_rev));
++
++		if (status == DC_OK && dpcd_rev != 0)
++			return true;
++
++		if (elapsed_ms >= TILED_SLAVE_AUX_WAKE_TIMEOUT_MS)
++			break;
++
++		msleep(TILED_SLAVE_AUX_WAKE_POLL_MS);
++	}
++
++	set_ddc_transaction_type(link->ddc, old_transaction_type);
++	link->aux_mode = old_aux_mode;
++
++	return false;
++}
++
++static void tiled_slave_rewire_peer(struct dc_link *link, struct dc_link *root_link)
++{
++	struct dc_link *old_peer;
++
++	if (!link || !root_link || root_link->tiled_peer == link)
++		return;
++
++	old_peer = root_link->tiled_peer;
++	if (old_peer)
++		old_peer->tiled_peer = NULL;
++
++	root_link->tiled_peer = link;
++	link->tiled_peer = root_link;
++
++}
++
++static bool tiled_slave_try_pre_detect_aux(struct dc_link *link)
++{
++	struct dc_link *root_link;
++	unsigned int i;
++
++	if (!dc_link_has_tiled_slave_panel_patch(link) || !link->ddc)
++		return false;
++
++	root_link = link->tiled_peer;
++
++	if (tiled_slave_poll_aux(link, root_link))
++		return true;
++
++	if (!root_link || !root_link->dc)
++		return false;
++
++	for (i = 0; i < root_link->dc->link_count; i++) {
++		struct dc_link *candidate = root_link->dc->links[i];
++
++		if (!candidate || candidate == root_link ||
++		    candidate == link ||
++		    candidate->connector_signal != SIGNAL_TYPE_DISPLAY_PORT ||
++		    !candidate->ddc)
++			continue;
++
++		if (tiled_slave_poll_aux(candidate, root_link)) {
++			tiled_slave_rewire_peer(candidate, root_link);
++			return candidate == link;
++		}
++	}
++
++	return false;
++}
++
+ static enum signal_type get_basic_signal_type(struct graphics_object_id encoder,
+ 					      struct graphics_object_id downstream)
+ {
+@@ -591,6 +708,9 @@
+ 	struct audio_support *audio_support = &link->dc->res_pool->audio_support;
+ 
+ 	sink_caps->signal = link_detect_sink_signal_type(link, reason);
++	if (dc_link_has_tiled_slave_panel_patch(link) && link->aux_mode)
++		sink_caps->signal = SIGNAL_TYPE_DISPLAY_PORT;
++
+ 	sink_caps->transaction_type =
+ 		get_ddc_transaction_type(sink_caps->signal);
+ 
+@@ -916,6 +1036,14 @@
+ 				(link->ep_type == DISPLAY_ENDPOINT_USB4_DPIA &&
+ 				!link->dc->config.enable_dpia_pre_training)) {
+ 			destrictive = false;
++		} else if (dc_link_has_tiled_slave_panel_patch(link)) {
++			/*
++			 * Some internal tiled DP slaves report HPD low during
++			 * detection, but are already proven present by bounded AUX
++			 * probing. Use the non-destructive capability path for
++			 * validation, as with other internal panel paths.
++			 */
++			destrictive = false;
+ 		} else if (link_dp_get_encoding_format(&max_link_cap) ==
+ 				DP_8b_10b_ENCODING) {
+ 			if (link->dpcd_caps.is_mst_capable ||
+@@ -1088,6 +1216,15 @@
+ 		return false;
+ 	}
+ 
++	/*
++	 * Some internal tiled DP slaves share panel presence with an eDP root
++	 * and may report HPD low. If a bounded AUX probe proves the slave is
++	 * present, treat it as connected.
++	 */
++	if (new_connection_type == dc_connection_none &&
++	    tiled_slave_try_pre_detect_aux(link))
++		new_connection_type = dc_connection_single;
++
+ 	prev_sink = link->local_sink;
+ 	if (prev_sink) {
+ 		dc_sink_retain(prev_sink);
+@@ -1317,6 +1454,8 @@
+ 			break;
+ 		}
+ 
++		tiled_root_write_panel_wake(link);
++
+ 		// Check if edid is the same
+ 		if ((prev_sink) &&
+ 		    (edid_status == EDID_THE_SAME || edid_status == EDID_OK))
+--- a/drivers/gpu/drm/amd/display/dc/link/link_dpms.c	2026-08-28 09:25:22.000000000 +0300
++++ b/drivers/gpu/drm/amd/display/dc/link/link_dpms.c	2026-09-06 15:14:36.560494161 +0300
+@@ -58,6 +58,7 @@
+ #include "clk_mgr.h"
+ #include "atomfirmware.h"
+ #include "vpg.h"
++#include "grph_object_id.h"
+ 
+ #define DC_LOGGER \
+ 	dc_logger
+@@ -79,6 +80,20 @@
+ #define MAX_MTP_SLOT_COUNT 64
+ #define LINK_TRAINING_ATTEMPTS 4
+ #define PEAK_FACTOR_X1000 1006
++#define APPLE_5K_DPCD_PANEL_LATCH 0x4F1
++
++static void dp_write_tiled_stream_enable_latch(struct dc_link *link)
++{
++	uint8_t payload = 1;
++
++	if (!dc_link_needs_tiled_stream_enable_latch(link) || !link->local_sink)
++		return;
++
++	/* Re-assert the root panel latch, then latch the slave stream. */
++	link_apple_5k_root_panel_latch_pulse(link->tiled_peer);
++	core_link_write_dpcd(link, APPLE_5K_DPCD_PANEL_LATCH,
++			     &payload, sizeof(payload));
++}
+ 
+ void link_blank_all_dp_displays(struct dc *dc)
+ {
+@@ -1015,6 +1030,7 @@
+ 				&new_downspread.raw, sizeof(new_downspread));
+ 		}
+ 
++		dp_write_tiled_stream_enable_latch(link);
+ 	} else {
+ 		dm_helpers_mst_enable_stream_features(stream);
+ 	}
+--- a/drivers/gpu/drm/amd/display/dc/link/protocols/link_dp_capability.c	2026-08-28 09:25:22.000000000 +0300
++++ b/drivers/gpu/drm/amd/display/dc/link/protocols/link_dp_capability.c	2026-09-06 15:14:36.561206052 +0300
+@@ -50,12 +50,16 @@
+ #include "link_enc_cfg.h"
+ #include "dc_dmub_srv.h"
+ #include "gpio_service_interface.h"
++#include "grph_object_id.h"
+ 
+ #define DC_TRACE_LEVEL_MESSAGE(...) /* do nothing */
+ 
+ #define DC_LOGGER \
+ 	link->ctx->logger
+ 
++#define DP_SOURCE_DPCD_AUX_READY_ATTEMPTS 3
++#define DP_SOURCE_DPCD_AUX_READY_COOLDOWN_US 1000
++
+ #ifndef MAX
+ #define MAX(X, Y) ((X) > (Y) ? (X) : (Y))
+ #endif
+@@ -63,6 +67,54 @@
+ #define MIN(X, Y) ((X) < (Y) ? (X) : (Y))
+ #endif
+ 
++static void dpcd_set_tiled_slave_source_table_revision(
++	struct dc_link *link)
++{
++	/* Source-DPCD 0x310..0x312 as published by the Boot Camp driver. */
++	static const uint8_t table_revision[3] = { 0x04, 0x1d, 0x03 };
++
++	if (!dc_link_needs_tiled_slave_source_table_rev(link))
++		return;
++
++	core_link_write_dpcd(link, DP_SOURCE_TABLE_REVISION,
++			     table_revision, sizeof(table_revision));
++}
++
++static bool dp_prepare_source_dpcd_write(struct dc_link *link)
++{
++	uint8_t dpcd_rev;
++	uint8_t power_state = DP_POWER_STATE_D0;
++	unsigned int try;
++
++	if (!dc_link_needs_tiled_slave_root_wake(link))
++		return true;
++
++	for (try = 0; try < DP_SOURCE_DPCD_AUX_READY_ATTEMPTS; try++) {
++		enum dc_status power_status;
++		enum dc_status rev_status;
++
++		link_apple_5k_root_panel_latch_pulse(link->tiled_peer);
++
++		power_status = core_link_write_dpcd(link, DP_SET_POWER,
++						    &power_state,
++						    sizeof(power_state));
++		if (power_status != DC_OK)
++			goto retry;
++
++		dpcd_rev = 0;
++		rev_status = core_link_read_dpcd(link, DP_DPCD_REV,
++						 &dpcd_rev, sizeof(dpcd_rev));
++		if (rev_status == DC_OK && dpcd_rev != 0)
++			return true;
++
++retry:
++		if (try + 1 < DP_SOURCE_DPCD_AUX_READY_ATTEMPTS)
++			fsleep(DP_SOURCE_DPCD_AUX_READY_COOLDOWN_US);
++	}
++
++	return false;
++}
++
+ struct dp_lt_fallback_entry {
+ 	enum dc_lane_count lane_count;
+ 	enum dc_link_rate link_rate;
+@@ -1410,6 +1462,9 @@
+ 
+ void dpcd_set_source_specific_data(struct dc_link *link)
+ {
++	if (!dp_prepare_source_dpcd_write(link))
++		return;
++
+ 	if (!link->dc->vendor_signature.is_valid) {
+ 		enum dc_status __maybe_unused result_write_min_hblank = DC_NOT_SUPPORTED;
+ 		struct dpcd_amd_signature amd_signature = {0};
+@@ -1489,6 +1544,8 @@
+ 				link->dc->vendor_signature.data.raw,
+ 				sizeof(link->dc->vendor_signature.data.raw));
+ 	}
++
++	dpcd_set_tiled_slave_source_table_revision(link);
+ }
+ 
+ void dpcd_write_cable_id_to_dprx(struct dc_link *link)
+--- a/drivers/gpu/drm/amd/display/dc/link/protocols/link_dpcd.c	2026-08-28 09:25:22.000000000 +0300
++++ b/drivers/gpu/drm/amd/display/dc/link/protocols/link_dpcd.c	2026-09-06 15:14:36.563143439 +0300
+@@ -249,3 +249,18 @@
+ 	}
+ 	return status;
+ }
++
++/* Apple 5K dual-tile internal panel: DPCD 0x4F1 = root panel-latch.
++ * Writing 1 wakes the panel; the slave's AUX comes up shortly after. */
++#define APPLE_5K_DPCD_ROOT_PANEL_LATCH 0x4F1
++
++enum dc_status link_apple_5k_root_panel_latch_pulse(struct dc_link *root_link)
++{
++	uint8_t payload = 1;
++
++	if (!dc_link_has_tiled_root_panel_patch(root_link))
++		return DC_OK;
++
++	return core_link_write_dpcd(root_link, APPLE_5K_DPCD_ROOT_PANEL_LATCH,
++				    &payload, sizeof(payload));
++}
+--- a/drivers/gpu/drm/amd/display/dc/link/protocols/link_dpcd.h	2026-08-28 09:25:22.000000000 +0300
++++ b/drivers/gpu/drm/amd/display/dc/link/protocols/link_dpcd.h	2026-09-06 15:14:36.563530430 +0300
+@@ -39,4 +39,12 @@
+ 		uint32_t address,
+ 		const uint8_t *data,
+ 		uint32_t size);
++
++/*
++ * Pulse the Apple 5K root panel-latch DPCD (0x4F1 = 1). Used by the slave-side
++ * pre-detect / source-DPCD / link-training paths to wake the panel before
++ * touching the slave's AUX. Safe to call with NULL or non-root link — no-op.
++ */
++enum dc_status link_apple_5k_root_panel_latch_pulse(struct dc_link *root_link);
++
+ #endif
+--- a/drivers/gpu/drm/amd/display/dc/link/protocols/link_dp_training.c	2026-08-28 09:25:22.000000000 +0300
++++ b/drivers/gpu/drm/amd/display/dc/link/protocols/link_dp_training.c	2026-09-06 15:14:36.564000611 +0300
+@@ -1091,12 +1091,70 @@
+ 	return status;
+ }
+ 
++/*
++ * Some embedded DP sinks expose AUX before they are consistently ready for
++ * link-training writes. For panels that request it, make training conditional
++ * on an observed AUX response after any panel-specific pre-training wake.
++ */
++#define DP_LT_AUX_READY_ATTEMPTS           3
++#define DP_LT_AUX_READY_COOLDOWN_US        1000
++#define DP_LT_DPCD_WRITE_RETRIES           4
++
++static void dp_pre_link_training_wake(struct dc_link *link)
++{
++	if (link && dc_link_needs_tiled_slave_root_wake(link))
++		link_apple_5k_root_panel_latch_pulse(link->tiled_peer);
++}
++
++static bool dp_prepare_sink_for_link_training(struct dc_link *link,
++					      unsigned int attempts)
++{
++	uint8_t dpcd_rev;
++	uint8_t power_state = DP_POWER_STATE_D0;
++	unsigned int try;
++
++	if (!link || link->aux_access_disabled ||
++	    !dc_link_needs_pre_training_aux_ready(link))
++		return true;
++
++	for (try = 0; try < attempts; try++) {
++		enum dc_status power_status;
++		enum dc_status rev_status;
++
++		dp_pre_link_training_wake(link);
++
++		power_status = core_link_write_dpcd(link, DP_SET_POWER,
++						    &power_state,
++						    sizeof(power_state));
++		if (power_status != DC_OK)
++			goto retry;
++
++		dpcd_rev = 0;
++		rev_status = core_link_read_dpcd(link, DP_DPCD_REV,
++						 &dpcd_rev, sizeof(dpcd_rev));
++		if (rev_status == DC_OK && dpcd_rev != 0)
++			return true;
++
++retry:
++		if (try + 1 < attempts)
++			fsleep(DP_LT_AUX_READY_COOLDOWN_US);
++	}
++
++	return false;
++}
++
+ enum dc_status dpcd_set_link_settings(
+ 	struct dc_link *link,
+ 	const struct link_training_settings *lt_settings)
+ {
+-	uint8_t rate;
++	uint8_t rate = 0;
+ 	enum dc_status status;
++	bool retry_dpcd_writes = dc_link_needs_pre_training_aux_ready(link);
++	unsigned int retry = 0;
++	enum dc_status ds_status = DC_OK;
++	enum dc_status lc_status = DC_OK;
++	enum dc_status bw_status = DC_OK;
++	enum dc_status rate_status = DC_OK;
+ 
+ 	union down_spread_ctrl downspread = {0};
+ 	union lane_count_set lane_count_set = {0};
+@@ -1110,50 +1168,82 @@
+ 	lane_count_set.bits.ENHANCED_FRAMING = lt_settings->enhanced_framing;
+ 	lane_count_set.bits.POST_LT_ADJ_REQ_GRANTED = 0;
+ 
+-
+ 	if (link->ep_type == DISPLAY_ENDPOINT_PHY &&
+ 			lt_settings->pattern_for_eq < DP_TRAINING_PATTERN_SEQUENCE_4) {
+ 		lane_count_set.bits.POST_LT_ADJ_REQ_GRANTED =
+ 				link->dpcd_caps.max_ln_count.bits.POST_LT_ADJ_REQ_SUPPORTED;
+ 	}
+ 
+-	status = core_link_write_dpcd(link, DP_DOWNSPREAD_CTRL,
+-		&downspread.raw, sizeof(downspread));
+-	if (status != DC_OK)
+-		DC_LOG_ERROR("%s:%d: core_link_write_dpcd (DP_DOWNSPREAD_CTRL) failed\n", __func__, __LINE__);
+-
+-	status = core_link_write_dpcd(link, DP_LANE_COUNT_SET,
+-		&lane_count_set.raw, 1);
+-	if (status != DC_OK)
+-		DC_LOG_ERROR("%s:%d: core_link_write_dpcd (DP_LANE_COUNT_SET) failed\n", __func__, __LINE__);
+-
+-	if (link->dpcd_caps.dpcd_rev.raw >= DPCD_REV_13 &&
+-			lt_settings->link_settings.use_link_rate_set == true) {
+-		rate = 0;
+-		/* WA for some MUX chips that will power down with eDP and lose supported
+-		 * link rate set for eDP 1.4. Source reads DPCD 0x010 again to ensure
+-		 * MUX chip gets link rate set back before link training.
+-		 */
+-		if (link->connector_signal == SIGNAL_TYPE_EDP) {
+-			uint8_t supported_link_rates[16] = {0};
+-
+-			core_link_read_dpcd(link, DP_SUPPORTED_LINK_RATES,
+-					supported_link_rates, sizeof(supported_link_rates));
++	/*
++	 * Keep retryable link-config writes tied to observed sink AUX readiness
++	 * instead of a fixed wake delay.
++	 */
++	while (true) {
++		if (retry_dpcd_writes &&
++		    !dp_prepare_sink_for_link_training(link, 1)) {
++			status = DC_ERROR_UNEXPECTED;
++			goto dpcd_write_retry;
+ 		}
+-		status = core_link_write_dpcd(link, DP_LINK_BW_SET, &rate, 1);
+-		if (status != DC_OK)
+-			DC_LOG_ERROR("%s:%d: core_link_write_dpcd (DP_LINK_BW_SET) failed\n", __func__, __LINE__);
+ 
+-		status = core_link_write_dpcd(link, DP_LINK_RATE_SET,
+-				&lt_settings->link_settings.link_rate_set, 1);
++		rate_status = DC_OK;
++
++		ds_status = core_link_write_dpcd(link, DP_DOWNSPREAD_CTRL,
++			&downspread.raw, sizeof(downspread));
++		status = ds_status;
+ 		if (status != DC_OK)
+-			DC_LOG_ERROR("%s:%d: core_link_write_dpcd (DP_LINK_RATE_SET) failed\n", __func__, __LINE__);
+-	} else {
+-		rate = get_dpcd_link_rate(&lt_settings->link_settings);
++			DC_LOG_ERROR("%s:%d: core_link_write_dpcd (DP_DOWNSPREAD_CTRL) failed\n", __func__, __LINE__);
+ 
+-		status = core_link_write_dpcd(link, DP_LINK_BW_SET, &rate, 1);
++		lc_status = core_link_write_dpcd(link, DP_LANE_COUNT_SET,
++			&lane_count_set.raw, 1);
++		status = lc_status;
+ 		if (status != DC_OK)
+-			DC_LOG_ERROR("%s:%d: core_link_write_dpcd (DP_LINK_BW_SET) failed\n", __func__, __LINE__);
++			DC_LOG_ERROR("%s:%d: core_link_write_dpcd (DP_LANE_COUNT_SET) failed\n", __func__, __LINE__);
++
++		if (link->dpcd_caps.dpcd_rev.raw >= DPCD_REV_13 &&
++				lt_settings->link_settings.use_link_rate_set == true) {
++			rate = 0;
++			/* WA for some MUX chips that will power down with eDP and lose supported
++			 * link rate set for eDP 1.4. Source reads DPCD 0x010 again to ensure
++			 * MUX chip gets link rate set back before link training.
++			 */
++			if (link->connector_signal == SIGNAL_TYPE_EDP) {
++				uint8_t supported_link_rates[16] = {0};
++
++				core_link_read_dpcd(link, DP_SUPPORTED_LINK_RATES,
++						supported_link_rates, sizeof(supported_link_rates));
++			}
++			bw_status = core_link_write_dpcd(link, DP_LINK_BW_SET, &rate, 1);
++			status = bw_status;
++			if (status != DC_OK)
++				DC_LOG_ERROR("%s:%d: core_link_write_dpcd (DP_LINK_BW_SET) failed\n", __func__, __LINE__);
++
++			status = core_link_write_dpcd(link, DP_LINK_RATE_SET,
++					&lt_settings->link_settings.link_rate_set, 1);
++			rate_status = status;
++			if (status != DC_OK)
++				DC_LOG_ERROR("%s:%d: core_link_write_dpcd (DP_LINK_RATE_SET) failed\n", __func__, __LINE__);
++		} else {
++			rate = get_dpcd_link_rate(&lt_settings->link_settings);
++
++			bw_status = core_link_write_dpcd(link, DP_LINK_BW_SET, &rate, 1);
++			status = bw_status;
++			if (status != DC_OK)
++				DC_LOG_ERROR("%s:%d: core_link_write_dpcd (DP_LINK_BW_SET) failed\n", __func__, __LINE__);
++		}
++
++		if (!retry_dpcd_writes)
++			break;
++
++		if (ds_status == DC_OK && lc_status == DC_OK &&
++		    bw_status == DC_OK && rate_status == DC_OK)
++			break;
++
++dpcd_write_retry:
++		if (retry >= DP_LT_DPCD_WRITE_RETRIES)
++			break;
++
++		fsleep(DP_LT_AUX_READY_COOLDOWN_US);
++		retry++;
+ 	}
+ 
+ 	if (rate) {
+@@ -1671,6 +1761,14 @@
+ 			msleep(delay_dp_power_up_in_ms);
+ 		}
+ 
++		if (!dp_prepare_sink_for_link_training(link,
++						       DP_LT_AUX_READY_ATTEMPTS)) {
++			DC_LOG_WARNING("%s: DP link(%d) sink AUX not ready for training\n",
++				       __func__, link->link_index);
++			status = LINK_TRAINING_ABORT;
++			goto link_training_failed;
++		}
++
+ 		edp_set_panel_assr(link, pipe_ctx, &panel_mode, true);
+ 
+ 		dp_set_panel_mode(link, panel_mode);
+@@ -1721,6 +1819,7 @@
+ 			}
+ 		}
+ 
++link_training_failed:
+ 		fail_count++;
+ 		dp_trace_lt_fail_count_update(link, fail_count, false);
+ 		if (link->ep_type == DISPLAY_ENDPOINT_PHY) {
+--- a/drivers/gpu/drm/amd/display/dc/link/protocols/link_edp_panel_control.c	2026-08-28 09:25:22.000000000 +0300
++++ b/drivers/gpu/drm/amd/display/dc/link/protocols/link_edp_panel_control.c	2026-09-06 15:14:36.564206062 +0300
+@@ -28,6 +28,8 @@
+  * as PSR and ABM and it also manages specs defined eDP panel power sequences.
+  */
+ 
++#include <linux/dmi.h>
++
+ #include "link_edp_panel_control.h"
+ #include "link_dpcd.h"
+ #include "link_dp_capability.h"
+@@ -40,12 +42,18 @@
+ #include "abm.h"
+ #include "resource.h"
+ #include "link_dp_panel_replay.h"
++#include "grph_object_id.h"
+ #define DC_LOGGER \
+ 	link->ctx->logger
+ #define DC_LOGGER_INIT(logger)
+ 
+ #define DP_SINK_PR_ENABLE_AND_CONFIGURATION		0x37B
+ 
++static bool link_needs_tiled_slave_assr_route(const struct dc_link *link)
++{
++	return dc_link_has_tiled_slave_panel_patch(link);
++}
++
+ /* Travis */
+ static const char DP_VGA_LVDS_CONVERTER_ID_2[] = "sivarT";
+ /* Nutmeg */
+@@ -138,6 +146,9 @@
+ 		}
+ 	}
+ 
++	if (link_needs_tiled_slave_assr_route(link))
++		return DP_PANEL_MODE_EDP;
++
+ 	if (link->dpcd_caps.panel_mode_edp &&
+ 		(link->connector_signal == SIGNAL_TYPE_EDP ||
+ 		 (link->connector_signal == SIGNAL_TYPE_DISPLAY_PORT &&
