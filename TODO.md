@@ -10,8 +10,10 @@ to re-derive them.
 hardware) is applied by the installer and is what `Omarchy → linux` runs.
 `patches/5k-genlock-settle-resync.patch` and `patches/5k-latch-clear.patch`
 (skewed Apple logo) were promoted to the default on 2026-09-06 after a captured
-teardown and a straight logo; the installer applies all four on top of the
-main patch. The `Test - 5K boot fixes` entry is gone; `Test - 5K-lean` belongs
+teardown and a straight logo. `patches/5k-latch-clear-going-down-only.patch`
+(promoted the same evening) restricts the latch clear to the reboot path; the
+installer applies all five on top of the main patch. The default's module is
+also kept at `~/.cache/kernel-5k-build/amdgpu.ko.zst.latch-going-down`. The `Test - 5K boot fixes` entry is gone; `Test - 5K-lean` belongs
 to the lean-patch work and stays. A copy of the
 default's module is kept at `~/.cache/kernel-5k-build/amdgpu.ko.zst.early-modeset`
 for `imac-test-entry stage`.
@@ -139,9 +141,38 @@ re-detect drop the slave sink before its stream disable ran, and the test
 cycle before that ran the untouched default. The lesson is in the evidence
 directory: never judge a shutdown-path change without the capture.
 
-**Cosmetic, noted:** right after the disk-encryption password is accepted the
-whole prompt box visibly shifts, goes black, then the 5K desktop comes up
-clean. The boot log shows a burst of fbdev/Plymouth commits at ~14.7 s each
+**Resolved 2026-09-06 (evening) — the jump and the black flashes were not
+the re-sync.** A build that measured both tiles' scan positions before every
+re-sync found them aligned on all 35 checks (0 re-syncs run), so the analysis
+below was chasing the wrong thing. The real cause was the latch-clear patch
+itself: `dp_write_tiled_stream_disable_latch()` cleared the second tile's wake
+latch (0x4F1) on every ordinary stream-off, not only when going down. Each
+latch write toggles that tile's HPD line; DM answers an HPD pulse with a full
+`dc_link_detect(DETECT_REASON_HPD)`, which drops the sink, sets
+`link_state_valid = false` and sends userspace a hotplug event, so the next
+commit fails `pipe_need_reprogram()` for the slave pipe, tears the tile down,
+re-trains it — and writes the latch again. Per boot: 30–40 slave re-detects,
+36 re-trainings, 19 stream-offs (the pre-logo-fix builds had 4, 14 and none).
+Fix: the whole disable-latch write is now gated on `apple_5k_going_down`
+(`patches/5k-latch-clear-going-down-only.patch`). Verified boot: 4 re-detects,
+11 trainings, 0 stream-offs, root link never re-trained, native 5K at 10-bit;
+the owner reports the flashes and the pre-reboot skew are gone. The
+measured-resync build was dropped as inert. Lesson: `journalctl -k` for older
+boots is the cheapest regression test — compare the same counters across
+builds before theorising.
+
+Leftover, cosmetic: the warm-reboot Apple logo is straight but slightly soft.
+After the teardown the firmware sees a single-tile panel (second tile asleep,
+its registers reset) and draws the logo on one tile stretched across the
+glass; a cold boot draws it crisp. Making the firmware draw at 5K would mean
+handing it a panel with both tiles awake, which is exactly the state that
+produced the skew — so any attempt has to find a state the firmware treats as
+"fresh dual-tile" rather than "already running". Untested; not worth a
+regression in the straight logo.
+
+**Original analysis (superseded, kept for the record):** right after the
+disk-encryption password is accepted the whole prompt box visibly shifts,
+goes black, then the 5K desktop comes up clean. The boot log shows a burst of fbdev/Plymouth commits at ~14.7 s each
 followed by `manual-trigger-sync` — the 250 ms settle-and-resync doing its
 one-shot CRTC alignment on a live picture. It is the re-sync working, seen.
 Timeline from the boot after the successful capture: the journal's first
