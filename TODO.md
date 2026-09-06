@@ -5,9 +5,21 @@ to re-derive them.
 
 ## Display — two boot artifacts (5K only)
 
-Both root-caused and **fixed in `patches/5k-boot-artifacts.patch`**; the fixes are
-built and installed but not yet confirmed on a reboot. Confirm, then move this
-section to a changelog.
+**Patch layout (2026-09-06):** the boot-artifact work is split by confidence.
+`patches/5k-early-modeset.patch` (half-dark password prompt, confirmed on
+hardware) is applied by the installer and is what `Omarchy → linux` runs.
+`patches/5k-latch-clear.patch` (skewed Apple logo) is experimental, applies on
+top of it, and lives only in the `Test - 5K boot fixes` entry. A copy of the
+default's module is kept at `~/.cache/kernel-5k-build/amdgpu.ko.zst.early-modeset`
+for `imac-test-entry stage`.
+
+Also observed: `limine-mkinitcpio` **preserved** both hand-added test entries,
+`default_entry` and `timeout` across a regeneration (installer run, 2026-09-06),
+so the "a regeneration drops the test entry" caveat in `imac-test-entry` is
+weaker than stated.
+
+Both root-caused. The password-prompt one is fixed and shipped; the Apple-logo one is
+still open — see the patch layout note above.
 
 ### Skewed Apple logo on warm reboot (cold boot is fine)
 

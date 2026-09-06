@@ -1,0 +1,108 @@
+iMac 5K dual-tile panel: half-dark panel at the disk-encryption password prompt.
+
+Applies on top of imac5k-amdgpu-7.2.2.patch. Confirmed on hardware.
+
+Half-dark panel at the disk-encryption password prompt
+   The slave tile only gets a DC stream during an atomic modeset (see the
+   stitch block in amdgpu_dm_atomic_check), and drm_client_setup()'s
+   initial fbdev config deliberately stops short of committing one: it
+   probes, sets up the crtcs and calls register_framebuffer(), leaving the
+   commit to a later hotplug or to fbcon taking over the console. With
+   "quiet splash" fbcon defers take-over, so on this machine that first
+   commit landed 1.16 s after fb0 went live (5.911 s -> 7.069 s in the boot
+   log). For that whole window the panel presents the full-width stitched
+   mode while only the root tile scans out, and the right-hand half is
+   dark -- long enough to cover the password prompt.
+
+   Fix: once fbdev is set up, if this device drives a stitched tile panel,
+   issue a second client hotplug. That takes the dev->fb_helper path, which
+   does commit, so the peer tile stream is created during probe instead of
+   whenever something else happens to trigger a modeset. Confirmed on
+   hardware: peer stream added 3 ms after fb0, down from 1160 ms.
+
+No-op on hardware without the tiled-panel quirk.
+
+--- a/drivers/gpu/drm/amd/amdgpu/amdgpu.h
++++ b/drivers/gpu/drm/amd/amdgpu/amdgpu.h
+@@ -271,6 +271,9 @@
+ 
+ extern uint amdgpu_hdmi_hpd_debounce_delay_ms;
+ 
++/* Apple 5K dual-tile panel (amdgpu_dm.c); false on other hardware. */
++bool amdgpu_dm_has_tiled_stitch_panel(struct amdgpu_device *adev);
++
+ #define AMDGPU_VM_MAX_NUM_CTX			4096
+ #define AMDGPU_SG_THRESHOLD			(256*1024*1024)
+ #define AMDGPU_WAIT_IDLE_TIMEOUT_IN_MS	        3000
+--- a/drivers/gpu/drm/amd/amdgpu/amdgpu_drv.c
++++ b/drivers/gpu/drm/amd/amdgpu/amdgpu_drv.c
+@@ -24,6 +24,7 @@
+ 
+ #include <drm/amdgpu_drm.h>
+ #include <drm/clients/drm_client_setup.h>
++#include <drm/drm_client_event.h>
+ #include <drm/drm_drv.h>
+ #include <drm/drm_fbdev_ttm.h>
+ #include <drm/drm_gem.h>
+@@ -2478,6 +2479,28 @@
+ 			format = NULL;
+ 
+ 		drm_client_setup(adev_to_drm(adev), format);
++
++		/*
++		 * Apple dual-tile panels: the slave tile only gets a stream
++		 * during an atomic modeset, and drm_client_setup()'s initial
++		 * fbdev config deliberately stops short of committing one --
++		 * it probes, sets up the crtcs and registers the framebuffer,
++		 * but leaves the commit to a later hotplug or to fbcon taking
++		 * over the console. With "quiet splash" fbcon defers take-over,
++		 * so that first commit can land over a second later. Until it
++		 * does, the panel is presenting the full-width stitched mode
++		 * with only the root tile scanning out and the right-hand half
++		 * dark -- which is long enough to cover the disk-encryption
++		 * password prompt.
++		 *
++		 * A second hotplug takes the dev->fb_helper path, which does
++		 * commit, so the peer tile stream is created here instead.
++		 */
++		if (amdgpu_dm_has_tiled_stitch_panel(adev)) {
++			drm_info(adev_to_drm(adev),
++				 "TILED_STITCH: forcing initial modeset so both tiles are live before first paint\n");
++			drm_client_dev_hotplug(adev_to_drm(adev));
++		}
+ 	}
+ 
+ 	ret = amdgpu_debugfs_init(adev);
+--- a/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.c
++++ b/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.c
+@@ -2988,6 +2988,30 @@
+ 	return 0;
+ }
+ 
++/*
++ * True when this device drives an Apple dual-tile panel through the tiled
++ * stitch, i.e. one crtc feeds a root tile stream plus a peer slave-tile stream.
++ *
++ * The peer stream only comes into existence during an atomic modeset (see the
++ * stitch block in amdgpu_dm_atomic_check), so until the first commit lands the
++ * panel is presenting a full-width mode with only the root tile scanning out.
++ * The probe path uses this to force that first commit early rather than leaving
++ * the right-hand tile dark until something else happens to trigger a modeset.
++ */
++bool amdgpu_dm_has_tiled_stitch_panel(struct amdgpu_device *adev)
++{
++	int i;
++
++	if (!adev || !adev->dm.dc)
++		return false;
++
++	for (i = 0; i < adev->dm.dc->link_count; i++)
++		if (amdgpu_dm_link_is_tiled_stitch_root(adev->dm.dc->links[i]))
++			return true;
++
++	return false;
++}
++
+ static void amdgpu_dm_fini(struct amdgpu_device *adev)
+ {
+ 	int i;
