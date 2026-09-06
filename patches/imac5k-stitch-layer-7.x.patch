@@ -10,6 +10,14 @@ is the mainline candidate.
 
 Adds the module parameter amdgpu.tiled_stitch (-1 auto, 0 off, 1 on).
 
+Also carries the two stitch-specific boot fixes from this repo, unchanged:
+  * early modeset: a second drm_client_dev_hotplug() after drm_client_setup()
+    so the peer tile stream exists before Plymouth draws the disk-password
+    prompt (otherwise the right half is dark for ~1 s);
+  * settle-and-resync: re-run the timing sync 250 ms after each commit that
+    touches the tiled pair, because the one-shot alignment can fire before the
+    re-trained slave tile is running.
+
 One fix over erik2's original: the saved tile-group id buffer was 8 bytes
 while DRM tile-group ids (drm_tile_group.group_data, and the topology_id
 argument of drm_mode_get/create_tile_group) are 9 bytes. The restore path
@@ -23,10 +31,18 @@ Apply order on a pristine 7.1.x / 7.2.x tree:
 
 Not-Yet-Signed-off-by: mr_projects
 ---
-diff -ruN -x '.*' lean719/drivers/gpu/drm/amd/amdgpu/amdgpu_drv.c ls719/drivers/gpu/drm/amd/amdgpu/amdgpu_drv.c
---- a/drivers/gpu/drm/amd/amdgpu/amdgpu_drv.c	2026-08-19 19:20:32.000000000 +0300
-+++ b/drivers/gpu/drm/amd/amdgpu/amdgpu_drv.c	2026-09-06 22:32:24.230642457 +0300
-@@ -238,6 +238,7 @@
+diff -ruN -x '.*' core2/drivers/gpu/drm/amd/amdgpu/amdgpu_drv.c pair2/drivers/gpu/drm/amd/amdgpu/amdgpu_drv.c
+--- a/drivers/gpu/drm/amd/amdgpu/amdgpu_drv.c	2026-09-06 23:41:58.568210173 +0300
++++ b/drivers/gpu/drm/amd/amdgpu/amdgpu_drv.c	2026-09-06 23:42:58.209034885 +0300
+@@ -24,6 +24,7 @@
+ 
+ #include <drm/amdgpu_drm.h>
+ #include <drm/clients/drm_client_setup.h>
++#include <drm/drm_client_event.h>
+ #include <drm/drm_atomic_helper.h>
+ #include <drm/drm_drv.h>
+ #include <drm/drm_fbdev_ttm.h>
+@@ -239,6 +240,7 @@
  int amdgpu_user_partt_mode = AMDGPU_AUTO_COMPUTE_PARTITION_MODE;
  int amdgpu_umsch_mm;
  int amdgpu_seamless = -1; /* auto */
@@ -34,7 +50,7 @@ diff -ruN -x '.*' lean719/drivers/gpu/drm/amd/amdgpu/amdgpu_drv.c ls719/drivers/
  uint amdgpu_debug_mask;
  int amdgpu_agp = -1; /* auto */
  int amdgpu_wbrf = -1;
-@@ -1038,6 +1039,18 @@
+@@ -1040,6 +1042,18 @@
  module_param_named(seamless, amdgpu_seamless, int, 0444);
  
  /**
@@ -53,10 +69,39 @@ diff -ruN -x '.*' lean719/drivers/gpu/drm/amd/amdgpu/amdgpu_drv.c ls719/drivers/
   * DOC: debug_mask (uint)
   * Debug options for amdgpu, work as a binary mask with the following options:
   *
-diff -ruN -x '.*' lean719/drivers/gpu/drm/amd/amdgpu/amdgpu.h ls719/drivers/gpu/drm/amd/amdgpu/amdgpu.h
---- a/drivers/gpu/drm/amd/amdgpu/amdgpu.h	2026-08-19 19:20:32.000000000 +0300
-+++ b/drivers/gpu/drm/amd/amdgpu/amdgpu.h	2026-09-06 22:32:24.230879167 +0300
-@@ -259,6 +259,7 @@
+@@ -2479,6 +2493,28 @@
+ 			format = NULL;
+ 
+ 		drm_client_setup(adev_to_drm(adev), format);
++
++		/*
++		 * Apple dual-tile panels: the slave tile only gets a stream
++		 * during an atomic modeset, and drm_client_setup()'s initial
++		 * fbdev config deliberately stops short of committing one --
++		 * it probes, sets up the crtcs and registers the framebuffer,
++		 * but leaves the commit to a later hotplug or to fbcon taking
++		 * over the console. With "quiet splash" fbcon defers take-over,
++		 * so that first commit can land over a second later. Until it
++		 * does, the panel is presenting the full-width stitched mode
++		 * with only the root tile scanning out and the right-hand half
++		 * dark -- which is long enough to cover the disk-encryption
++		 * password prompt.
++		 *
++		 * A second hotplug takes the dev->fb_helper path, which does
++		 * commit, so the peer tile stream is created here instead.
++		 */
++		if (amdgpu_dm_has_tiled_stitch_panel(adev)) {
++			drm_info(adev_to_drm(adev),
++				 "TILED_STITCH: forcing initial modeset so both tiles are live before first paint\n");
++			drm_client_dev_hotplug(adev_to_drm(adev));
++		}
+ 	}
+ 
+ 	ret = amdgpu_debugfs_init(adev);
+diff -ruN -x '.*' core2/drivers/gpu/drm/amd/amdgpu/amdgpu.h pair2/drivers/gpu/drm/amd/amdgpu/amdgpu.h
+--- a/drivers/gpu/drm/amd/amdgpu/amdgpu.h	2026-09-06 23:41:58.566906620 +0300
++++ b/drivers/gpu/drm/amd/amdgpu/amdgpu.h	2026-09-06 23:42:23.250187482 +0300
+@@ -260,6 +260,7 @@
  extern int amdgpu_sg_display;
  extern int amdgpu_umsch_mm;
  extern int amdgpu_seamless;
@@ -64,12 +109,22 @@ diff -ruN -x '.*' lean719/drivers/gpu/drm/amd/amdgpu/amdgpu.h ls719/drivers/gpu/
  extern int amdgpu_umsch_mm_fwlog;
  
  extern int amdgpu_user_partt_mode;
-diff -ruN -x '.*' lean719/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.c ls719/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.c
---- a/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.c	2026-09-06 22:32:24.020554842 +0300
-+++ b/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.c	2026-09-06 22:32:48.768604175 +0300
-@@ -160,6 +160,681 @@
- #define FIRMWARE_DCN_42_DMUB "amdgpu/dcn_4_2_dmcub.bin"
- MODULE_FIRMWARE(FIRMWARE_DCN_42_DMUB);
+@@ -272,6 +273,9 @@
+ 
+ extern uint amdgpu_hdmi_hpd_debounce_delay_ms;
+ 
++/* Apple 5K dual-tile panel (amdgpu_dm.c); false on other hardware. */
++bool amdgpu_dm_has_tiled_stitch_panel(struct amdgpu_device *adev);
++
+ #define AMDGPU_VM_MAX_NUM_CTX			4096
+ #define AMDGPU_SG_THRESHOLD			(256*1024*1024)
+ #define AMDGPU_WAIT_IDLE_TIMEOUT_IN_MS	        3000
+diff -ruN -x '.*' core2/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.c pair2/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.c
+--- a/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.c	2026-09-06 23:41:58.570011093 +0300
++++ b/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.c	2026-09-06 23:42:23.259283244 +0300
+@@ -164,6 +164,681 @@
+ #define FIRMWARE_DCN_42B_DMUB "amdgpu/dcn_4_2_1_dmcub.bin"
+ MODULE_FIRMWARE(FIRMWARE_DCN_42B_DMUB);
  
 +#define TILED_STITCH_SYNTH_EDID_BLOCKS 2
 +#define TILED_STITCH_SYNTH_EDID_SIZE (TILED_STITCH_SYNTH_EDID_BLOCKS * EDID_LENGTH)
@@ -749,15 +804,69 @@ diff -ruN -x '.*' lean719/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.c ls71
  /**
   * DOC: overview
   *
-@@ -234,6 +909,7 @@
+@@ -177,6 +852,8 @@
+ /* basic init/fini API */
+ static int amdgpu_dm_init(struct amdgpu_device *adev);
+ static void amdgpu_dm_fini(struct amdgpu_device *adev);
++static void amdgpu_dm_tiled_resync_work(struct work_struct *work);
++static void amdgpu_dm_queue_tiled_resync(struct amdgpu_device *adev);
+ static bool is_freesync_video_mode(const struct drm_display_mode *mode, struct amdgpu_dm_connector *aconnector);
+ static void reset_freesync_config_for_crtc(struct dm_crtc_state *new_crtc_state);
+ static struct amdgpu_i2c_adapter *
+@@ -238,6 +915,7 @@
  				  uint32_t link_index);
  
  static int amdgpu_dm_connector_get_modes(struct drm_connector *connector);
 +static void amdgpu_dm_get_native_mode(struct drm_connector *connector);
  
- static int amdgpu_dm_atomic_setup_commit(struct drm_atomic_state *state);
- static void amdgpu_dm_atomic_commit_tail(struct drm_atomic_state *state);
-@@ -3353,6 +4029,11 @@
+ static int amdgpu_dm_atomic_setup_commit(struct drm_atomic_commit *state);
+ static void amdgpu_dm_atomic_commit_tail(struct drm_atomic_commit *state);
+@@ -2109,6 +2787,7 @@
+ 
+ 	mutex_init(&adev->dm.dpia_aux_lock);
+ 	mutex_init(&adev->dm.dc_lock);
++	INIT_DELAYED_WORK(&adev->dm.tiled_resync_work, amdgpu_dm_tiled_resync_work);
+ 	mutex_init(&adev->dm.audio_lock);
+ 
+ 	spin_lock_init(&adev->dm.dmub_lock);
+@@ -2475,10 +3154,36 @@
+ 	return 0;
+ }
+ 
++/*
++ * True when this device drives an Apple dual-tile panel through the tiled
++ * stitch, i.e. one crtc feeds a root tile stream plus a peer slave-tile stream.
++ *
++ * The peer stream only comes into existence during an atomic modeset (see the
++ * stitch block in amdgpu_dm_atomic_check), so until the first commit lands the
++ * panel is presenting a full-width mode with only the root tile scanning out.
++ * The probe path uses this to force that first commit early rather than leaving
++ * the right-hand tile dark until something else happens to trigger a modeset.
++ */
++bool amdgpu_dm_has_tiled_stitch_panel(struct amdgpu_device *adev)
++{
++	int i;
++
++	if (!adev || !adev->dm.dc)
++		return false;
++
++	for (i = 0; i < adev->dm.dc->link_count; i++)
++		if (amdgpu_dm_link_is_tiled_stitch_root(adev->dm.dc->links[i]))
++			return true;
++
++	return false;
++}
++
+ static void amdgpu_dm_fini(struct amdgpu_device *adev)
+ {
+ 	int i;
+ 
++	cancel_delayed_work_sync(&adev->dm.tiled_resync_work);
++
+ 	if (adev->dm.vblank_control_workqueue) {
+ 		destroy_workqueue(adev->dm.vblank_control_workqueue);
+ 		adev->dm.vblank_control_workqueue = NULL;
+@@ -3532,6 +4237,11 @@
  			dc_plane_state_release(dm_new_plane_state->dc_state);
  			dm_new_plane_state->dc_state = NULL;
  		}
@@ -769,7 +878,7 @@ diff -ruN -x '.*' lean719/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.c ls71
  	}
  
  	drm_atomic_helper_resume(ddev, dm->cached_state);
-@@ -4169,7 +4850,17 @@
+@@ -4348,7 +5058,17 @@
  			const struct edid *edid = (const struct edid *)sink->dc_edid.raw_edid;
  
  			aconnector->drm_edid = drm_edid_alloc(edid, sink->dc_edid.length);
@@ -788,7 +897,7 @@ diff -ruN -x '.*' lean719/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.c ls71
  
  			hdmi_cec_set_edid(aconnector);
  			if (aconnector->dc_link->aux_mode)
-@@ -6607,6 +7298,29 @@
+@@ -6831,6 +7551,29 @@
  	stream->src = src;
  	stream->dst = dst;
  
@@ -818,7 +927,7 @@ diff -ruN -x '.*' lean719/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.c ls71
  	drm_dbg_kms(dev, "Destination Rectangle x:%d  y:%d  width:%d  height:%d\n",
  		    dst.x, dst.y, dst.width, dst.height);
  
-@@ -7517,6 +8231,20 @@
+@@ -7812,6 +8555,20 @@
  
  	update_stream_scaling_settings(dev, &mode, dm_state, stream);
  
@@ -839,7 +948,7 @@ diff -ruN -x '.*' lean719/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.c ls71
  	fill_audio_info(
  		&stream->audio_info,
  		connector,
-@@ -8040,7 +8768,7 @@
+@@ -8336,7 +9093,7 @@
  		ddc = &aconnector->i2c->base;
  
  	drm_edid = drm_edid_read_ddc(connector, ddc);
@@ -848,7 +957,7 @@ diff -ruN -x '.*' lean719/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.c ls71
  	if (!drm_edid) {
  		drm_err(dev, "No EDID found on connector: %s.\n", connector->name);
  		return;
-@@ -8099,7 +8827,7 @@
+@@ -8395,7 +9152,7 @@
  		ddc = &aconnector->i2c->base;
  
  	drm_edid = drm_edid_read_ddc(connector, ddc);
@@ -857,7 +966,7 @@ diff -ruN -x '.*' lean719/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.c ls71
  	if (!drm_edid) {
  		drm_err(connector->dev, "No EDID found on connector: %s.\n", connector->name);
  		return;
-@@ -8298,6 +9026,98 @@
+@@ -8594,6 +9351,98 @@
  	}
  }
  
@@ -956,7 +1065,7 @@ diff -ruN -x '.*' lean719/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.c ls71
  static void
  amdgpu_dm_reprobe_tiled_root_after_slave(struct amdgpu_device *adev)
  {
-@@ -8358,7 +9178,10 @@
+@@ -8654,7 +9503,10 @@
  		drm_edid_free(primary->drm_edid);
  		primary->drm_edid = drm_edid_alloc(edid, sink->dc_edid.length);
  		mutex_lock(&dev->mode_config.mutex);
@@ -968,7 +1077,7 @@ diff -ruN -x '.*' lean719/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.c ls71
  		mutex_unlock(&dev->mode_config.mutex);
  	}
  
-@@ -8478,6 +9301,7 @@
+@@ -8775,6 +9627,7 @@
  	 * here via the amdgpu_dm_connector_helper_funcs
  	 */
  	struct amdgpu_dm_connector *aconnector = to_amdgpu_dm_connector(connector);
@@ -976,7 +1085,7 @@ diff -ruN -x '.*' lean719/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.c ls71
  
  	if ((mode->flags & DRM_MODE_FLAG_INTERLACE) ||
  			(mode->flags & DRM_MODE_FLAG_DBLSCAN))
-@@ -8488,6 +9312,19 @@
+@@ -8785,6 +9638,19 @@
  		return MODE_PANEL;
  	}
  
@@ -996,7 +1105,7 @@ diff -ruN -x '.*' lean719/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.c ls71
  	/*
  	 * Only run this the first time mode_valid is called to initilialize
  	 * EDID mgmt
-@@ -8991,6 +9828,9 @@
+@@ -9288,6 +10154,9 @@
  	    (connector->connector_type != DRM_MODE_CONNECTOR_LVDS))
  		return;
  
@@ -1006,7 +1115,7 @@ diff -ruN -x '.*' lean719/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.c ls71
  	n = ARRAY_SIZE(common_modes);
  
  	for (i = 0; i < n; i++) {
-@@ -9210,6 +10050,7 @@
+@@ -9507,6 +10376,7 @@
  	const struct drm_edid *drm_edid = amdgpu_dm_connector->drm_edid;
  	struct dc_link_settings *verified_link_cap = &dc_link->verified_link_cap;
  	const struct dc *dc = dc_link->dc;
@@ -1014,7 +1123,7 @@ diff -ruN -x '.*' lean719/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.c ls71
  
  	encoder = amdgpu_dm_connector_to_encoder(connector);
  
-@@ -9238,6 +10079,27 @@
+@@ -9535,6 +10405,27 @@
  	}
  
  	amdgpu_dm_make_tile_mode_preferred(connector);
@@ -1042,7 +1151,7 @@ diff -ruN -x '.*' lean719/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.c ls71
  
  	amdgpu_dm_fbc_init(connector);
  
-@@ -10068,6 +10930,49 @@
+@@ -10382,6 +11273,49 @@
  	return abo->tbo.resource ? abo->tbo.resource->mem_type : 0;
  }
  
@@ -1092,7 +1201,7 @@ diff -ruN -x '.*' lean719/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.c ls71
  static void amdgpu_dm_update_cursor(struct drm_plane *plane,
  				    struct drm_plane_state *old_plane_state,
  				    struct dc_stream_update *update)
-@@ -10099,6 +11004,8 @@
+@@ -10413,6 +11347,8 @@
  			dc_stream_set_cursor_position(crtc_state->stream,
  						      &position);
  			update->cursor_position = &crtc_state->stream->cursor_position;
@@ -1101,7 +1210,7 @@ diff -ruN -x '.*' lean719/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.c ls71
  		}
  		return;
  	}
-@@ -10137,6 +11044,10 @@
+@@ -10451,6 +11387,10 @@
  			drm_err(adev_to_drm(adev), "DC failed to set cursor position\n");
  
  		update->cursor_position = &crtc_state->stream->cursor_position;
@@ -1112,7 +1221,7 @@ diff -ruN -x '.*' lean719/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.c ls71
  	}
  }
  
-@@ -10304,12 +11215,28 @@
+@@ -10605,12 +11545,28 @@
  
  		bundle->stream_update.cursor_position =
  				&acrtc_state->stream->cursor_position;
@@ -1141,7 +1250,7 @@ diff -ruN -x '.*' lean719/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.c ls71
  	/* update planes when needed */
  	for_each_oldnew_plane_in_state(state, plane, old_plane_state, new_plane_state, i) {
  		struct drm_crtc *crtc = new_plane_state->crtc;
-@@ -10361,6 +11288,30 @@
+@@ -10662,6 +11618,30 @@
  		bundle->surface_updates[planes_count].scaling_info =
  			&bundle->scaling_infos[planes_count];
  
@@ -1172,7 +1281,7 @@ diff -ruN -x '.*' lean719/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.c ls71
  		plane_needs_flip = old_plane_state->fb && new_plane_state->fb;
  
  		pflip_present = pflip_present || plane_needs_flip;
-@@ -10384,6 +11335,17 @@
+@@ -10685,6 +11665,17 @@
  		bundle->surface_updates[planes_count].plane_info =
  			&bundle->plane_infos[planes_count];
  
@@ -1190,7 +1299,7 @@ diff -ruN -x '.*' lean719/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.c ls71
  		if (acrtc_state->stream->link->psr_settings.psr_feature_enabled ||
  		    acrtc_state->stream->link->replay_settings.replay_feature_enabled) {
  			fill_dc_dirty_rects(plane, old_plane_state,
-@@ -10593,6 +11555,41 @@
+@@ -10883,6 +11874,41 @@
  					 acrtc_state->stream,
  					 &bundle->stream_update,
  					 bundle->surface_updates);
@@ -1232,7 +1341,7 @@ diff -ruN -x '.*' lean719/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.c ls71
  		updated_planes_and_streams = true;
  
  		/**
-@@ -10924,6 +11921,8 @@
+@@ -11327,6 +12353,8 @@
  			mutex_lock(&dm->dc_lock);
  			dc_exit_ips_for_hw_access(dm->dc);
  			dc_stream_program_cursor_position(dm_old_crtc_state->stream, &position);
@@ -1241,7 +1350,15 @@ diff -ruN -x '.*' lean719/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.c ls71
  			mutex_unlock(&dm->dc_lock);
  		}
  
-@@ -11844,6 +12843,62 @@
+@@ -11741,6 +12769,7 @@
+ 	if (dm_state && dm_state->context) {
+ 		dc_state = dm_state->context;
+ 		amdgpu_dm_commit_streams(state, dc_state);
++		amdgpu_dm_queue_tiled_resync(adev);
+ 	}
+ 
+ 	amdgpu_dm_update_hdcp(state);
+@@ -12265,6 +13294,62 @@
  	dm_new_crtc_state->freesync_config.fixed_refresh_in_uhz = res;
  }
  
@@ -1302,9 +1419,9 @@ diff -ruN -x '.*' lean719/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.c ls71
 +}
 +
  static int dm_update_crtc_state(struct amdgpu_display_manager *dm,
- 			 struct drm_atomic_state *state,
+ 			 struct drm_atomic_commit *state,
  			 struct drm_crtc *crtc,
-@@ -11867,6 +12922,8 @@
+@@ -12288,6 +13373,8 @@
  	struct amdgpu_dm_connector *aconnector = NULL;
  	struct drm_connector_state *drm_new_conn_state = NULL, *drm_old_conn_state = NULL;
  	struct dm_connector_state *dm_new_conn_state = NULL, *dm_old_conn_state = NULL;
@@ -1313,7 +1430,7 @@ diff -ruN -x '.*' lean719/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.c ls71
  
  	new_stream = NULL;
  
-@@ -11893,9 +12950,45 @@
+@@ -12314,9 +13401,45 @@
  		dm_new_conn_state = to_dm_connector_state(drm_new_conn_state);
  		dm_old_conn_state = to_dm_connector_state(drm_old_conn_state);
  
@@ -1359,7 +1476,7 @@ diff -ruN -x '.*' lean719/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.c ls71
  		new_stream = create_validate_stream_for_sink(connector,
  							     &new_crtc_state->mode,
  							     dm_new_conn_state,
-@@ -11929,6 +13022,20 @@
+@@ -12350,6 +13473,20 @@
  		if (ret)
  			goto fail;
  
@@ -1380,7 +1497,7 @@ diff -ruN -x '.*' lean719/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.c ls71
  		/*
  		 * If we already removed the old stream from the context
  		 * (and set the new stream to NULL) then we can't reuse
-@@ -12021,6 +13128,23 @@
+@@ -12442,6 +13579,23 @@
  		dc_stream_release(dm_old_crtc_state->stream);
  		dm_new_crtc_state->stream = NULL;
  
@@ -1404,7 +1521,7 @@ diff -ruN -x '.*' lean719/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.c ls71
  		reset_freesync_config_for_crtc(dm_new_crtc_state);
  
  		*lock_and_validation_needed = true;
-@@ -12053,6 +13177,87 @@
+@@ -12474,6 +13628,87 @@
  			drm_dbg_atomic(adev_to_drm(adev), "Enabling DRM crtc: %d\n",
  					 crtc->base.id);
  
@@ -1492,7 +1609,7 @@ diff -ruN -x '.*' lean719/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.c ls71
  			if (dc_state_add_stream(
  					dm->dc,
  					dm_state->context,
-@@ -12088,8 +13293,9 @@
+@@ -12509,8 +13744,9 @@
  	BUG_ON(dm_new_crtc_state->stream == NULL);
  
  	/* Scaling or underscan settings */
@@ -1504,7 +1621,7 @@ diff -ruN -x '.*' lean719/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.c ls71
  		update_stream_scaling_settings(adev_to_drm(adev),
  			&new_crtc_state->mode, dm_new_conn_state, dm_new_crtc_state->stream);
  
-@@ -12488,6 +13694,17 @@
+@@ -12909,6 +14145,17 @@
  
  		dm_new_plane_state->dc_state = NULL;
  
@@ -1522,7 +1639,7 @@ diff -ruN -x '.*' lean719/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.c ls71
  		*lock_and_validation_needed = true;
  
  	} else { /* Add new planes */
-@@ -12566,6 +13783,67 @@
+@@ -12987,6 +14234,67 @@
  		 */
  		dm_new_plane_state->dc_state->update_flags.bits.full_update = 1;
  
@@ -1590,7 +1707,7 @@ diff -ruN -x '.*' lean719/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.c ls71
  		*lock_and_validation_needed = true;
  	}
  
-@@ -13725,7 +15003,8 @@
+@@ -14154,7 +15462,8 @@
  		amdgpu_dm_connector->dc_sink :
  		amdgpu_dm_connector->dc_em_sink;
  
@@ -1600,10 +1717,50 @@ diff -ruN -x '.*' lean719/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.c ls71
  
  	if (!drm_edid || !sink) {
  		dm_con_state = to_dm_connector_state(connector->state);
-diff -ruN -x '.*' lean719/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm_color.c ls719/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm_color.c
---- a/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm_color.c	2026-08-19 19:20:32.000000000 +0300
-+++ b/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm_color.c	2026-09-06 22:32:24.232588137 +0300
-@@ -1299,6 +1299,22 @@
+@@ -14264,6 +15573,39 @@
+ 						       freesync_capable);
+ }
+ 
++/*
++ * Apple iMac 5K dual-tile: settle-and-resync.
++ *
++ * dc_commit_state_no_check() runs dc_trigger_sync() right after
++ * apply_ctx_to_hw(). For the tiled pair that is too early on a full modeset:
++ * the slave tile is re-woken and re-trained in the same commit, so the
++ * one-shot CRTC alignment (enable_timing_synchronization) fires before both
++ * timing generators are actually running and aligns nothing. The driver's own
++ * bookkeeping then reports both tiles synced while the panel shows a sheared
++ * seam -- observed on hardware after login on 2026-09-06, and cured by any
++ * later modeset that happened to re-run the sync once things had settled.
++ *
++ * So: after every commit that touches the tiled pair, re-run the sync a short
++ * while later, via the same routine the debugfs force_timing_sync knob uses.
++ */
++static void amdgpu_dm_tiled_resync_work(struct work_struct *work)
++{
++	struct amdgpu_display_manager *dm =
++		container_of(to_delayed_work(work), struct amdgpu_display_manager,
++			     tiled_resync_work);
++
++	amdgpu_dm_trigger_timing_sync(adev_to_drm(dm->adev));
++}
++
++static void amdgpu_dm_queue_tiled_resync(struct amdgpu_device *adev)
++{
++	if (!amdgpu_dm_has_tiled_stitch_panel(adev))
++		return;
++
++	mod_delayed_work(system_wq, &adev->dm.tiled_resync_work,
++			 msecs_to_jiffies(250));
++}
++
+ void amdgpu_dm_trigger_timing_sync(struct drm_device *dev)
+ {
+ 	struct amdgpu_device *adev = drm_to_adev(dev);
+diff -ruN -x '.*' core2/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm_color.c pair2/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm_color.c
+--- a/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm_color.c	2026-08-28 09:25:22.000000000 +0300
++++ b/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm_color.c	2026-09-06 23:42:23.242282878 +0300
+@@ -1336,6 +1336,22 @@
   * Returns:
   * 0 on success. Error code if setup fails.
   */
@@ -1626,7 +1783,7 @@ diff -ruN -x '.*' lean719/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm_color.
  int amdgpu_dm_update_crtc_color_mgmt(struct dm_crtc_state *crtc)
  {
  	struct dc_stream_state *stream = crtc->stream;
-@@ -1332,6 +1348,8 @@
+@@ -1369,6 +1385,8 @@
  		stream->csc_color_matrix.enable_adjustment = false;
  	}
  
@@ -1635,10 +1792,10 @@ diff -ruN -x '.*' lean719/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm_color.
  	return 0;
  }
  
-diff -ruN -x '.*' lean719/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm_crtc.c ls719/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm_crtc.c
---- a/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm_crtc.c	2026-08-19 19:20:32.000000000 +0300
-+++ b/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm_crtc.c	2026-09-06 22:32:24.232741635 +0300
-@@ -435,6 +435,10 @@
+diff -ruN -x '.*' core2/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm_crtc.c pair2/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm_crtc.c
+--- a/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm_crtc.c	2026-08-28 09:25:22.000000000 +0300
++++ b/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm_crtc.c	2026-09-06 23:42:23.243415478 +0300
+@@ -405,6 +405,10 @@
  	if (cur->stream)
  		dc_stream_release(cur->stream);
  
@@ -1649,7 +1806,7 @@ diff -ruN -x '.*' lean719/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm_crtc.c
  
  	__drm_atomic_helper_crtc_destroy_state(state);
  
-@@ -462,6 +466,12 @@
+@@ -432,6 +436,12 @@
  		dc_stream_retain(state->stream);
  	}
  
@@ -1662,10 +1819,20 @@ diff -ruN -x '.*' lean719/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm_crtc.c
  	state->active_planes = cur->active_planes;
  	state->vrr_infopacket = cur->vrr_infopacket;
  	state->abm_level = cur->abm_level;
-diff -ruN -x '.*' lean719/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.h ls719/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.h
---- a/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.h	2026-08-19 19:20:32.000000000 +0300
-+++ b/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.h	2026-09-06 22:32:24.232872467 +0300
-@@ -908,6 +908,13 @@
+diff -ruN -x '.*' core2/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.h pair2/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.h
+--- a/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.h	2026-08-28 09:25:22.000000000 +0300
++++ b/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.h	2026-09-06 23:42:23.262283308 +0300
+@@ -634,6 +634,9 @@
+ 	 */
+ 	struct amdgpu_encoder mst_encoders[AMDGPU_DM_MAX_CRTC];
+ 	bool force_timing_sync;
++	/* Apple 5K dual-tile: re-run the timing sync shortly after each commit
++	 * that involves the tiled pair, once both tiles have settled. */
++	struct delayed_work tiled_resync_work;
+ 	bool disable_hpd_irq;
+ 	bool dmcub_trace_event_en;
+ 	/**
+@@ -926,6 +929,13 @@
  	struct drm_plane_state base;
  	struct dc_plane_state *dc_state;
  
@@ -1679,7 +1846,7 @@ diff -ruN -x '.*' lean719/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.h ls71
  	/* Plane color mgmt */
  	/**
  	 * @degamma_lut:
-@@ -984,6 +991,17 @@
+@@ -1002,6 +1012,17 @@
  	struct drm_crtc_state base;
  	struct dc_stream_state *stream;
  
@@ -1697,9 +1864,9 @@ diff -ruN -x '.*' lean719/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.h ls71
  	bool cm_has_degamma;
  	bool cm_is_degamma_srgb;
  
-diff -ruN -x '.*' lean719/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm_helpers.c ls719/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm_helpers.c
---- a/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm_helpers.c	2026-09-06 22:32:24.021209937 +0300
-+++ b/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm_helpers.c	2026-09-06 22:32:24.233019962 +0300
+diff -ruN -x '.*' core2/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm_helpers.c pair2/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm_helpers.c
+--- a/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm_helpers.c	2026-09-06 23:38:41.634517152 +0300
++++ b/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm_helpers.c	2026-09-06 23:42:23.244543154 +0300
 @@ -120,8 +120,18 @@
  
  	if (!link->dc || (!is_root && !is_slave))
@@ -1742,9 +1909,9 @@ diff -ruN -x '.*' lean719/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm_helper
  			return;
  		}
  	}
-diff -ruN -x '.*' lean719/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm_plane.c ls719/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm_plane.c
---- a/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm_plane.c	2026-08-19 19:20:32.000000000 +0300
-+++ b/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm_plane.c	2026-09-06 22:32:24.233200716 +0300
+diff -ruN -x '.*' core2/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm_plane.c pair2/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm_plane.c
+--- a/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm_plane.c	2026-08-28 09:25:22.000000000 +0300
++++ b/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm_plane.c	2026-09-06 23:42:23.245413396 +0300
 @@ -1378,6 +1378,8 @@
  
  			dc_stream_program_cursor_position(crtc_state->stream,
@@ -1789,9 +1956,9 @@ diff -ruN -x '.*' lean719/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm_plane.
  	drm_atomic_helper_plane_destroy_state(plane, state);
  }
  
-diff -ruN -x '.*' lean719/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm_plane.h ls719/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm_plane.h
---- a/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm_plane.h	2026-08-19 19:20:32.000000000 +0300
-+++ b/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm_plane.h	2026-09-06 22:32:24.233324290 +0300
+diff -ruN -x '.*' core2/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm_plane.h pair2/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm_plane.h
+--- a/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm_plane.h	2026-08-28 09:25:22.000000000 +0300
++++ b/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm_plane.h	2026-09-06 23:42:23.246050750 +0300
 @@ -35,6 +35,11 @@
  void amdgpu_dm_plane_handle_cursor_update(struct drm_plane *plane,
  			  struct drm_plane_state *old_plane_state);
@@ -1804,10 +1971,10 @@ diff -ruN -x '.*' lean719/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm_plane.
  int amdgpu_dm_plane_fill_dc_scaling_info(struct amdgpu_device *adev,
  			 const struct drm_plane_state *state,
  			 struct dc_scaling_info *scaling_info);
-diff -ruN -x '.*' lean719/drivers/gpu/drm/amd/display/dc/dc.h ls719/drivers/gpu/drm/amd/display/dc/dc.h
---- a/drivers/gpu/drm/amd/display/dc/dc.h	2026-09-06 22:32:24.021461564 +0300
-+++ b/drivers/gpu/drm/amd/display/dc/dc.h	2026-09-06 22:32:24.233495668 +0300
-@@ -1588,6 +1588,18 @@
+diff -ruN -x '.*' core2/drivers/gpu/drm/amd/display/dc/dc.h pair2/drivers/gpu/drm/amd/display/dc/dc.h
+--- a/drivers/gpu/drm/amd/display/dc/dc.h	2026-09-06 23:40:21.249122858 +0300
++++ b/drivers/gpu/drm/amd/display/dc/dc.h	2026-09-06 23:42:23.246282964 +0300
+@@ -1661,6 +1661,18 @@
  };
  
  /*
@@ -1826,7 +1993,7 @@ diff -ruN -x '.*' lean719/drivers/gpu/drm/amd/display/dc/dc.h ls719/drivers/gpu/
   * A link contains one or more sinks and their connected status.
   * The currently active signal type (HDMI, DP-SST, DP-MST) is also reported.
   */
-@@ -1762,10 +1774,17 @@
+@@ -1850,10 +1862,17 @@
  
  	/*
  	 * Peer link of a paired tiled panel. Set symmetrically by amdgpu_dm
