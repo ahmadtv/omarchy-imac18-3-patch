@@ -155,6 +155,16 @@ desktop. On a single-tile panel this is a blink; here it is a jump.
 Refinement if wanted: run the alignment before the first frame is shown
 instead of after, or debounce the re-sync across a burst.
 
+The same thing, mirrored, is visible for a moment *before* a reboot. Capture
+2026-09-06-g, last 8 s of a session on the promoted build: the compositor's
+exit hands the display to the shutdown splash through two modesets
+(641.39, 641.61 s); each turns the slave stream off (latch cleared), re-trains
+the slave link (three times the second round) and turns it back on, and the
+tiles run unaligned until the delayed re-sync lands (642.10, 642.36 s) — that
+window is the brief skew. The going-down sequence itself, 6 s later, is
+clean: `atomic-disable` → slave registers reset → latch cleared → panel power
+off → reboot. Same cause as the post-password jump, same refinement.
+
 **Control experiment (original note):** boot the pre-5K `Snapshots › 2` entry
 (stock amdgpu, `video=eDP-1:3840x2160@60e`, overlayfs root) and warm-reboot out
 of it. If the Apple logo skews even then, the 5K patch is not the cause, and
