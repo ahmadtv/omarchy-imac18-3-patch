@@ -335,7 +335,7 @@ re-trained inside that same commit, so the one-shot alignment
 (`enable_timing_synchronization`) fires before both timing generators are
 running. Note also that `enable_timing_multisync()` excludes the master, so
 with two streams it programs no per-frame reset at all -- the visible lock
-comes entirely from the one-shot alignment. Fix in the test entry: a delayed
+comes entirely from the one-shot alignment. Fix in the test entry (`patches/5k-genlock-settle-resync.patch`): a delayed
 re-sync 250 ms after every tiled commit via `amdgpu_dm_trigger_timing_sync()`
 (the debugfs knob's routine); it logs `manual-trigger-sync`.
 

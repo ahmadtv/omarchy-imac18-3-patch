@@ -1,0 +1,106 @@
+iMac 5K dual-tile panel: re-run the timing sync after tiled commits settle.
+
+EXPERIMENTAL -- applies on top of 5k-genlock-deterministic.patch. Lives in
+the test entry only.
+
+Flagging both tiles (5k-genlock-deterministic.patch) makes the driver's
+bookkeeping deterministic, but dc_commit_state_no_check() runs the
+one-shot CRTC alignment right after apply_ctx_to_hw(). On a full modeset
+the slave tile is re-woken and re-trained inside that same commit, so the
+alignment can fire before both timing generators are running and align
+nothing; the driver then reports both tiles synced while the seam is
+sheared. Any later modeset that re-runs the sync once things have settled
+cures it.
+
+Queue a delayed re-sync 250 ms after every commit that touches the tiled
+pair, via amdgpu_dm_trigger_timing_sync() -- the routine behind the
+debugfs force_timing_sync knob. It logs "manual-trigger-sync".
+
+--- a/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.c
++++ b/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.c
+@@ -848,6 +848,8 @@
+ /* basic init/fini API */
+ static int amdgpu_dm_init(struct amdgpu_device *adev);
+ static void amdgpu_dm_fini(struct amdgpu_device *adev);
++static void amdgpu_dm_tiled_resync_work(struct work_struct *work);
++static void amdgpu_dm_queue_tiled_resync(struct amdgpu_device *adev);
+ static bool is_freesync_video_mode(const struct drm_display_mode *mode, struct amdgpu_dm_connector *aconnector);
+ static void reset_freesync_config_for_crtc(struct dm_crtc_state *new_crtc_state);
+ static struct amdgpu_i2c_adapter *
+@@ -2642,6 +2644,7 @@
+ 
+ 	mutex_init(&adev->dm.dpia_aux_lock);
+ 	mutex_init(&adev->dm.dc_lock);
++	INIT_DELAYED_WORK(&adev->dm.tiled_resync_work, amdgpu_dm_tiled_resync_work);
+ 	mutex_init(&adev->dm.audio_lock);
+ 
+ 	if (amdgpu_dm_irq_init(adev)) {
+@@ -3016,6 +3019,8 @@
+ {
+ 	int i;
+ 
++	cancel_delayed_work_sync(&adev->dm.tiled_resync_work);
++
+ 	if (adev->dm.vblank_control_workqueue) {
+ 		destroy_workqueue(adev->dm.vblank_control_workqueue);
+ 		adev->dm.vblank_control_workqueue = NULL;
+@@ -12914,6 +12919,7 @@
+ 	if (dm_state && dm_state->context) {
+ 		dc_state = dm_state->context;
+ 		amdgpu_dm_commit_streams(state, dc_state);
++		amdgpu_dm_queue_tiled_resync(adev);
+ 	}
+ 
+ 	amdgpu_dm_update_hdcp(state);
+@@ -15725,6 +15731,39 @@
+ 						       freesync_capable);
+ }
+ 
++/*
++ * Apple iMac 5K dual-tile: settle-and-resync.
++ *
++ * dc_commit_state_no_check() runs dc_trigger_sync() right after
++ * apply_ctx_to_hw(). For the tiled pair that is too early on a full modeset:
++ * the slave tile is re-woken and re-trained in the same commit, so the
++ * one-shot CRTC alignment (enable_timing_synchronization) fires before both
++ * timing generators are actually running and aligns nothing. The driver's own
++ * bookkeeping then reports both tiles synced while the panel shows a sheared
++ * seam -- observed on hardware after login on 2026-09-06, and cured by any
++ * later modeset that happened to re-run the sync once things had settled.
++ *
++ * So: after every commit that touches the tiled pair, re-run the sync a short
++ * while later, via the same routine the debugfs force_timing_sync knob uses.
++ */
++static void amdgpu_dm_tiled_resync_work(struct work_struct *work)
++{
++	struct amdgpu_display_manager *dm =
++		container_of(to_delayed_work(work), struct amdgpu_display_manager,
++			     tiled_resync_work);
++
++	amdgpu_dm_trigger_timing_sync(adev_to_drm(dm->adev));
++}
++
++static void amdgpu_dm_queue_tiled_resync(struct amdgpu_device *adev)
++{
++	if (!amdgpu_dm_has_tiled_stitch_panel(adev))
++		return;
++
++	mod_delayed_work(system_wq, &adev->dm.tiled_resync_work,
++			 msecs_to_jiffies(250));
++}
++
+ void amdgpu_dm_trigger_timing_sync(struct drm_device *dev)
+ {
+ 	struct amdgpu_device *adev = drm_to_adev(dev);
+--- a/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.h
++++ b/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.h
+@@ -628,6 +628,9 @@
+ 	 */
+ 	struct amdgpu_encoder mst_encoders[AMDGPU_DM_MAX_CRTC];
+ 	bool force_timing_sync;
++	/* Apple 5K dual-tile: re-run the timing sync shortly after each commit
++	 * that involves the tiled pair, once both tiles have settled. */
++	struct delayed_work tiled_resync_work;
+ 	bool disable_hpd_irq;
+ 	bool dmcub_trace_event_en;
+ 	/**
