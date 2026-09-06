@@ -159,7 +159,10 @@ describe_module() {  # describe_module <path-to-.ko.zst>
 	[[ $syms == *tiled_stitch* ]]                 && marks+=("5K stitch")
 	[[ $syms == *"stream-disable latch"* ]]       && marks+=("latch clear")
 	[[ $syms == *"forcing initial modeset"* ]]    && marks+=("early modeset")
-	((${#marks[@]})) && (IFS=', '; echo "${marks[*]}") || echo "stock"
+	# Two builds can carry the same fix strings and differ only in code, so
+	# always show the module's srcversion as well.
+	local sv; sv="$(modinfo -F srcversion "$1" 2>/dev/null || echo '?')"
+	((${#marks[@]})) && (IFS=', '; echo "${marks[*]} [${sv:0:8}]") || echo "stock [${sv:0:8}]"
 }
 
 case "${1:-status}" in
