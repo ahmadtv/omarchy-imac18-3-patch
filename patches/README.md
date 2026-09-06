@@ -57,9 +57,11 @@ land in a fresh, mismatched tile group. gcc flagged it (`-Wstringop-overread`). 
 layer is functionally the same three-layer stack as `imac5k-amdgpu-7.2.2.patch`
 (the full-stack patch the default module is built from), minus the logging.
 
-**Test status:** built for `7.1.9-arch1-2` and staged as a separate boot
-entry (`/Test - 5K-lean`) via `scripts/imac-alt-entry`; awaiting a boot.
-The full-stack module stays the default until it has been seen working.
+**Test status: boot-tested 2026-09-06** on the iMac18,3 (`7.1.9-arch1-2`),
+from its own boot entry (`/Test - 5K-lean`, made with `scripts/imac-alt-entry`).
+Reached the desktop at native 5120x2880 under Hyprland, seamless, no GPU
+resets or errors. The full-stack module remains the default for now; promote
+the lean build when convenient.
 
 ## Booting any build from its own entry: `scripts/imac-alt-entry`
 
