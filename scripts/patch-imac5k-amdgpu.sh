@@ -30,7 +30,7 @@ PATCH_KVER_SUPPORTED="7.1 7.2"   # kernel series this patch is verified to apply
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PATCH_FILE="${SCRIPT_DIR}/../patches/imac5k-amdgpu-7.2.2.patch"
 # Applied in order, on top of PATCH_FILE. Each must apply cleanly or we abort.
-EXTRA_PATCHES=("${SCRIPT_DIR}/../patches/5k-early-modeset.patch" "${SCRIPT_DIR}/../patches/5k-genlock-deterministic.patch")   # 5k-latch-clear.patch is experimental: test entry only
+EXTRA_PATCHES=("${SCRIPT_DIR}/../patches/5k-early-modeset.patch" "${SCRIPT_DIR}/../patches/5k-genlock-deterministic.patch" "${SCRIPT_DIR}/../patches/5k-genlock-settle-resync.patch" "${SCRIPT_DIR}/../patches/5k-latch-clear.patch")
 WORK="${IMAC5K_WORK:-/home/${SUDO_USER:-$USER}/.cache/kernel-5k-build}"
 KREL="$(uname -r)"                        # e.g. 7.2.2-arch1-1
 KVER="${KREL%%-*}"                        # e.g. 7.2.2

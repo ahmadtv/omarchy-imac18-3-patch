@@ -8,8 +8,11 @@ to re-derive them.
 **Patch layout (2026-09-06):** the boot-artifact work is split by confidence.
 `patches/5k-early-modeset.patch` (half-dark password prompt, confirmed on
 hardware) is applied by the installer and is what `Omarchy → linux` runs.
-`patches/5k-latch-clear.patch` (skewed Apple logo) is experimental, applies on
-top of it, and lives only in the `Test - 5K boot fixes` entry. A copy of the
+`patches/5k-genlock-settle-resync.patch` and `patches/5k-latch-clear.patch`
+(skewed Apple logo) were promoted to the default on 2026-09-06 after a captured
+teardown and a straight logo; the installer applies all four on top of the
+main patch. The `Test - 5K boot fixes` entry is gone; `Test - 5K-lean` belongs
+to the lean-patch work and stays. A copy of the
 default's module is kept at `~/.cache/kernel-5k-build/amdgpu.ko.zst.early-modeset`
 for `imac-test-entry stage`.
 
