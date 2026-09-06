@@ -141,8 +141,16 @@ whole prompt box visibly shifts, goes black, then the 5K desktop comes up
 clean. The boot log shows a burst of fbdev/Plymouth commits at ~14.7 s each
 followed by `manual-trigger-sync` — the 250 ms settle-and-resync doing its
 one-shot CRTC alignment on a live picture. It is the re-sync working, seen.
+Timeline from the boot after the successful capture: the journal's first
+15 s are lost (no `Linux version` line), so nothing *before* the prompt is
+observable; *after* Enter there are **7 modesets and 4 delayed re-syncs in
+90 ms** (14.67–14.76 s) ending exactly at the unlock (`first mount of
+filesystem` at 14.76 s) — Plymouth's dialog transition and the fbdev/DRM
+master handoff, each modeset blanking and each re-sync visibly realigning the
+tiles. Then the compositor's own modesets at 18–21 s bring the clean 5K
+desktop. On a single-tile panel this is a blink; here it is a jump.
 Refinement if wanted: run the alignment before the first frame is shown
-instead of after.
+instead of after, or debounce the re-sync across a burst.
 
 **Control experiment (original note):** boot the pre-5K `Snapshots › 2` entry
 (stock amdgpu, `video=eDP-1:3840x2160@60e`, overlayfs root) and warm-reboot out
