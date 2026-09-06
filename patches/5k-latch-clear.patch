@@ -35,15 +35,24 @@ An earlier version cleared the latch from amdgpu_pci_shutdown() itself while
 the shutdown splash was still being scanned out, which skewed the splash.
 Removed.
 
+4. Latch cleared and tile asleep at the handoff (capture 2026-09-06-b) and
+   the logo STILL skewed. So at going-down the slave is now fully undone --
+   source table 0x310 and eDP configuration 0x10A zeroed before the latch
+   clear -- the pre-detect poll of the sleeping tile is skipped, and the
+   root eDP panel is explicitly powered off and held for T12 after the
+   display shutdown. If this does not fix the logo, the panel controller
+   keeps its dual-tile state until a physical power cycle.
+
 No-op on hardware without the tiled-panel quirk.
 
 --- a/drivers/gpu/drm/amd/amdgpu/amdgpu.h
 +++ b/drivers/gpu/drm/amd/amdgpu/amdgpu.h
-@@ -273,6 +273,7 @@
+@@ -273,6 +273,8 @@
  
  /* Apple 5K dual-tile panel (amdgpu_dm.c); false on other hardware. */
  bool amdgpu_dm_has_tiled_stitch_panel(struct amdgpu_device *adev);
 +void amdgpu_dm_apple5k_going_down(struct amdgpu_device *adev);
++void amdgpu_dm_apple5k_panel_power_off(struct amdgpu_device *adev);
  
  #define AMDGPU_VM_MAX_NUM_CTX			4096
  #define AMDGPU_SG_THRESHOLD			(256*1024*1024)
@@ -57,7 +66,7 @@ No-op on hardware without the tiled-panel quirk.
  #include <drm/drm_drv.h>
  #include <drm/drm_fbdev_ttm.h>
  #include <drm/drm_gem.h>
-@@ -2604,6 +2605,25 @@
+@@ -2604,6 +2605,26 @@
  	 */
  	if (!amdgpu_passthrough(adev))
  		adev->mp1_state = PP_MP1_STATE_UNLOAD;
@@ -79,13 +88,14 @@ No-op on hardware without the tiled-panel quirk.
 +	if (amdgpu_dm_has_tiled_stitch_panel(adev)) {
 +		amdgpu_dm_apple5k_going_down(adev);
 +		drm_atomic_helper_shutdown(dev);
++		amdgpu_dm_apple5k_panel_power_off(adev);
 +	}
  	amdgpu_device_prepare(dev);
  	amdgpu_device_suspend(dev, true);
  	adev->mp1_state = PP_MP1_STATE_NONE;
 --- a/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.c
 +++ b/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.c
-@@ -2992,6 +2992,17 @@
+@@ -2992,6 +2992,43 @@
  }
  
  /*
@@ -97,6 +107,32 @@ No-op on hardware without the tiled-panel quirk.
 +{
 +	if (adev && adev->dm.dc)
 +		adev->dm.dc->apple_5k_going_down = true;
++}
++
++/*
++ * Going down: after the display has been shut down, force the root eDP panel
++ * off and hold it off for a full T12, so the firmware finds the panel exactly
++ * as a cold boot does. Whether the implicit power-off in link disable reaches
++ * the panel's own logic on this iMac is unknown; this makes it explicit.
++ */
++void amdgpu_dm_apple5k_panel_power_off(struct amdgpu_device *adev)
++{
++	struct dc *dc = adev ? adev->dm.dc : NULL;
++	int i;
++
++	if (!dc || !dc->hwss.edp_power_control)
++		return;
++
++	for (i = 0; i < dc->link_count; i++) {
++		struct dc_link *link = dc->links[i];
++
++		if (!dc_link_has_tiled_root_panel_patch(link))
++			continue;
++		dc->hwss.edp_power_control(link, false);
++		drm_info(adev_to_drm(adev), "APPLE5K: going-down root eDP power off link[%u], holding T12\n",
++			 link->link_index);
++		msleep(600);
++	}
 +}
 +
 +/*
@@ -122,7 +158,16 @@ No-op on hardware without the tiled-panel quirk.
  	struct link_service *link_srv;
 --- a/drivers/gpu/drm/amd/display/dc/link/link_dpms.c
 +++ b/drivers/gpu/drm/amd/display/dc/link/link_dpms.c
-@@ -91,6 +91,10 @@
+@@ -76,6 +76,8 @@
+ #define LINK_TRAINING_ATTEMPTS 4
+ #define PEAK_FACTOR_X1000 1006
+ #define APPLE_5K_DPCD_PANEL_LATCH 0x4F1
++#define APPLE_5K_DPCD_SOURCE_TABLE 0x310   /* what the stitch publishes as 04 1d 03 */
++#define APPLE_5K_DPCD_EDP_CONFIG_SET 0x10A /* eDP ASSR route forced on the slave */
+ 
+ static void dp_write_tiled_stream_enable_latch(struct dc_link *link)
+ {
+@@ -91,6 +93,10 @@
  	if (!dc_link_needs_tiled_stream_enable_latch(link) || !link->local_sink)
  		return;
  
@@ -133,7 +178,7 @@ No-op on hardware without the tiled-panel quirk.
  	DC_LOGGER_INIT(link->ctx->logger);
  
  	root_link = link->tiled_peer;
-@@ -115,6 +119,41 @@
+@@ -115,6 +121,61 @@
  		    link->local_sink);
  }
  
@@ -162,6 +207,26 @@ No-op on hardware without the tiled-panel quirk.
 +	DC_LOGGER_INIT(link->ctx->logger);
 +
 +	root_link = link->tiled_peer;
++
++	/*
++	 * Going down for the firmware: undo everything the stitch wrote into
++	 * the slave tile that stock never touches, while its AUX is still up.
++	 * Clearing the wake latch alone was proven insufficient (ramoops
++	 * capture 2026-09-06-b: latch cleared, tile asleep, logo still skewed).
++	 */
++	if (link->dc && link->dc->apple_5k_going_down) {
++		uint8_t zero3[3] = { 0, 0, 0 };
++		uint8_t zero1 = 0;
++		enum dc_status st_tab, st_cfg;
++
++		st_tab = core_link_write_dpcd(link, APPLE_5K_DPCD_SOURCE_TABLE,
++					      zero3, sizeof(zero3));
++		st_cfg = core_link_write_dpcd(link, APPLE_5K_DPCD_EDP_CONFIG_SET,
++					      &zero1, sizeof(zero1));
++		DC_LOG_INFO("APPLE5K: going-down slave reset link[%u] 0x310=00 00 00 status=%d 0x10A=00 status=%d\n",
++			    link->link_index, st_tab, st_cfg);
++	}
++
 +	if (dc_link_has_tiled_root_panel_patch(root_link))
 +		root_status = link_apple_5k_root_panel_latch_clear(root_link);
 +
@@ -175,7 +240,7 @@ No-op on hardware without the tiled-panel quirk.
  void link_blank_all_dp_displays(struct dc *dc)
  {
  	unsigned int i;
-@@ -2244,6 +2283,10 @@
+@@ -2244,6 +2305,10 @@
  	update_psp_stream_config(pipe_ctx, true);
  	dc->hwss.blank_stream(pipe_ctx);
  
@@ -185,6 +250,19 @@ No-op on hardware without the tiled-panel quirk.
 +
  	if (pipe_ctx->link_config.dp_tunnel_settings.should_use_dp_bw_allocation)
  		deallocate_usb4_bandwidth(pipe_ctx->stream);
+ 
+--- a/drivers/gpu/drm/amd/display/dc/link/link_detection.c
++++ b/drivers/gpu/drm/amd/display/dc/link/link_detection.c
+@@ -147,6 +147,10 @@
+ 	if (!link || !link->ddc)
+ 		return false;
+ 
++	/* Going down: the tile was deliberately put to sleep; do not poll it. */
++	if (link->dc && link->dc->apple_5k_going_down)
++		return false;
++
+ 	old_transaction_type = link->ddc->transaction_type;
+ 	old_aux_mode = link->aux_mode;
  
 --- a/drivers/gpu/drm/amd/display/dc/link/protocols/link_dpcd.c
 +++ b/drivers/gpu/drm/amd/display/dc/link/protocols/link_dpcd.c
