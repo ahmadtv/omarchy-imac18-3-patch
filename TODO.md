@@ -275,7 +275,7 @@ added by hand on 2026-08-30, and the shadow configs added by this repo's own
 scripts. That is why the `boot` module *detects and repairs* rather than
 assuming: on a healthy machine it reports `applied` and changes nothing.
 
-## Open: sheared desktop seam (slave tile loses genlock)
+## Fixed: sheared desktop seam (slave tile loses genlock)
 
 The artifact that actually bites in daily use, distinct from the boot-time ones.
 The mode is a correct 5120x2880 throughout; what is lost is sync — the slave
@@ -316,9 +316,10 @@ and never gets the reset. The DCE sync group is built from streams that carry
 the reset, so the slave tile is left out. Seven modesets in one boot: every
 commit with BOTH tiles flagged locked, every one with only the root flagged
 sheared; the outcome depended on a stale flag surviving from the previous
-commit. **Fix:** `patches/5k-genlock-deterministic.patch` flags both tile
-streams before the master pick. In the test entry; if `hyprctl reload` locks
-every time there, promote it and return `bitdepth` to 10.
+commit. **Fix, shipped 2026-09-06:** `patches/5k-genlock-deterministic.patch` flags both
+tile streams before the master pick. Proven on hardware: six modesets in one
+boot of the fixed build, every one locked at the first stage including the boot
+commit. Promoted to the default; `bitdepth` back to 10.
 
 **Earlier note, kept for the record:** `dm_enable_per_frame_crtc_master_sync()` (see
 `patches/genlock-fix.patch`) is where `triggered_crtc_reset.enabled` is set for
