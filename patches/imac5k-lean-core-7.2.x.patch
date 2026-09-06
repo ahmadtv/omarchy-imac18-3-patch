@@ -20,9 +20,11 @@ IDs) that:
     re-pulses the latch at stream enable, and re-reads the root EDID once the
     slave exposes its tile block (the root's EDID flips to its tile identity),
   * prefers the tile-native mode on both connectors,
-  * enables the per-frame CRTC reset for the slave tile so the two tiles scan
-    out in lockstep (multi_sync is otherwise left disabled in mainline); the
-    panel TCON only latches dual-tile mode when the tiles are genlocked.
+  * enables the per-frame CRTC reset on both tile streams, before the master
+    pick, so the two tiles scan out in lockstep (multi_sync is otherwise left
+    disabled in mainline); the panel TCON only latches dual-tile mode when the
+    tiles are genlocked, and enabling the reset after the pick left the lock
+    to chance (a stale flag from the previous commit).
 
 Both connectors then carry correct DisplayID tile metadata and the compositor
 stitches them (Mutter today; KWin in progress). Tested on iMac18,3
@@ -32,13 +34,13 @@ sync_enabled=1, seamless under motion. Also builds against 7.1.x.
 This is a lean rework of the community patch series (mcirsta/linux-imac-5k,
 ported by taprobane99): all bring-up instrumentation/logging removed, the
 dead plumbing that only fed it stripped, and the no-op refactor of
-dc/core/dc.c dropped. 636 added lines vs 1631.
+dc/core/dc.c dropped. 641 added lines vs 1631.
 
 Not-Yet-Signed-off-by: mr_projects
 ---
-diff -ruN -x '*.o' -x '*.cmd' -x '*.mod' -x '*.mod.c' -x '*.ko' -x '*.a' -x '*.order' -x '*.symvers' -x '.*' -x '*.orig' -x '*.rej' /home/ahmad/.cache/kernel-5k-build/pristine/linux-7.2.2/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.c p722lean/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.c
+diff -ruN -x '.*' pristine7.2.2/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.c lean722/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.c
 --- a/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.c	2026-08-28 09:25:22.000000000 +0300
-+++ b/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.c	2026-09-06 15:39:32.242101759 +0300
++++ b/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.c	2026-09-06 22:32:23.329844566 +0300
 @@ -61,6 +61,7 @@
  #include "amdgpu_dm_irq.h"
  #include "dm_helpers.h"
@@ -79,28 +81,33 @@ diff -ruN -x '*.o' -x '*.cmd' -x '*.mod' -x '*.mod.c' -x '*.ko' -x '*.a' -x '*.o
  	/* Debug dump: list all DC links and their associated sinks after detection
  	 * is complete for all connectors. This provides a comprehensive view of the
  	 * final state without repeating the dump for each connector.
-@@ -7253,6 +7264,20 @@
- 		if (!stream)
- 			continue;
- 
-+		/*
-+		 * Apple iMac 5K dual-tile panel: the two tile streams must scan
-+		 * out in lockstep or the panel TCON never latches dual-tile mode
-+		 * (black screen / endless re-modeset). Mainline leaves per-frame
-+		 * CRTC master sync disabled (multi_sync_enabled TODO above); for
-+		 * a link wired as a tile pair, enable the per-frame reset on the
-+		 * slave so it hard-syncs to the master's VSYNC. The master
-+		 * (event_source == itself) stays free-running as timing source.
-+		 */
-+		if (stream->link && stream->link->tiled_peer &&
-+		    stream->triggered_crtc_reset.event_source &&
-+		    stream->triggered_crtc_reset.event_source != stream)
-+			stream->triggered_crtc_reset.enabled = true;
-+
- 		set_multisync_trigger_params(stream);
+@@ -7245,6 +7256,25 @@
+ 		 */
  	}
- }
-@@ -8426,6 +8451,165 @@
+ 
++	/*
++	 * Apple iMac 5K dual-tile panel: the two tile streams must scan out
++	 * in lockstep or the panel TCON never latches dual-tile mode (black
++	 * screen / endless re-modeset) and, once up, the seam shears.
++	 * Mainline leaves per-frame CRTC master sync disabled (the
++	 * multi_sync_enabled TODO above). set_master_stream() only considers
++	 * streams whose reset is already enabled and falls back to stream[0],
++	 * so enabling the reset after the pick made the outcome depend on a
++	 * stale flag surviving from the previous commit: measured on an
++	 * iMac18,3, every commit where both tile streams carried the reset
++	 * locked, every one where only one did sheared. Flag both tiles up
++	 * front so the pick is deterministic and both are in the sync group.
++	 */
++	for (i = 0; i < context->stream_count; i++) {
++		stream = context->streams[i];
++		if (stream && stream->link && stream->link->tiled_peer)
++			stream->triggered_crtc_reset.enabled = true;
++	}
++
+ 	set_master_stream(context->streams, context->stream_count);
+ 
+ 	for (i = 0; i < context->stream_count ; i++) {
+@@ -8426,6 +8456,165 @@
  	return dc_result;
  }
  
@@ -266,7 +273,7 @@ diff -ruN -x '*.o' -x '*.cmd' -x '*.mod' -x '*.mod.c' -x '*.ko' -x '*.a' -x '*.o
  struct dc_stream_state *
  create_validate_stream_for_sink(struct drm_connector *connector,
  				const struct drm_display_mode *drm_mode,
-@@ -8546,6 +8730,11 @@
+@@ -8546,6 +8735,11 @@
  			(mode->flags & DRM_MODE_FLAG_DBLSCAN))
  		return result;
  
@@ -278,7 +285,7 @@ diff -ruN -x '*.o' -x '*.cmd' -x '*.mod' -x '*.mod.c' -x '*.ko' -x '*.a' -x '*.o
  	/*
  	 * Only run this the first time mode_valid is called to initilialize
  	 * EDID mgmt
-@@ -8575,6 +8764,9 @@
+@@ -8575,6 +8769,9 @@
  	if (stream) {
  		dc_stream_release(stream);
  		result = MODE_OK;
@@ -288,7 +295,7 @@ diff -ruN -x '*.o' -x '*.cmd' -x '*.mod' -x '*.mod.c' -x '*.ko' -x '*.a' -x '*.o
  	}
  
  fail:
-@@ -9291,6 +9483,9 @@
+@@ -9291,6 +9488,9 @@
  			amdgpu_dm_connector_add_common_modes(encoder, connector);
  		amdgpu_dm_connector_add_freesync_modes(connector, drm_edid);
  	}
@@ -298,9 +305,9 @@ diff -ruN -x '*.o' -x '*.cmd' -x '*.mod' -x '*.mod.c' -x '*.ko' -x '*.a' -x '*.o
  	amdgpu_dm_fbc_init(connector);
  
  	return amdgpu_dm_connector->num_modes;
-diff -ruN -x '*.o' -x '*.cmd' -x '*.mod' -x '*.mod.c' -x '*.ko' -x '*.a' -x '*.order' -x '*.symvers' -x '.*' -x '*.orig' -x '*.rej' /home/ahmad/.cache/kernel-5k-build/pristine/linux-7.2.2/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm_helpers.c p722lean/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm_helpers.c
+diff -ruN -x '.*' pristine7.2.2/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm_helpers.c lean722/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm_helpers.c
 --- a/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm_helpers.c	2026-08-28 09:25:22.000000000 +0300
-+++ b/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm_helpers.c	2026-09-06 15:39:32.243396821 +0300
++++ b/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm_helpers.c	2026-09-06 22:32:23.318550586 +0300
 @@ -95,12 +95,64 @@
  	       (u32)EDID_PRODUCT_ID(edid);
  }
@@ -432,9 +439,9 @@ diff -ruN -x '*.o' -x '*.cmd' -x '*.mod' -x '*.mod.c' -x '*.ko' -x '*.a' -x '*.o
  
  	sad_count = drm_edid_to_sad((struct edid *) edid->raw_edid, &sads);
  	if (sad_count <= 0)
-diff -ruN -x '*.o' -x '*.cmd' -x '*.mod' -x '*.mod.c' -x '*.ko' -x '*.a' -x '*.order' -x '*.symvers' -x '.*' -x '*.orig' -x '*.rej' /home/ahmad/.cache/kernel-5k-build/pristine/linux-7.2.2/drivers/gpu/drm/amd/display/dc/dc.h p722lean/drivers/gpu/drm/amd/display/dc/dc.h
+diff -ruN -x '.*' pristine7.2.2/drivers/gpu/drm/amd/display/dc/dc.h lean722/drivers/gpu/drm/amd/display/dc/dc.h
 --- a/drivers/gpu/drm/amd/display/dc/dc.h	2026-08-28 09:25:22.000000000 +0300
-+++ b/drivers/gpu/drm/amd/display/dc/dc.h	2026-09-06 15:37:51.617186875 +0300
++++ b/drivers/gpu/drm/amd/display/dc/dc.h	2026-09-06 22:32:23.318830723 +0300
 @@ -1847,6 +1847,13 @@
  	struct dc_dpia_bw_alloc dpia_bw_alloc_config;
  	bool skip_implict_edp_power_control;
@@ -541,9 +548,9 @@ diff -ruN -x '*.o' -x '*.cmd' -x '*.mod' -x '*.mod.c' -x '*.ko' -x '*.a' -x '*.o
  struct dc_sink_init_data {
  	enum signal_type sink_signal;
  	struct dc_link *link;
-diff -ruN -x '*.o' -x '*.cmd' -x '*.mod' -x '*.mod.c' -x '*.ko' -x '*.a' -x '*.order' -x '*.symvers' -x '.*' -x '*.orig' -x '*.rej' /home/ahmad/.cache/kernel-5k-build/pristine/linux-7.2.2/drivers/gpu/drm/amd/display/dc/dc_types.h p722lean/drivers/gpu/drm/amd/display/dc/dc_types.h
+diff -ruN -x '.*' pristine7.2.2/drivers/gpu/drm/amd/display/dc/dc_types.h lean722/drivers/gpu/drm/amd/display/dc/dc_types.h
 --- a/drivers/gpu/drm/amd/display/dc/dc_types.h	2026-08-28 09:25:22.000000000 +0300
-+++ b/drivers/gpu/drm/amd/display/dc/dc_types.h	2026-09-06 15:37:51.617451432 +0300
++++ b/drivers/gpu/drm/amd/display/dc/dc_types.h	2026-09-06 22:32:23.319060760 +0300
 @@ -192,6 +192,18 @@
  	bool oled_optimize_display_on;
  	unsigned int force_mst_blocked_discovery;
@@ -563,9 +570,9 @@ diff -ruN -x '*.o' -x '*.cmd' -x '*.mod' -x '*.mod.c' -x '*.ko' -x '*.a' -x '*.o
  };
  
  /**
-diff -ruN -x '*.o' -x '*.cmd' -x '*.mod' -x '*.mod.c' -x '*.ko' -x '*.a' -x '*.order' -x '*.symvers' -x '.*' -x '*.orig' -x '*.rej' /home/ahmad/.cache/kernel-5k-build/pristine/linux-7.2.2/drivers/gpu/drm/amd/display/dc/link/link_detection.c p722lean/drivers/gpu/drm/amd/display/dc/link/link_detection.c
+diff -ruN -x '.*' pristine7.2.2/drivers/gpu/drm/amd/display/dc/link/link_detection.c lean722/drivers/gpu/drm/amd/display/dc/link/link_detection.c
 --- a/drivers/gpu/drm/amd/display/dc/link/link_detection.c	2026-08-28 09:25:22.000000000 +0300
-+++ b/drivers/gpu/drm/amd/display/dc/link/link_detection.c	2026-09-06 15:37:51.617615187 +0300
++++ b/drivers/gpu/drm/amd/display/dc/link/link_detection.c	2026-09-06 22:32:23.319206558 +0300
 @@ -48,9 +48,12 @@
  #include "link_enc_cfg.h"
  #include "dm_helpers.h"
@@ -750,9 +757,9 @@ diff -ruN -x '*.o' -x '*.cmd' -x '*.mod' -x '*.mod.c' -x '*.ko' -x '*.a' -x '*.o
  		// Check if edid is the same
  		if ((prev_sink) &&
  		    (edid_status == EDID_THE_SAME || edid_status == EDID_OK))
-diff -ruN -x '*.o' -x '*.cmd' -x '*.mod' -x '*.mod.c' -x '*.ko' -x '*.a' -x '*.order' -x '*.symvers' -x '.*' -x '*.orig' -x '*.rej' /home/ahmad/.cache/kernel-5k-build/pristine/linux-7.2.2/drivers/gpu/drm/amd/display/dc/link/link_dpms.c p722lean/drivers/gpu/drm/amd/display/dc/link/link_dpms.c
+diff -ruN -x '.*' pristine7.2.2/drivers/gpu/drm/amd/display/dc/link/link_dpms.c lean722/drivers/gpu/drm/amd/display/dc/link/link_dpms.c
 --- a/drivers/gpu/drm/amd/display/dc/link/link_dpms.c	2026-08-28 09:25:22.000000000 +0300
-+++ b/drivers/gpu/drm/amd/display/dc/link/link_dpms.c	2026-09-06 15:37:51.619015461 +0300
++++ b/drivers/gpu/drm/amd/display/dc/link/link_dpms.c	2026-09-06 22:32:23.319389818 +0300
 @@ -58,6 +58,7 @@
  #include "clk_mgr.h"
  #include "atomfirmware.h"
@@ -790,9 +797,9 @@ diff -ruN -x '*.o' -x '*.cmd' -x '*.mod' -x '*.mod.c' -x '*.ko' -x '*.a' -x '*.o
  	} else {
  		dm_helpers_mst_enable_stream_features(stream);
  	}
-diff -ruN -x '*.o' -x '*.cmd' -x '*.mod' -x '*.mod.c' -x '*.ko' -x '*.a' -x '*.order' -x '*.symvers' -x '.*' -x '*.orig' -x '*.rej' /home/ahmad/.cache/kernel-5k-build/pristine/linux-7.2.2/drivers/gpu/drm/amd/display/dc/link/protocols/link_dp_capability.c p722lean/drivers/gpu/drm/amd/display/dc/link/protocols/link_dp_capability.c
+diff -ruN -x '.*' pristine7.2.2/drivers/gpu/drm/amd/display/dc/link/protocols/link_dp_capability.c lean722/drivers/gpu/drm/amd/display/dc/link/protocols/link_dp_capability.c
 --- a/drivers/gpu/drm/amd/display/dc/link/protocols/link_dp_capability.c	2026-08-28 09:25:22.000000000 +0300
-+++ b/drivers/gpu/drm/amd/display/dc/link/protocols/link_dp_capability.c	2026-09-06 15:37:51.619990873 +0300
++++ b/drivers/gpu/drm/amd/display/dc/link/protocols/link_dp_capability.c	2026-09-06 22:32:23.319597101 +0300
 @@ -50,12 +50,16 @@
  #include "link_enc_cfg.h"
  #include "dc_dmub_srv.h"
@@ -884,9 +891,9 @@ diff -ruN -x '*.o' -x '*.cmd' -x '*.mod' -x '*.mod.c' -x '*.ko' -x '*.a' -x '*.o
  }
  
  void dpcd_write_cable_id_to_dprx(struct dc_link *link)
-diff -ruN -x '*.o' -x '*.cmd' -x '*.mod' -x '*.mod.c' -x '*.ko' -x '*.a' -x '*.order' -x '*.symvers' -x '.*' -x '*.orig' -x '*.rej' /home/ahmad/.cache/kernel-5k-build/pristine/linux-7.2.2/drivers/gpu/drm/amd/display/dc/link/protocols/link_dpcd.c p722lean/drivers/gpu/drm/amd/display/dc/link/protocols/link_dpcd.c
+diff -ruN -x '.*' pristine7.2.2/drivers/gpu/drm/amd/display/dc/link/protocols/link_dpcd.c lean722/drivers/gpu/drm/amd/display/dc/link/protocols/link_dpcd.c
 --- a/drivers/gpu/drm/amd/display/dc/link/protocols/link_dpcd.c	2026-08-28 09:25:22.000000000 +0300
-+++ b/drivers/gpu/drm/amd/display/dc/link/protocols/link_dpcd.c	2026-09-06 15:37:51.620148727 +0300
++++ b/drivers/gpu/drm/amd/display/dc/link/protocols/link_dpcd.c	2026-09-06 22:32:23.319757754 +0300
 @@ -249,3 +249,18 @@
  	}
  	return status;
@@ -906,9 +913,9 @@ diff -ruN -x '*.o' -x '*.cmd' -x '*.mod' -x '*.mod.c' -x '*.ko' -x '*.a' -x '*.o
 +	return core_link_write_dpcd(root_link, APPLE_5K_DPCD_ROOT_PANEL_LATCH,
 +				    &payload, sizeof(payload));
 +}
-diff -ruN -x '*.o' -x '*.cmd' -x '*.mod' -x '*.mod.c' -x '*.ko' -x '*.a' -x '*.order' -x '*.symvers' -x '.*' -x '*.orig' -x '*.rej' /home/ahmad/.cache/kernel-5k-build/pristine/linux-7.2.2/drivers/gpu/drm/amd/display/dc/link/protocols/link_dpcd.h p722lean/drivers/gpu/drm/amd/display/dc/link/protocols/link_dpcd.h
+diff -ruN -x '.*' pristine7.2.2/drivers/gpu/drm/amd/display/dc/link/protocols/link_dpcd.h lean722/drivers/gpu/drm/amd/display/dc/link/protocols/link_dpcd.h
 --- a/drivers/gpu/drm/amd/display/dc/link/protocols/link_dpcd.h	2026-08-28 09:25:22.000000000 +0300
-+++ b/drivers/gpu/drm/amd/display/dc/link/protocols/link_dpcd.h	2026-09-06 15:37:51.620208165 +0300
++++ b/drivers/gpu/drm/amd/display/dc/link/protocols/link_dpcd.h	2026-09-06 22:32:23.319846126 +0300
 @@ -39,4 +39,12 @@
  		uint32_t address,
  		const uint8_t *data,
@@ -922,9 +929,9 @@ diff -ruN -x '*.o' -x '*.cmd' -x '*.mod' -x '*.mod.c' -x '*.ko' -x '*.a' -x '*.o
 +enum dc_status link_apple_5k_root_panel_latch_pulse(struct dc_link *root_link);
 +
  #endif
-diff -ruN -x '*.o' -x '*.cmd' -x '*.mod' -x '*.mod.c' -x '*.ko' -x '*.a' -x '*.order' -x '*.symvers' -x '.*' -x '*.orig' -x '*.rej' /home/ahmad/.cache/kernel-5k-build/pristine/linux-7.2.2/drivers/gpu/drm/amd/display/dc/link/protocols/link_dp_training.c p722lean/drivers/gpu/drm/amd/display/dc/link/protocols/link_dp_training.c
+diff -ruN -x '.*' pristine7.2.2/drivers/gpu/drm/amd/display/dc/link/protocols/link_dp_training.c lean722/drivers/gpu/drm/amd/display/dc/link/protocols/link_dp_training.c
 --- a/drivers/gpu/drm/amd/display/dc/link/protocols/link_dp_training.c	2026-08-28 09:25:22.000000000 +0300
-+++ b/drivers/gpu/drm/amd/display/dc/link/protocols/link_dp_training.c	2026-09-06 15:37:51.620313659 +0300
++++ b/drivers/gpu/drm/amd/display/dc/link/protocols/link_dp_training.c	2026-09-06 22:32:23.319945129 +0300
 @@ -1091,12 +1091,70 @@
  	return status;
  }
@@ -1136,9 +1143,9 @@ diff -ruN -x '*.o' -x '*.cmd' -x '*.mod' -x '*.mod.c' -x '*.ko' -x '*.a' -x '*.o
  		fail_count++;
  		dp_trace_lt_fail_count_update(link, fail_count, false);
  		if (link->ep_type == DISPLAY_ENDPOINT_PHY) {
-diff -ruN -x '*.o' -x '*.cmd' -x '*.mod' -x '*.mod.c' -x '*.ko' -x '*.a' -x '*.order' -x '*.symvers' -x '.*' -x '*.orig' -x '*.rej' /home/ahmad/.cache/kernel-5k-build/pristine/linux-7.2.2/drivers/gpu/drm/amd/display/dc/link/protocols/link_edp_panel_control.c p722lean/drivers/gpu/drm/amd/display/dc/link/protocols/link_edp_panel_control.c
+diff -ruN -x '.*' pristine7.2.2/drivers/gpu/drm/amd/display/dc/link/protocols/link_edp_panel_control.c lean722/drivers/gpu/drm/amd/display/dc/link/protocols/link_edp_panel_control.c
 --- a/drivers/gpu/drm/amd/display/dc/link/protocols/link_edp_panel_control.c	2026-08-28 09:25:22.000000000 +0300
-+++ b/drivers/gpu/drm/amd/display/dc/link/protocols/link_edp_panel_control.c	2026-09-06 15:37:51.620499176 +0300
++++ b/drivers/gpu/drm/amd/display/dc/link/protocols/link_edp_panel_control.c	2026-09-06 22:32:23.320132098 +0300
 @@ -28,6 +28,8 @@
   * as PSR and ABM and it also manages specs defined eDP panel power sequences.
   */

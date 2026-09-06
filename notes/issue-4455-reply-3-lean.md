@@ -11,20 +11,25 @@ What went:
 
 What stayed, untouched in logic: the panel-ID quirk table and the 6 `panel_patch` flags, `dm_helpers_wire_tiled_peer()`, the `0x4F1` root latch pulse, slave AUX pre-detect poll + fallback rewire, source-table revision, stream-enable latch, root EDID re-read after the slave exposes its tile block, `prefer_tile_native_mode`, and the pre-LT AUX-ready handling.
 
-Plus the genlock fix folded in, in the form that compiles against your tree (gated on `tiled_peer` rather than erik2's `tiled_pair_apple`):
+Plus the genlock fix folded in — and here I have to correct my earlier comment. The 4-line version I posted (enable the per-frame reset on the non-master stream after `set_master_stream()`) turned out to be a coin flip per modeset: `set_master_stream()` only considers streams whose reset is *already* enabled and falls back to `stream[0]`, so whether the tiles locked depended on a stale flag surviving from the previous commit. Measured over seven modesets: every commit where both tile streams carried the reset locked, every one where only one did sheared, at any bit depth. The fix is to flag both tiles *before* the pick:
 
 ```c
-if (stream->link && stream->link->tiled_peer &&
-    stream->triggered_crtc_reset.event_source &&
-    stream->triggered_crtc_reset.event_source != stream)
-        stream->triggered_crtc_reset.enabled = true;
+for (i = 0; i < context->stream_count; i++) {
+        stream = context->streams[i];
+        if (stream && stream->link && stream->link->tiled_peer)
+                stream->triggered_crtc_reset.enabled = true;
+}
+
+set_master_stream(context->streams, context->stream_count);
 ```
 
-in `dm_enable_per_frame_crtc_master_sync()` before `set_multisync_trigger_params()`. That's the piece that gets `sync_enabled=1` so the tiles are hardware-locked — on the two-output path it should take care of the centre-seam tear at the source rather than in Mutter/KWin; would be very interested whether it makes your MutterTearFix unnecessary.
+in `dm_enable_per_frame_crtc_master_sync()`. Verified 6/6 modesets locked since, including the clean boot commit. That's the piece that gets both tiles into the hardware sync group; on the two-output path it should take care of the centre-seam tear at the source rather than in Mutter/KWin — would be very interested whether it makes your MutterTearFix unnecessary. Updated `genlock-fix.patch` attached.
 
 Boot-tested since: on the iMac18,3 (7.1.9-arch1-2), the lean core with erik2's stitch layered on top comes up at native 5120x2880 under Hyprland, seamless, no GPU resets or errors in the log — the same result as the verbose build it replaces. The core is byte-for-byte the same under both, so that covers the two-tile path as far as the panel bring-up goes; I can't demonstrate the compositor-stitched variant here because Hyprland has no tile support.
 
 One honest caveat: I left the debugging out entirely rather than behind a knob — if you'd rather keep a `drm_dbg` or two for the Vega/iMac Pro hunt, easy to add back.
+
+One heads-up that applies to your patch as much as to this one: the wake leaves the panel in a state Apple's firmware can't recover from. A warm reboot out of a 5K session gives a skewed Apple logo on the next boot; a warm reboot out of a stock session does not (checked as a control), so the patch is the cause. The fix direction, confirmed here with a ramoops capture of the shutdown and a straight logo afterwards: shut the display down on the reboot path (amdgpu's PCI shutdown never disables the streams, so nothing hung off stream-disable ever ran), and while going down put the slave back to its factory state (0x4F1, 0x310, 0x10A cleared, root panel powered off for T12) with the wake paths gated off so the HPD-RX re-detect can't undo it. It's still being reduced to the minimal set; I'll post it separately once it is. Do you see the skewed logo on GNOME too?
 
 Patch (with a proper commit message; happy to rebase onto your 7.3-rc1 tree too):
 https://github.com/ahmadtv/omarchy-imac18-3/blob/main/patches/imac5k-lean-core-7.2.x.patch

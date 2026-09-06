@@ -30,10 +30,11 @@ swaps it in (stock module backed up first). Re-run it after a kernel update.
 ## Lean mainline candidate: `imac5k-lean-core-7.2.x.patch`
 
 A human-edited strip-down of taprobane99's base patch (no stitch layer):
-**1141 diff lines / +636 added / 11 files** vs 2107 / +1631 / 12.
+**1146 diff lines / +641 added / 11 files** vs 2107 / +1631 / 12.
 All bring-up logging and its plumbing removed, the no-op `dc/core/dc.c`
 refactor dropped, two empty blocks the strip left behind removed, and the
-genlock fix folded in (gated on `tiled_peer`). Compiles clean; applies with
+genlock fix folded in (deterministic form: both tile streams flagged
+before the master pick, gated on `tiled_peer`). Compiles clean; applies with
 zero rejects to pristine 7.1.9 and 7.2.2. Kernel exposes two proper tiles;
 the compositor stitches (Mutter today, KWin in progress). Posted upstream in
 drm/amd#4455.
