@@ -90,6 +90,26 @@ no `CONFIG_PSTORE_PMSG`, so there is no marker channel to test RAM survival
 separately -- an empty dump on the next boot means the firmware does not
 preserve that RAM across a warm reboot.
 
+**Captured, 2026-09-06 20:24 (`evidence/shutdown-kmsg-2026-09-06.log`):** the
+ramoops dump of the previous kernel's final messages — and it settles it. At
+reboot **the display is never turned off.** The last commits (7 s before
+reboot, the shutdown splash) still carry both streams; there is no
+stream-disable, no zero-stream commit, nothing from the DM between the final
+unmounts and the reboot. The very last thing the driver does — 80 ms before
+`reboot: Restarting system` — is an HPD-RX re-detect of the slave that writes
+the wake latch again (`root wake 0x4F1 stage=slave-predetect`, then
+`stage=source-dpcd`). Apple's firmware therefore inherits a live, latched,
+dual-tile panel. Every latch-clear attempt hung off the stream-disable path,
+which simply does not run on this reboot path — so none of them ever executed
+where it mattered.
+
+**Fix, in the test entry:** `amdgpu_pci_shutdown()` now calls
+`drm_atomic_helper_shutdown()` for the tiled panel (what i915 does in its
+shutdown hook), with the going-down guard set first. That disables every CRTC
+through a normal atomic commit, which runs the stream-disable latch clear, and
+the re-detect can no longer re-wake the tile. Folded into
+`patches/5k-latch-clear.patch`. The next dump will show whether it ran.
+
 **Control experiment (original note):** boot the pre-5K `Snapshots › 2` entry
 (stock amdgpu, `video=eDP-1:3840x2160@60e`, overlayfs root) and warm-reboot out
 of it. If the Apple logo skews even then, the 5K patch is not the cause, and
