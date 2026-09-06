@@ -35,14 +35,6 @@ An earlier version cleared the latch from amdgpu_pci_shutdown() itself while
 the shutdown splash was still being scanned out, which skewed the splash.
 Removed.
 
-4. Latch cleared and tile asleep at the handoff (capture 2026-09-06-b) and
-   the logo STILL skewed. So at going-down the slave is now fully undone --
-   source table 0x310 and eDP configuration 0x10A zeroed before the latch
-   clear -- the pre-detect poll of the sleeping tile is skipped, and the
-   root eDP panel is explicitly powered off and held for T12 after the
-   display shutdown. If this does not fix the logo, the panel controller
-   keeps its dual-tile state until a physical power cycle.
-
 No-op on hardware without the tiled-panel quirk.
 --- a/drivers/gpu/drm/amd/amdgpu/amdgpu.h
 +++ b/drivers/gpu/drm/amd/amdgpu/amdgpu.h
