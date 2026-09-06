@@ -2,7 +2,7 @@
 
 I took your 7.2.3 patch as the base (the mainline candidate: kernel exposes two proper tiles, compositor stitches — no erik2 stitch layer in this one) and did the human-editing pass:
 
-**Result: 1147 diff lines, +643 non-blank added, 11 files** — vs 2107 lines / +1631 added / 12 files. Same mechanism, ~60% less code. It compiles clean (zero warnings) and applies with zero rejects to both **7.1.9 and 7.2.2** pristine source.
+**Result: 1141 diff lines, +636 added, 11 files** — vs 2107 lines / +1631 added / 12 files. Same mechanism, ~60% less code. It compiles clean (zero warnings) and applies with zero rejects to both **7.1.9 and 7.2.2** pristine source.
 
 What went:
 - All 8 `amdgpu_dm_log_apple5k_*` instrumentation functions and their call sites, the two colour-space/plane-type name tables, `edid_panel_id_to_str` / `edid_extension_tags_to_str` / `edid_is_apple_panel` (log-only), and every `APPLE5K:` `DC_LOG_INFO`/`drm_info` in the dc/link files (42 statements).

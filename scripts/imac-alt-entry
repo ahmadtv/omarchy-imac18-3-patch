@@ -1,0 +1,204 @@
+#!/usr/bin/env bash
+#
+# imac-alt-entry — boot ANY amdgpu build from its own Limine entry, without
+# touching /usr/lib/modules, the default UKI, or any other test entry.
+#
+# Complements imac-test-entry (which swaps the default and the single test
+# slot). This one builds a *separate* UKI from a module you point it at:
+#
+#   default entry   ->  omarchy_linux.efi              (known-good, untouched)
+#   /Test - <name>  ->  omarchy_linux-<name>.efi       (the build you name)
+#
+# How it works: the running kernel's module tree is copied to a scratch root,
+# the amdgpu module is swapped there, depmod is run on the copy, and
+# mkinitcpio --moduleroot builds a UKI from it. The kms hook + MODULES=(amdgpu)
+# bake the module into the initramfs, so the entry you pick decides which
+# amdgpu loads. Nothing under / changes except the new .efi and the entry.
+#
+#   sudo imac-alt-entry add  <name> <amdgpu.ko | amdgpu.ko.zst>
+#   sudo imac-alt-entry drop <name>
+#        imac-alt-entry list
+#
+# Optional: IMAC_CMDLINE="..." overrides the kernel cmdline (default: the
+# cmdline of the default entry in /boot/limine.conf).
+#
+set -euo pipefail
+
+KREL="$(uname -r)"
+ESP=/boot
+CONF="${ESP}/limine.conf"
+UKIDIR="${ESP}/EFI/Linux"
+MODREL="kernel/drivers/gpu/drm/amd/amdgpu/amdgpu.ko.zst"
+
+say() { printf '\033[1;33m==>\033[0m %s\n' "$*"; }
+die() { printf '\033[1;31mERROR:\033[0m %s\n' "$*" >&2; exit 1; }
+need_root() { [[ $EUID -eq 0 ]] || die "run with sudo"; }
+
+check_name() {
+	[[ ${1:-} =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,31}$ ]] || die "name must be [A-Za-z0-9._-], max 32 chars"
+}
+marker() { printf '/Test - %s' "$1"; }
+uki_path() { printf '%s/omarchy_linux-%s.efi' "$UKIDIR" "$1"; }
+
+# Limine >= 10.3.0 loads the FIRST limine.conf in its search order; copies at
+# EFI/limine/ or EFI/BOOT/ shadow the canonical /boot/limine.conf. Remove them.
+sync_conf() {
+	local f
+	for f in "${ESP}/EFI/limine/limine.conf" "${ESP}/EFI/BOOT/limine.conf" \
+		"${ESP}/boot/limine/limine.conf" "${ESP}/limine/limine.conf"; do
+		[[ -f $f ]] && rm -f "$f"
+	done
+	sync
+}
+
+# Remove one entry block: from its marker line through its cmdline: line.
+remove_entry() {
+	local m; m="$(marker "$1")"
+	grep -qF "$m" "$CONF" || return 0
+	python3 - "$CONF" "$m" <<'PY'
+import sys,re
+p,m=sys.argv[1],sys.argv[2]
+lines=open(p).read().split("\n"); out=[]; i=0
+while i<len(lines):
+    if lines[i].startswith(m):
+        while i<len(lines) and not lines[i].startswith("cmdline:"): i+=1
+        i+=1
+        while out and out[-1].strip()=="" : out.pop()
+        continue
+    out.append(lines[i]); i+=1
+s="\n".join(out).rstrip("\n")+"\n"
+open(p,"w").write(s)
+PY
+}
+
+# Insert the entry before any imac-test-entry block (whose `drop` deletes from
+# its marker to end-of-file), otherwise append.
+add_entry() {   # add_entry <name> <uki> <cmdline> <module-basename>
+	local hash block
+	hash="$(b2sum "$2" | cut -d' ' -f1)"
+	block="$(cat <<EOB
+
+$(marker "$1") (remove after confirming)
+### Added by imac-alt-entry, not by limine-entry-tool. A config regeneration
+### may drop it; that leaves the known-good default, which is the safe outcome.
+comment: module=$4 built=$(date -u +%Y-%m-%dT%H:%MZ)
+protocol: efi
+path: boot():/EFI/Linux/$(basename "$2")#${hash}
+cmdline: $3
+EOB
+)"
+	python3 - "$CONF" "$block" <<'PY'
+import sys
+p,block=sys.argv[1],sys.argv[2]
+s=open(p).read().rstrip("\n")
+lines=s.split("\n")
+idx=next((i for i,l in enumerate(lines) if l.startswith("/Test - 5K boot fixes")),None)
+if idx is None:
+    s=s+"\n"+block+"\n"
+else:
+    s="\n".join(lines[:idx]).rstrip("\n")+"\n"+block+"\n\n"+"\n".join(lines[idx:])+"\n"
+open(p,"w").write(s)
+PY
+}
+
+module_desc() {   # module_desc <.ko.zst>
+	local syms marks=()
+	syms="$(zstd -dcf "$1" 2>/dev/null | strings || true)"
+	# "APPLE5K: stream[" is the core's per-commit stream dump; the stitch layer
+	# carries one APPLE5K-prefixed line of its own, so test for the core's.
+	if   [[ $syms == *"APPLE5K: stream["* ]]; then marks+=("verbose-core")
+	elif [[ $syms == *tiled_stitch* || $syms == *"panel latch"* ]]; then marks+=("lean-core"); fi
+	[[ $syms == *tiled_stitch* ]]            && marks+=("stitch")
+	[[ $syms == *"stream-disable latch"* ]]  && marks+=("latch-clear")
+	((${#marks[@]})) && (IFS=+; echo "${marks[*]}") || echo "stock"
+}
+
+uki_module() {    # uki_module <uki> <dest.ko.zst>
+	local img; img="$(mktemp)"
+	objcopy -O binary --only-section=.initrd "$1" "$img" 2>/dev/null || { rm -f "$img"; return 1; }
+	bsdtar -xOf "$img" "usr/lib/modules/*/$MODREL" > "$2" 2>/dev/null || { rm -f "$img"; return 1; }
+	rm -f "$img"; [[ -s $2 ]]
+}
+
+case "${1:-list}" in
+
+add)
+	need_root; NAME="${2:-}"; SRC="${3:-}"
+	check_name "$NAME"; [[ -f ${SRC} ]] || die "usage: sudo $0 add <name> <amdgpu.ko|amdgpu.ko.zst>"
+	UKI="$(uki_path "$NAME")"
+	[[ -d /usr/lib/modules/$KREL ]] || die "no module tree for $KREL"
+
+	WORK="$(mktemp -d)"; trap 'rm -rf "$WORK"' EXIT
+	MOD="$WORK/amdgpu.ko.zst"
+	case "$SRC" in
+		*.zst) cp -f "$SRC" "$MOD" ;;
+		*.ko)  say "compressing module"; zstd -q -19 -T0 -o "$MOD" "$SRC" ;;
+		*)     die "module must end in .ko or .ko.zst" ;;
+	esac
+
+	vm="$(modinfo -F vermagic "$MOD" 2>/dev/null | awk '{print $1}')"
+	[[ $vm == "$KREL" ]] || die "module vermagic '$vm' != running kernel '$KREL' — it would fail to load"
+
+	say "staging a private copy of the $KREL module tree"
+	ALT="$WORK/root"; mkdir -p "$ALT/usr/lib/modules"; ln -s usr/lib "$ALT/lib"
+	rsync -a --exclude build --exclude '*.stock-backup' --exclude '*.prev-*' \
+		"/usr/lib/modules/$KREL" "$ALT/usr/lib/modules/"
+	install -m644 "$MOD" "$ALT/usr/lib/modules/$KREL/$MODREL"
+	depmod -b "$ALT" "$KREL"
+
+	CMDLINE="${IMAC_CMDLINE:-$(grep -m1 '^  cmdline:' "$CONF" | sed 's/^  cmdline: //')}"
+	[[ -n $CMDLINE ]] || die "could not read a cmdline from $CONF (set IMAC_CMDLINE)"
+	printf '%s\n' "$CMDLINE" > "$WORK/cmdline"
+
+	say "building UKI $(basename "$UKI") with mkinitcpio --moduleroot"
+	mkinitcpio --kernel "$KREL" --moduleroot "$ALT" --cmdline "$WORK/cmdline" --uki "$WORK/uki.efi" >"$WORK/mkinitcpio.log" 2>&1 \
+		|| { tail -20 "$WORK/mkinitcpio.log"; die "mkinitcpio failed"; }
+
+	say "verifying the UKI carries exactly the module you gave"
+	uki_module "$WORK/uki.efi" "$WORK/inside.ko.zst" || die "no amdgpu module found inside the built UKI"
+	[[ "$(zstd -dcf "$WORK/inside.ko.zst" | b2sum)" == "$(zstd -dcf "$MOD" | b2sum)" ]] \
+		|| die "module inside the UKI differs from the one given — refusing to install"
+	emb="$(objcopy -O binary --only-section=.cmdline "$WORK/uki.efi" /dev/stdout 2>/dev/null | tr -d '\0' | sed 's/[[:space:]]*$//')"
+	[[ $emb == "$CMDLINE" ]] || die "embedded cmdline mismatch"
+
+	mkdir -p "$UKIDIR"; install -m700 "$WORK/uki.efi" "$UKI"; sync
+	remove_entry "$NAME"; add_entry "$NAME" "$UKI" "$CMDLINE" "$(basename "$SRC")"
+	sync_conf
+	say "done — '$(marker "$NAME")' boots $(module_desc "$MOD"); default entry untouched"
+	"$0" list
+	;;
+
+drop)
+	need_root; NAME="${2:-}"; check_name "$NAME"
+	remove_entry "$NAME"; rm -f "$(uki_path "$NAME")"; sync_conf
+	say "dropped '$(marker "$NAME")'"; "$0" list
+	;;
+
+list)
+	printf '\n  \033[1mBoot entries\033[0m  (kernel %s)\n\n' "$KREL"
+	tmp="$(mktemp)"
+	if uki_module "$UKIDIR/omarchy_linux.efi" "$tmp" 2>/dev/null; then
+		printf '  %-34s %s\n' "default (Omarchy/linux)" "$(module_desc "$tmp")"
+	fi
+	while IFS= read -r line; do
+		name="${line#/Test - }"; name="${name%% (*}"
+		efi="$(sed -n "/^\/Test - ${name//\//\\/}/,/^cmdline:/{s/^path: boot():\(.*\)#.*/\1/p}" "$CONF" | head -1)"
+		if [[ -n $efi && -f "$ESP$efi" ]] && uki_module "$ESP$efi" "$tmp" 2>/dev/null; then
+			printf '  %-34s %s\n' "/Test - $name" "$(module_desc "$tmp")"
+		else
+			printf '  %-34s %s\n' "/Test - $name" "(UKI missing: $efi)"
+		fi
+	done < <(grep '^/Test - ' "$CONF" 2>/dev/null || true)
+	rm -f "$tmp"
+	# What actually loaded this boot, judged from the kernel log rather than
+	# from the file on disk (the booted entry may not be the default).
+	jl="$(journalctl -k -b 0 --no-pager 2>/dev/null || true)"
+	if   [[ $jl == *"APPLE5K: stream["* ]]; then run="verbose-core"
+	elif [[ $jl == *TILED_STITCH* ]];        then run="lean-core"
+	else run="stock"; fi
+	[[ $jl == *TILED_STITCH* ]] && run+="+stitch"
+	[[ $jl == *"stream-disable latch"* ]] && run+="+latch-clear"
+	printf '\n  running now: %s (tiled_stitch=%s)\n\n' "$run" "$(cat /sys/module/amdgpu/parameters/tiled_stitch 2>/dev/null || echo n/a)"
+	;;
+*) die "usage: add <name> <module> | drop <name> | list" ;;
+esac

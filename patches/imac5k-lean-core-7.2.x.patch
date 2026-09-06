@@ -32,12 +32,13 @@ sync_enabled=1, seamless under motion. Also builds against 7.1.x.
 This is a lean rework of the community patch series (mcirsta/linux-imac-5k,
 ported by taprobane99): all bring-up instrumentation/logging removed, the
 dead plumbing that only fed it stripped, and the no-op refactor of
-dc/core/dc.c dropped. 644 added lines vs 1631.
+dc/core/dc.c dropped. 636 added lines vs 1631.
 
 Not-Yet-Signed-off-by: mr_projects
 ---
+diff -ruN -x '*.o' -x '*.cmd' -x '*.mod' -x '*.mod.c' -x '*.ko' -x '*.a' -x '*.order' -x '*.symvers' -x '.*' -x '*.orig' -x '*.rej' /home/ahmad/.cache/kernel-5k-build/pristine/linux-7.2.2/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.c p722lean/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.c
 --- a/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.c	2026-08-28 09:25:22.000000000 +0300
-+++ b/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.c	2026-09-06 15:16:47.983643352 +0300
++++ b/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.c	2026-09-06 15:39:32.242101759 +0300
 @@ -61,6 +61,7 @@
  #include "amdgpu_dm_irq.h"
  #include "dm_helpers.h"
@@ -265,15 +266,7 @@ Not-Yet-Signed-off-by: mr_projects
  struct dc_stream_state *
  create_validate_stream_for_sink(struct drm_connector *connector,
  				const struct drm_display_mode *drm_mode,
-@@ -8485,6 +8669,7 @@
- 			dc_stream_release(stream);
- 			stream = NULL;
- 			requested_bpc -= 2; /* lower bpc to retry validation */
-+		} else {
- 		}
- 
- 	} while (stream == NULL && requested_bpc >= bpc_limit);
-@@ -8546,6 +8731,11 @@
+@@ -8546,6 +8730,11 @@
  			(mode->flags & DRM_MODE_FLAG_DBLSCAN))
  		return result;
  
@@ -285,7 +278,7 @@ Not-Yet-Signed-off-by: mr_projects
  	/*
  	 * Only run this the first time mode_valid is called to initilialize
  	 * EDID mgmt
-@@ -8575,6 +8765,9 @@
+@@ -8575,6 +8764,9 @@
  	if (stream) {
  		dc_stream_release(stream);
  		result = MODE_OK;
@@ -295,7 +288,7 @@ Not-Yet-Signed-off-by: mr_projects
  	}
  
  fail:
-@@ -9291,6 +9484,9 @@
+@@ -9291,6 +9483,9 @@
  			amdgpu_dm_connector_add_common_modes(encoder, connector);
  		amdgpu_dm_connector_add_freesync_modes(connector, drm_edid);
  	}
@@ -305,9 +298,10 @@ Not-Yet-Signed-off-by: mr_projects
  	amdgpu_dm_fbc_init(connector);
  
  	return amdgpu_dm_connector->num_modes;
+diff -ruN -x '*.o' -x '*.cmd' -x '*.mod' -x '*.mod.c' -x '*.ko' -x '*.a' -x '*.order' -x '*.symvers' -x '.*' -x '*.orig' -x '*.rej' /home/ahmad/.cache/kernel-5k-build/pristine/linux-7.2.2/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm_helpers.c p722lean/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm_helpers.c
 --- a/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm_helpers.c	2026-08-28 09:25:22.000000000 +0300
-+++ b/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm_helpers.c	2026-09-06 15:14:36.554206029 +0300
-@@ -95,12 +95,73 @@
++++ b/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm_helpers.c	2026-09-06 15:39:32.243396821 +0300
+@@ -95,12 +95,64 @@
  	       (u32)EDID_PRODUCT_ID(edid);
  }
  
@@ -341,17 +335,8 @@ Not-Yet-Signed-off-by: mr_projects
 +
 +	if (!link->dc || (!is_root && !is_slave))
 +		return;
-+	if (link->tiled_peer) {
++	if (link->tiled_peer)
 +		return; /* already wired */
-+	}
-+
-+	for (i = 0; i < link->dc->link_count; i++) {
-+		struct dc_link *other = link->dc->links[i];
-+
-+		if (!other || other == link)
-+			continue;
-+
-+	}
 +
 +	for (i = 0; i < link->dc->link_count; i++) {
 +		struct dc_link *other = link->dc->links[i];
@@ -386,7 +371,7 @@ Not-Yet-Signed-off-by: mr_projects
  
  	switch (panel_id) {
  	/* Workaround for monitors that need a delay after detecting the link */
-@@ -134,6 +195,42 @@
+@@ -134,6 +186,42 @@
  		drm_dbg_driver(dev, "Skip PHY SSC reduction on panel id %X\n", panel_id);
  		link->wa_flags.skip_phy_ssc_reduction = true;
  		break;
@@ -429,7 +414,7 @@ Not-Yet-Signed-off-by: mr_projects
  	default:
  		return;
  	}
-@@ -155,6 +252,7 @@
+@@ -155,6 +243,7 @@
  {
  	struct amdgpu_dm_connector *aconnector = link->priv;
  	struct drm_connector *connector = &aconnector->base;
@@ -437,7 +422,7 @@ Not-Yet-Signed-off-by: mr_projects
  	struct edid *edid_buf = edid ? (struct edid *) edid->raw_edid : NULL;
  	struct cea_sad *sads;
  	int sad_count = -1;
-@@ -195,7 +293,8 @@
+@@ -195,7 +284,8 @@
  					edid_caps->frl_dsc_max_frl_rate, edid_caps->frl_dsc_total_chunk_kbytes);
  	}
  
@@ -447,8 +432,9 @@ Not-Yet-Signed-off-by: mr_projects
  
  	sad_count = drm_edid_to_sad((struct edid *) edid->raw_edid, &sads);
  	if (sad_count <= 0)
+diff -ruN -x '*.o' -x '*.cmd' -x '*.mod' -x '*.mod.c' -x '*.ko' -x '*.a' -x '*.order' -x '*.symvers' -x '.*' -x '*.orig' -x '*.rej' /home/ahmad/.cache/kernel-5k-build/pristine/linux-7.2.2/drivers/gpu/drm/amd/display/dc/dc.h p722lean/drivers/gpu/drm/amd/display/dc/dc.h
 --- a/drivers/gpu/drm/amd/display/dc/dc.h	2026-08-28 09:25:22.000000000 +0300
-+++ b/drivers/gpu/drm/amd/display/dc/dc.h	2026-09-06 15:14:36.556427058 +0300
++++ b/drivers/gpu/drm/amd/display/dc/dc.h	2026-09-06 15:37:51.617186875 +0300
 @@ -1847,6 +1847,13 @@
  	struct dc_dpia_bw_alloc dpia_bw_alloc_config;
  	bool skip_implict_edp_power_control;
@@ -555,8 +541,9 @@ Not-Yet-Signed-off-by: mr_projects
  struct dc_sink_init_data {
  	enum signal_type sink_signal;
  	struct dc_link *link;
+diff -ruN -x '*.o' -x '*.cmd' -x '*.mod' -x '*.mod.c' -x '*.ko' -x '*.a' -x '*.order' -x '*.symvers' -x '.*' -x '*.orig' -x '*.rej' /home/ahmad/.cache/kernel-5k-build/pristine/linux-7.2.2/drivers/gpu/drm/amd/display/dc/dc_types.h p722lean/drivers/gpu/drm/amd/display/dc/dc_types.h
 --- a/drivers/gpu/drm/amd/display/dc/dc_types.h	2026-08-28 09:25:22.000000000 +0300
-+++ b/drivers/gpu/drm/amd/display/dc/dc_types.h	2026-09-06 15:14:36.558232753 +0300
++++ b/drivers/gpu/drm/amd/display/dc/dc_types.h	2026-09-06 15:37:51.617451432 +0300
 @@ -192,6 +192,18 @@
  	bool oled_optimize_display_on;
  	unsigned int force_mst_blocked_discovery;
@@ -576,8 +563,9 @@ Not-Yet-Signed-off-by: mr_projects
  };
  
  /**
+diff -ruN -x '*.o' -x '*.cmd' -x '*.mod' -x '*.mod.c' -x '*.ko' -x '*.a' -x '*.order' -x '*.symvers' -x '.*' -x '*.orig' -x '*.rej' /home/ahmad/.cache/kernel-5k-build/pristine/linux-7.2.2/drivers/gpu/drm/amd/display/dc/link/link_detection.c p722lean/drivers/gpu/drm/amd/display/dc/link/link_detection.c
 --- a/drivers/gpu/drm/amd/display/dc/link/link_detection.c	2026-08-28 09:25:22.000000000 +0300
-+++ b/drivers/gpu/drm/amd/display/dc/link/link_detection.c	2026-09-06 15:14:36.559278973 +0300
++++ b/drivers/gpu/drm/amd/display/dc/link/link_detection.c	2026-09-06 15:37:51.617615187 +0300
 @@ -48,9 +48,12 @@
  #include "link_enc_cfg.h"
  #include "dm_helpers.h"
@@ -762,8 +750,9 @@ Not-Yet-Signed-off-by: mr_projects
  		// Check if edid is the same
  		if ((prev_sink) &&
  		    (edid_status == EDID_THE_SAME || edid_status == EDID_OK))
+diff -ruN -x '*.o' -x '*.cmd' -x '*.mod' -x '*.mod.c' -x '*.ko' -x '*.a' -x '*.order' -x '*.symvers' -x '.*' -x '*.orig' -x '*.rej' /home/ahmad/.cache/kernel-5k-build/pristine/linux-7.2.2/drivers/gpu/drm/amd/display/dc/link/link_dpms.c p722lean/drivers/gpu/drm/amd/display/dc/link/link_dpms.c
 --- a/drivers/gpu/drm/amd/display/dc/link/link_dpms.c	2026-08-28 09:25:22.000000000 +0300
-+++ b/drivers/gpu/drm/amd/display/dc/link/link_dpms.c	2026-09-06 15:14:36.560494161 +0300
++++ b/drivers/gpu/drm/amd/display/dc/link/link_dpms.c	2026-09-06 15:37:51.619015461 +0300
 @@ -58,6 +58,7 @@
  #include "clk_mgr.h"
  #include "atomfirmware.h"
@@ -801,8 +790,9 @@ Not-Yet-Signed-off-by: mr_projects
  	} else {
  		dm_helpers_mst_enable_stream_features(stream);
  	}
+diff -ruN -x '*.o' -x '*.cmd' -x '*.mod' -x '*.mod.c' -x '*.ko' -x '*.a' -x '*.order' -x '*.symvers' -x '.*' -x '*.orig' -x '*.rej' /home/ahmad/.cache/kernel-5k-build/pristine/linux-7.2.2/drivers/gpu/drm/amd/display/dc/link/protocols/link_dp_capability.c p722lean/drivers/gpu/drm/amd/display/dc/link/protocols/link_dp_capability.c
 --- a/drivers/gpu/drm/amd/display/dc/link/protocols/link_dp_capability.c	2026-08-28 09:25:22.000000000 +0300
-+++ b/drivers/gpu/drm/amd/display/dc/link/protocols/link_dp_capability.c	2026-09-06 15:14:36.561206052 +0300
++++ b/drivers/gpu/drm/amd/display/dc/link/protocols/link_dp_capability.c	2026-09-06 15:37:51.619990873 +0300
 @@ -50,12 +50,16 @@
  #include "link_enc_cfg.h"
  #include "dc_dmub_srv.h"
@@ -894,8 +884,9 @@ Not-Yet-Signed-off-by: mr_projects
  }
  
  void dpcd_write_cable_id_to_dprx(struct dc_link *link)
+diff -ruN -x '*.o' -x '*.cmd' -x '*.mod' -x '*.mod.c' -x '*.ko' -x '*.a' -x '*.order' -x '*.symvers' -x '.*' -x '*.orig' -x '*.rej' /home/ahmad/.cache/kernel-5k-build/pristine/linux-7.2.2/drivers/gpu/drm/amd/display/dc/link/protocols/link_dpcd.c p722lean/drivers/gpu/drm/amd/display/dc/link/protocols/link_dpcd.c
 --- a/drivers/gpu/drm/amd/display/dc/link/protocols/link_dpcd.c	2026-08-28 09:25:22.000000000 +0300
-+++ b/drivers/gpu/drm/amd/display/dc/link/protocols/link_dpcd.c	2026-09-06 15:14:36.563143439 +0300
++++ b/drivers/gpu/drm/amd/display/dc/link/protocols/link_dpcd.c	2026-09-06 15:37:51.620148727 +0300
 @@ -249,3 +249,18 @@
  	}
  	return status;
@@ -915,8 +906,9 @@ Not-Yet-Signed-off-by: mr_projects
 +	return core_link_write_dpcd(root_link, APPLE_5K_DPCD_ROOT_PANEL_LATCH,
 +				    &payload, sizeof(payload));
 +}
+diff -ruN -x '*.o' -x '*.cmd' -x '*.mod' -x '*.mod.c' -x '*.ko' -x '*.a' -x '*.order' -x '*.symvers' -x '.*' -x '*.orig' -x '*.rej' /home/ahmad/.cache/kernel-5k-build/pristine/linux-7.2.2/drivers/gpu/drm/amd/display/dc/link/protocols/link_dpcd.h p722lean/drivers/gpu/drm/amd/display/dc/link/protocols/link_dpcd.h
 --- a/drivers/gpu/drm/amd/display/dc/link/protocols/link_dpcd.h	2026-08-28 09:25:22.000000000 +0300
-+++ b/drivers/gpu/drm/amd/display/dc/link/protocols/link_dpcd.h	2026-09-06 15:14:36.563530430 +0300
++++ b/drivers/gpu/drm/amd/display/dc/link/protocols/link_dpcd.h	2026-09-06 15:37:51.620208165 +0300
 @@ -39,4 +39,12 @@
  		uint32_t address,
  		const uint8_t *data,
@@ -930,8 +922,9 @@ Not-Yet-Signed-off-by: mr_projects
 +enum dc_status link_apple_5k_root_panel_latch_pulse(struct dc_link *root_link);
 +
  #endif
+diff -ruN -x '*.o' -x '*.cmd' -x '*.mod' -x '*.mod.c' -x '*.ko' -x '*.a' -x '*.order' -x '*.symvers' -x '.*' -x '*.orig' -x '*.rej' /home/ahmad/.cache/kernel-5k-build/pristine/linux-7.2.2/drivers/gpu/drm/amd/display/dc/link/protocols/link_dp_training.c p722lean/drivers/gpu/drm/amd/display/dc/link/protocols/link_dp_training.c
 --- a/drivers/gpu/drm/amd/display/dc/link/protocols/link_dp_training.c	2026-08-28 09:25:22.000000000 +0300
-+++ b/drivers/gpu/drm/amd/display/dc/link/protocols/link_dp_training.c	2026-09-06 15:14:36.564000611 +0300
++++ b/drivers/gpu/drm/amd/display/dc/link/protocols/link_dp_training.c	2026-09-06 15:37:51.620313659 +0300
 @@ -1091,12 +1091,70 @@
  	return status;
  }
@@ -1143,8 +1136,9 @@ Not-Yet-Signed-off-by: mr_projects
  		fail_count++;
  		dp_trace_lt_fail_count_update(link, fail_count, false);
  		if (link->ep_type == DISPLAY_ENDPOINT_PHY) {
+diff -ruN -x '*.o' -x '*.cmd' -x '*.mod' -x '*.mod.c' -x '*.ko' -x '*.a' -x '*.order' -x '*.symvers' -x '.*' -x '*.orig' -x '*.rej' /home/ahmad/.cache/kernel-5k-build/pristine/linux-7.2.2/drivers/gpu/drm/amd/display/dc/link/protocols/link_edp_panel_control.c p722lean/drivers/gpu/drm/amd/display/dc/link/protocols/link_edp_panel_control.c
 --- a/drivers/gpu/drm/amd/display/dc/link/protocols/link_edp_panel_control.c	2026-08-28 09:25:22.000000000 +0300
-+++ b/drivers/gpu/drm/amd/display/dc/link/protocols/link_edp_panel_control.c	2026-09-06 15:14:36.564206062 +0300
++++ b/drivers/gpu/drm/amd/display/dc/link/protocols/link_edp_panel_control.c	2026-09-06 15:37:51.620499176 +0300
 @@ -28,6 +28,8 @@
   * as PSR and ABM and it also manages specs defined eDP panel power sequences.
   */
