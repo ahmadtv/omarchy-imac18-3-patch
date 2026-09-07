@@ -1,0 +1,208 @@
+iMac 18,3 CS8409/CS42L83: internal mic is silent while a 3.5mm headset is plugged in.
+
+Applies to the snd_hda_macbookpro DKMS driver (davidjo/snd_hda_macbookpro),
+against the tree at commit be90113. Confirmed on hardware.
+
+Internal mic records fine with nothing in the jack, and goes completely
+silent the moment a headset is plugged in -- peak amplitude drops to exactly
+0.00000 while the capture stream itself runs happily and reports no error.
+
+cs_8409_pcm_capture_pre_prepare_hook branched on spec->jack_present and then
+on spec->have_mike. With a mic-equipped headset detected it ran the headset
+capture path (cs_8409_headcapture_setup, headset mic -> CS8409 ADC 0x1a) and
+never called cs_8409_capture_setup, which is the only thing that brings the
+internal mic up; with a headset that presents no mic it fell through a
+"I think this is impossible" comment and set nothing up at all. Either way
+the PCM stream stays bound to intmike_adc_nid 0x23, so the driver configures
+one microphone and then records from a different one. The reason the stream
+is silent rather than wrong is visible in the hardware: during a failing
+capture with a headset in, vendor coef 0x82 reads back 0x0000 (DMIC2_SCL_EN
+never set -- only cs_8409_intmike_stream_on_nid sets it) and pin node 0x45
+shows Pin-ctls: 0x00, because that same function is what writes
+SET_PIN_WIDGET_CONTROL 0x20 to it. The internal mic is simply never
+switched on.
+
+Drop the have_mike branch so cs_8409_capture_setup(codec) runs
+unconditionally, and make the teardown symmetric by always calling
+cs_8409_capture_cleanup. The jack_present test survives only to keep
+block_unsol set. Removing the paired headplay/headcapture setup+cleanup
+from the capture hooks is deliberate: the playback hooks already do that
+work when something actually plays, so capture no longer drags the
+headphone amp up as a side effect.
+
+The rest is what makes it survive a plug event. cs_8409_intmike_linein_disable()
+and switch_input_src() come out of cs_8409_boot_setup_real,
+cs_8409_plugin_event_continued and cs_8409_unplug_handle_disconnect -- they
+tore the internal mic back down (and re-pointed ALSA's input source) on every
+plug/unplug, which would undo the setup above -- and each remaining
+cs_8409_inputs_power_nids_off() is guarded with !spec->capturing so a plug
+event during a live recording cannot power the input nids off underneath it.
+This also retires the "PLUGIN WHILE CAPTURING UNIMPLEMENTED!!" case.
+
+Upstream: ExternPointer, davidjo/snd_hda_macbookpro issue #29, posted
+2026-09-05, tested by its author on a MacBookPro14,3 on kernel 7.1.9.
+The upstream diff was cut against a tree whose
+cs_8409_pcm_capture_pre_prepare_hook still had an inner
+"else cs_8409_capture_setup(codec);" arm that be90113 has already replaced
+with the "I think this is impossible" comment, so its first hunk was
+reapplied by hand here; the resulting file is byte-identical to the
+author's (blob c2a33a8). The other five hunks applied unmodified.
+
+Verified on iMac18,3, kernel 7.1.9-arch1-2, codec subsystem id 0x106b1000:
+internal mic with a mic-equipped headset plugged in records at peak 0.904
+(was 0.00000), matching the 0.905 it gives with nothing plugged in;
+mid-capture pin 0x45 now reads Pin-ctls: 0x20: IN with its amps unmuted.
+Speakers, the hardware analog sink and repeated back-to-back captures are
+unaffected.
+
+diff --git a/patch_cirrus/patch_cirrus_new84.h b/patch_cirrus/patch_cirrus_new84.h
+index a40a6f5..c2a33a8 100644
+--- a/patch_cirrus/patch_cirrus_new84.h
++++ b/patch_cirrus/patch_cirrus_new84.h
+@@ -1785,32 +1785,11 @@ static void cs_8409_pcm_capture_pre_prepare_hook(struct hda_pcm_stream *hinfo, s
+ 
+ 		// ensure the setup is only done once
+ 		if (spec->capture_init_count == 1) {
+-
+-			// for the moment have junky test here
+-			if (spec->jack_present) {
++			if (spec->jack_present)
++			{
+ 				spec->block_unsol = 1;
+-				if (spec->have_mike)
+-				{
+-					// so it seems if we have a headset mike we always enable the
+-					// headphones even if just capturing
+-					if (spec->headset_play_format_setup_needed)
+-					{
+-						cs_8409_headplay_setup(codec);
+-						spec->headset_play_format_setup_needed = 0;
+-					}
+-					if (spec->headset_capture_format_setup_needed)
+-					{
+-						cs_8409_headcapture_setup(codec);
+-						spec->headset_capture_format_setup_needed = 0;
+-					}
+-				}
+-				// I think this is impossible - this would say we tried to capture
+-				// using a headset without mike
+-				// NOTE - still not fixed linein/lineout working - this may need
+-				// changing here
+ 			}
+-			else
+-				cs_8409_capture_setup(codec);
++			cs_8409_capture_setup(codec);
+ 		}
+ 
+ 		myprintk("snd_hda_intel: command cs_8409_capture_pcm_hook setup capture called");
+@@ -1898,25 +1877,9 @@ static void cs_8409_capture_pcm_hook(struct hda_pcm_stream *hinfo, struct hda_co
+ 		// for the moment have junky test here
+ 		if (spec->jack_present)
+ 		{
+-			// for the moment I think this works for both MB 14,1 and 14,3 - same hda and headphone chip
+-			// note that so far only the headphone chip seems to generate unsol responses usually
+ 			spec->block_unsol = 1;
+-			if (spec->headset_capture_format_setup_needed == 0)
+-			{
+-				cs_8409_headcapture_cleanup(codec);
+-				spec->headset_capture_format_setup_needed = 1;
+-			}
+-			if (!spec->playing)
+-			{
+-				if (spec->headset_play_format_setup_needed == 0)
+-				{
+-					cs_8409_headplay_cleanup(codec);
+-					spec->headset_play_format_setup_needed = 1;
+-				}
+-			}
+ 		}
+-                else
+-		        cs_8409_capture_cleanup(codec);
++		cs_8409_capture_cleanup(codec);
+ 		myprintk("snd_hda_intel: command cs_8409_capture_pcm_hook done capture down");
+ 		spec->block_unsol = 0;
+ 		if (!list_empty(&spec->unsol_list))
+diff --git a/patch_cirrus/patch_cirrus_real84.h b/patch_cirrus/patch_cirrus_real84.h
+index 76de5e8..fd7b0cd 100644
+--- a/patch_cirrus/patch_cirrus_real84.h
++++ b/patch_cirrus/patch_cirrus_real84.h
+@@ -2799,8 +2799,6 @@ static int cs_8409_boot_setup_real(struct hda_codec *codec)
+                                 // this is just calling this routine
+                                 //cs_8409_headset_mike_setup_nouse
+ 
+-                                cs_8409_intmike_linein_disable(codec);
+-
+                                 //#9412:  cs42l83_headset_mike_format_setup_enable
+                                 //#9451: cs42l83_input_set_output_sample_rate
+                                 //#9579: cs42l83_mike_setup_audio_input
+@@ -2867,7 +2865,6 @@ static int cs_8409_boot_setup_real(struct hda_codec *codec)
+                                 // just before enable buttons is where we switch inputs on plugin
+                                 // note that this is just telling Alsa the input source has changed
+                                 // - no changes to audio setup at all
+-                                switch_input_src(codec);
+ 
+ 
+                                 //#10040:  cs_8409_headset_mike_buttons_enable
+@@ -4821,7 +4818,10 @@ static void cs_8409_plugin_event_continued(struct hda_codec *codec)
+                 {
+ 
+                         // ensure the intmike/linein nids are powered off
+-                        cs_8409_inputs_power_nids_off(codec);
++                        if (!spec->capturing)
++                        {
++                                cs_8409_inputs_power_nids_off(codec);
++                        }
+ 
+ 
+                         retval = cs42l83_headphone_sense(codec);
+@@ -4835,19 +4835,6 @@ static void cs_8409_plugin_event_continued(struct hda_codec *codec)
+ 
+                         if (spec->have_mike)
+                         {
+-                                if (spec->capturing)
+-                                {
+-                                        dev_info(hda_codec_dev(codec), "cs_8409_plugin_event_continued PLUGIN WHILE CAPTURING UNIMPLEMENTED!!\n");
+-                                }
+-
+-                                // this is just calling this routine
+-                                //cs_8409_headset_mike_setup_nouse
+-
+-                                cs_8409_intmike_linein_disable(codec);
+-
+-                                // is this a good position to switch the inputs??
+-                                switch_input_src(codec);
+-
+                                 // confirmed that if do a second recording we get a full setup as for playing above
+                                 // - so why not just enable when we capture??
+                                 // (only plausible reason so far is to reduce setup time because of the long time
+@@ -5649,26 +5636,21 @@ static void cs_8409_unplug_handle_disconnect(struct hda_codec *codec)
+ 
+                                 cs42l83_headset_amp_disable_and_mike_format_setup_disable(codec);
+ 
+-                                // is this a good position to switch the inputs??
+-                                switch_input_src(codec);
+-
+-                                //unplug23_intmike_linein_resetup(codec);
+-
+-                                cs_8409_intmike_linein_resetup(codec);
+-
+                                 mycodec_info(codec, "cs_8409_unplug_handle_disconnect headset have mike end\n");
+                         }
+ 
+                         if (spec->playing)
+                         {
+-                                if (!(spec->have_mike))
++                                if (!(spec->have_mike) && !spec->capturing)
+                                 {
+                                         cs_8409_inputs_power_nids_off(codec);
+                                 }
+                         }
+ 
+-                        if (spec->have_mike)
++                        if (spec->have_mike && !spec->capturing)
++                        {
+                                 cs_8409_inputs_power_nids_off(codec);
++                        }
+ 
+ 
+                         mycodec_info(codec, "cs_8409_unplug_handle_disconnect headset disable start\n");
