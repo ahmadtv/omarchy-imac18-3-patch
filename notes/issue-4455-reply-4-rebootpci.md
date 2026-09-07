@@ -4,4 +4,7 @@ Correction to my numbers above: the file you counted (+779) already contained th
 
 One more thing you'll see in your tree too, if you look: writing the wake latch pulses the slave tile's own HPD line, and the driver takes that as a plug event — full re-detect, hotplug to userspace, re-modeset, re-train, latch write, HPD again. Three rounds per bring-up here, each one a visible blink at the LUKS prompt and at session start, plus an occasional "enabling link 1 failed" from the re-train. Ignoring `DETECT_REASON_HPD` on a tiled slave that already has its sink fixes it: 0 rounds per boot since, link-loss recovery still comes in as HPD-RX. It's in the linked patch (one hunk in `link_detect()`).
 
+Patch (lean core, current): https://github.com/ahmadtv/omarchy-imac18-3/blob/main/patches/imac5k-lean-core-7.2.x.patch
+Stitch layer for compositors without tile support, applies on top: https://github.com/ahmadtv/omarchy-imac18-3/blob/main/patches/imac5k-stitch-layer-7.x.patch
+
 -- Ahmad
