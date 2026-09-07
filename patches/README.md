@@ -85,11 +85,11 @@ this layer; leaning it is a later pass.
 (`imac5k-amdgpu-7.2.2.patch` + the five `5k-*.patch` increments), minus the
 core-side logging.
 
-**Status: promoted to the default on 2026-09-07** (lean3, with the slave-HPD fix: 0 re-detect rounds per boot instead of 3, no link-enable failures) after two boots from its own
-entry (full-width password prompt, seam fine, straight Apple logo on the warm
-reboot out of it). The verbose module is kept as the `/Test - 5K-verbose-fallback`
-entry and as `amdgpu.ko.zst.prev-promote` beside the installed module; drop
-both once the lean default has run for a few days.
+**Status: lean4 is the default since 2026-09-07** (boot-tested from its own
+entry first: 3 modesets before the LUKS prompt, 0 re-detect rounds, no link
+failures, straight logo on warm reboot). The verbose module is kept as the
+`/Test - 5K-verbose-fallback` entry and as `amdgpu.ko.zst.prev-promote`
+beside the installed module; drop both once lean4 has run for a few days.
 
 ## Booting any build from its own entry: `scripts/imac-alt-entry`
 
