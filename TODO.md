@@ -356,9 +356,28 @@ reads 0x00, so `backlight_adj` is not supported and the control must be the GPU'
 PWM.
 
 **Fix staged, not promoted:** boot entry `/Test - native backlight (brightness fix)`
-— the same kernel image as the default, hash-pinned identically, with
-`acpi_backlight=native` appended to the cmdline. Secure Boot is disabled, so the
-loader's cmdline reaches the stub. Expected result: `amdgpu_bl0` appears under
+with `acpi_backlight=native` appended to the cmdline. Secure Boot is disabled, so
+the loader's cmdline does reach the stub — proved independently: boot −8's
+`Command line:` carried `reboot=pci`, which is in *neither* UKI's embedded
+`.cmdline` and so can only have come from Limine.
+
+The entry is pinned to its **own private copy** of the kernel image
+(`omarchy_linux-blnative.efi`), not to the shared `omarchy_linux.efi`. That is
+deliberate and matters: `limine.conf` sets `hash_mismatch_panic: yes`, so an
+entry pinned to the shared image **panics on selection** after any kernel or
+module rebuild changes that file's hash. `limine-entry-tool` refreshes only its
+own generated entry, and `imac-alt-entry`'s `repin_orphans()` skips plain
+`omarchy_linux.efi`, so nothing would have repaired it. A private copy is never
+rebuilt, so its hash cannot drift. `blnative` was also added to
+`repin_orphans()`'s skip list, because that function re-pins with the *default*
+cmdline and would silently drop `acpi_backlight=native`.
+
+**Expected on the test boot:** `/sys/class/backlight/amdgpu_bl0` appears and
+writes to it dim the panel. **Residual risk:** if it appears but does not dim,
+read back `BL_PWM_CNTL` — a changing `BL_ACTIVE_INT_FRAC_CNT` with no visible
+effect would mean the panel is on an SMC-managed board rail rather than the GPU's
+PWM pin, and the next lead becomes `applesmc`, not amdgpu. Do **not** set
+`amdgpu.backlight=1`; that forces the AUX path this panel does not have. Expected result: `amdgpu_bl0` appears under
 `/sys/class/backlight/` and actually dims the panel. Default entry untouched.
 If it works, the change belongs in `/etc/default/limine` `KERNEL_CMDLINE[default]`
 and unlocks auto-brightness from the ALS.
@@ -549,6 +568,10 @@ screensaver could not interfere, then re-enabled.
 
 - Upload `.github/social-preview.png` in GitHub Settings → Social preview
   (no API for this; must be done in the web UI).
+- **Done 2026-09-07:** swept 215 MB of stale ESP backups
+  (`BOOTX64.EFI.pre-boot-artifacts-backup`, `BOOTX64.UKI.BACKUP`,
+  `BOOTX64.UKI-bypass.backup`) after confirming `BOOTX64.EFI` is byte-identical
+  to `limine_x64.efi`. `/boot` usage 764 M → 549 M.
 - `\EFI\BOOT\BOOTX64.EFI` on this ESP is a *copy of the UKI*, not the Limine
   binary. It was found 2 days stale after a module rebuild — the firmware taking
   that fallback path would have booted the previous initramfs with the previous
