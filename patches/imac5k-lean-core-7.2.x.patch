@@ -33,6 +33,10 @@ IDs) that:
     going-down flag set (wake paths and tiled re-detects become no-ops), the
     slave's stream-off clears 0x4F1 / 0x310 / 0x10A, and the root eDP panel
     is powered off and held for T12.
+  * ignores the HPD pulse the slave tile raises whenever the root latch is
+    written (every stream enable): treating it as a plug event re-detected,
+    re-modeset and re-trained the tile three times per bring-up, each round a
+    visible blink at the boot splash and at session start/exit.
 
 Both connectors then carry correct DisplayID tile metadata and the compositor
 stitches them (Mutter today; KWin in progress). Tested on iMac18,3
@@ -42,11 +46,11 @@ sync_enabled=1, seamless under motion. Also builds against 7.1.x.
 This is a lean rework of the community patch series (mcirsta/linux-imac-5k,
 ported by taprobane99): all bring-up instrumentation/logging removed, the
 dead plumbing that only fed it stripped, and the no-op refactor of
-dc/core/dc.c dropped. 770 added lines vs 1631.
+dc/core/dc.c dropped. 782 added lines vs 1631.
 
 Not-Yet-Signed-off-by: mr_projects
 ---
-diff -ruN -x '.*' pristine7.2.2/drivers/gpu/drm/amd/amdgpu/amdgpu_drv.c core2/drivers/gpu/drm/amd/amdgpu/amdgpu_drv.c
+diff -ruN -x '.*' pristine7.2.2/drivers/gpu/drm/amd/amdgpu/amdgpu_drv.c core3/drivers/gpu/drm/amd/amdgpu/amdgpu_drv.c
 --- a/drivers/gpu/drm/amd/amdgpu/amdgpu_drv.c	2026-08-28 09:25:22.000000000 +0300
 +++ b/drivers/gpu/drm/amd/amdgpu/amdgpu_drv.c	2026-09-06 23:41:58.568210173 +0300
 @@ -24,6 +24,7 @@
@@ -77,7 +81,7 @@ diff -ruN -x '.*' pristine7.2.2/drivers/gpu/drm/amd/amdgpu/amdgpu_drv.c core2/dr
  	amdgpu_device_prepare(dev);
  	amdgpu_device_suspend(dev, true);
  	adev->mp1_state = PP_MP1_STATE_NONE;
-diff -ruN -x '.*' pristine7.2.2/drivers/gpu/drm/amd/amdgpu/amdgpu.h core2/drivers/gpu/drm/amd/amdgpu/amdgpu.h
+diff -ruN -x '.*' pristine7.2.2/drivers/gpu/drm/amd/amdgpu/amdgpu.h core3/drivers/gpu/drm/amd/amdgpu/amdgpu.h
 --- a/drivers/gpu/drm/amd/amdgpu/amdgpu.h	2026-08-28 09:25:22.000000000 +0300
 +++ b/drivers/gpu/drm/amd/amdgpu/amdgpu.h	2026-09-06 23:41:58.566906620 +0300
 @@ -322,6 +322,11 @@
@@ -92,7 +96,7 @@ diff -ruN -x '.*' pristine7.2.2/drivers/gpu/drm/amd/amdgpu/amdgpu.h core2/driver
  struct amdgpu_irq_src;
  struct amdgpu_fpriv;
  struct amdgpu_bo_va_mapping;
-diff -ruN -x '.*' pristine7.2.2/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.c core2/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.c
+diff -ruN -x '.*' pristine7.2.2/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.c core3/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.c
 --- a/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.c	2026-08-28 09:25:22.000000000 +0300
 +++ b/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.c	2026-09-06 23:41:58.570011093 +0300
 @@ -61,6 +61,7 @@
@@ -411,7 +415,7 @@ diff -ruN -x '.*' pristine7.2.2/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.
  	amdgpu_dm_fbc_init(connector);
  
  	return amdgpu_dm_connector->num_modes;
-diff -ruN -x '.*' pristine7.2.2/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm_helpers.c core2/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm_helpers.c
+diff -ruN -x '.*' pristine7.2.2/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm_helpers.c core3/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm_helpers.c
 --- a/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm_helpers.c	2026-08-28 09:25:22.000000000 +0300
 +++ b/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm_helpers.c	2026-09-06 23:38:41.634517152 +0300
 @@ -95,12 +95,64 @@
@@ -545,7 +549,7 @@ diff -ruN -x '.*' pristine7.2.2/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm_
  
  	sad_count = drm_edid_to_sad((struct edid *) edid->raw_edid, &sads);
  	if (sad_count <= 0)
-diff -ruN -x '.*' pristine7.2.2/drivers/gpu/drm/amd/display/dc/dc.h core2/drivers/gpu/drm/amd/display/dc/dc.h
+diff -ruN -x '.*' pristine7.2.2/drivers/gpu/drm/amd/display/dc/dc.h core3/drivers/gpu/drm/amd/display/dc/dc.h
 --- a/drivers/gpu/drm/amd/display/dc/dc.h	2026-08-28 09:25:22.000000000 +0300
 +++ b/drivers/gpu/drm/amd/display/dc/dc.h	2026-09-06 23:40:21.249122858 +0300
 @@ -1847,6 +1847,13 @@
@@ -669,7 +673,7 @@ diff -ruN -x '.*' pristine7.2.2/drivers/gpu/drm/amd/display/dc/dc.h core2/driver
  struct dc_sink_init_data {
  	enum signal_type sink_signal;
  	struct dc_link *link;
-diff -ruN -x '.*' pristine7.2.2/drivers/gpu/drm/amd/display/dc/dc_types.h core2/drivers/gpu/drm/amd/display/dc/dc_types.h
+diff -ruN -x '.*' pristine7.2.2/drivers/gpu/drm/amd/display/dc/dc_types.h core3/drivers/gpu/drm/amd/display/dc/dc_types.h
 --- a/drivers/gpu/drm/amd/display/dc/dc_types.h	2026-08-28 09:25:22.000000000 +0300
 +++ b/drivers/gpu/drm/amd/display/dc/dc_types.h	2026-09-06 23:38:41.637517216 +0300
 @@ -192,6 +192,18 @@
@@ -691,9 +695,9 @@ diff -ruN -x '.*' pristine7.2.2/drivers/gpu/drm/amd/display/dc/dc_types.h core2/
  };
  
  /**
-diff -ruN -x '.*' pristine7.2.2/drivers/gpu/drm/amd/display/dc/link/link_detection.c core2/drivers/gpu/drm/amd/display/dc/link/link_detection.c
+diff -ruN -x '.*' pristine7.2.2/drivers/gpu/drm/amd/display/dc/link/link_detection.c core3/drivers/gpu/drm/amd/display/dc/link/link_detection.c
 --- a/drivers/gpu/drm/amd/display/dc/link/link_detection.c	2026-08-28 09:25:22.000000000 +0300
-+++ b/drivers/gpu/drm/amd/display/dc/link/link_detection.c	2026-09-06 23:41:58.574792109 +0300
++++ b/drivers/gpu/drm/amd/display/dc/link/link_detection.c	2026-09-07 09:13:38.788908578 +0300
 @@ -48,9 +48,12 @@
  #include "link_enc_cfg.h"
  #include "dm_helpers.h"
@@ -878,7 +882,7 @@ diff -ruN -x '.*' pristine7.2.2/drivers/gpu/drm/amd/display/dc/link/link_detecti
  		// Check if edid is the same
  		if ((prev_sink) &&
  		    (edid_status == EDID_THE_SAME || edid_status == EDID_OK))
-@@ -1578,6 +1717,16 @@
+@@ -1578,6 +1717,29 @@
  	bool is_delegated_to_mst_top_mgr = false;
  	enum dc_connection_type pre_link_type = link->type;
  
@@ -892,10 +896,23 @@ diff -ruN -x '.*' pristine7.2.2/drivers/gpu/drm/amd/display/dc/link/link_detecti
 +	     dc_link_has_tiled_slave_panel_patch(link)))
 +		return false;
 +
++	/*
++	 * Apple tile pair: writing the root panel latch (done on every stream
++	 * enable) pulses the slave tile's own HPD line. That is our doing, not
++	 * a plug event. Re-detecting on it drops the trained sink, reports a
++	 * hotplug, and userspace re-modesets, which writes the latch again --
++	 * three rounds per bring-up, each one a visible blink. Ignore HPD on a
++	 * slave that already has its sink; real state changes come through the
++	 * root tile, and link-loss recovery still arrives as HPD-RX.
++	 */
++	if (reason == DETECT_REASON_HPD && link->local_sink &&
++	    dc_link_has_tiled_slave_panel_patch(link))
++		return false;
++
  	is_local_sink_detect_success = detect_link_and_local_sink(link, reason);
  
  	if (is_local_sink_detect_success && link->local_sink) {
-diff -ruN -x '.*' pristine7.2.2/drivers/gpu/drm/amd/display/dc/link/link_dpms.c core2/drivers/gpu/drm/amd/display/dc/link/link_dpms.c
+diff -ruN -x '.*' pristine7.2.2/drivers/gpu/drm/amd/display/dc/link/link_dpms.c core3/drivers/gpu/drm/amd/display/dc/link/link_dpms.c
 --- a/drivers/gpu/drm/amd/display/dc/link/link_dpms.c	2026-08-28 09:25:22.000000000 +0300
 +++ b/drivers/gpu/drm/amd/display/dc/link/link_dpms.c	2026-09-06 23:41:58.573450601 +0300
 @@ -58,6 +58,7 @@
@@ -978,7 +995,7 @@ diff -ruN -x '.*' pristine7.2.2/drivers/gpu/drm/amd/display/dc/link/link_dpms.c 
  	if (pipe_ctx->link_config.dp_tunnel_settings.should_use_dp_bw_allocation)
  		deallocate_usb4_bandwidth(pipe_ctx->stream);
  
-diff -ruN -x '.*' pristine7.2.2/drivers/gpu/drm/amd/display/dc/link/protocols/link_dp_capability.c core2/drivers/gpu/drm/amd/display/dc/link/protocols/link_dp_capability.c
+diff -ruN -x '.*' pristine7.2.2/drivers/gpu/drm/amd/display/dc/link/protocols/link_dp_capability.c core3/drivers/gpu/drm/amd/display/dc/link/protocols/link_dp_capability.c
 --- a/drivers/gpu/drm/amd/display/dc/link/protocols/link_dp_capability.c	2026-08-28 09:25:22.000000000 +0300
 +++ b/drivers/gpu/drm/amd/display/dc/link/protocols/link_dp_capability.c	2026-09-06 23:38:41.640517281 +0300
 @@ -50,12 +50,16 @@
@@ -1072,7 +1089,7 @@ diff -ruN -x '.*' pristine7.2.2/drivers/gpu/drm/amd/display/dc/link/protocols/li
  }
  
  void dpcd_write_cable_id_to_dprx(struct dc_link *link)
-diff -ruN -x '.*' pristine7.2.2/drivers/gpu/drm/amd/display/dc/link/protocols/link_dpcd.c core2/drivers/gpu/drm/amd/display/dc/link/protocols/link_dpcd.c
+diff -ruN -x '.*' pristine7.2.2/drivers/gpu/drm/amd/display/dc/link/protocols/link_dpcd.c core3/drivers/gpu/drm/amd/display/dc/link/protocols/link_dpcd.c
 --- a/drivers/gpu/drm/amd/display/dc/link/protocols/link_dpcd.c	2026-08-28 09:25:22.000000000 +0300
 +++ b/drivers/gpu/drm/amd/display/dc/link/protocols/link_dpcd.c	2026-09-06 23:40:21.252788269 +0300
 @@ -249,3 +249,40 @@
@@ -1116,7 +1133,7 @@ diff -ruN -x '.*' pristine7.2.2/drivers/gpu/drm/amd/display/dc/link/protocols/li
 +	return core_link_write_dpcd(root_link, APPLE_5K_DPCD_ROOT_PANEL_LATCH,
 +				    &payload, sizeof(payload));
 +}
-diff -ruN -x '.*' pristine7.2.2/drivers/gpu/drm/amd/display/dc/link/protocols/link_dpcd.h core2/drivers/gpu/drm/amd/display/dc/link/protocols/link_dpcd.h
+diff -ruN -x '.*' pristine7.2.2/drivers/gpu/drm/amd/display/dc/link/protocols/link_dpcd.h core3/drivers/gpu/drm/amd/display/dc/link/protocols/link_dpcd.h
 --- a/drivers/gpu/drm/amd/display/dc/link/protocols/link_dpcd.h	2026-08-28 09:25:22.000000000 +0300
 +++ b/drivers/gpu/drm/amd/display/dc/link/protocols/link_dpcd.h	2026-09-06 23:40:21.253097121 +0300
 @@ -39,4 +39,19 @@
@@ -1139,7 +1156,7 @@ diff -ruN -x '.*' pristine7.2.2/drivers/gpu/drm/amd/display/dc/link/protocols/li
 +enum dc_status link_apple_5k_root_panel_latch_clear(struct dc_link *root_link);
 +
  #endif
-diff -ruN -x '.*' pristine7.2.2/drivers/gpu/drm/amd/display/dc/link/protocols/link_dp_training.c core2/drivers/gpu/drm/amd/display/dc/link/protocols/link_dp_training.c
+diff -ruN -x '.*' pristine7.2.2/drivers/gpu/drm/amd/display/dc/link/protocols/link_dp_training.c core3/drivers/gpu/drm/amd/display/dc/link/protocols/link_dp_training.c
 --- a/drivers/gpu/drm/amd/display/dc/link/protocols/link_dp_training.c	2026-08-28 09:25:22.000000000 +0300
 +++ b/drivers/gpu/drm/amd/display/dc/link/protocols/link_dp_training.c	2026-09-06 23:38:41.642296286 +0300
 @@ -1091,12 +1091,70 @@
@@ -1353,7 +1370,7 @@ diff -ruN -x '.*' pristine7.2.2/drivers/gpu/drm/amd/display/dc/link/protocols/li
  		fail_count++;
  		dp_trace_lt_fail_count_update(link, fail_count, false);
  		if (link->ep_type == DISPLAY_ENDPOINT_PHY) {
-diff -ruN -x '.*' pristine7.2.2/drivers/gpu/drm/amd/display/dc/link/protocols/link_edp_panel_control.c core2/drivers/gpu/drm/amd/display/dc/link/protocols/link_edp_panel_control.c
+diff -ruN -x '.*' pristine7.2.2/drivers/gpu/drm/amd/display/dc/link/protocols/link_edp_panel_control.c core3/drivers/gpu/drm/amd/display/dc/link/protocols/link_edp_panel_control.c
 --- a/drivers/gpu/drm/amd/display/dc/link/protocols/link_edp_panel_control.c	2026-08-28 09:25:22.000000000 +0300
 +++ b/drivers/gpu/drm/amd/display/dc/link/protocols/link_edp_panel_control.c	2026-09-06 23:38:41.643174142 +0300
 @@ -28,6 +28,8 @@
