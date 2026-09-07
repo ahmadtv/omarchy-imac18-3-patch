@@ -475,6 +475,22 @@ buttons were used during playback, killing detection for the session. Removed
 rather than shipped. The work is recoverable from this session's history if
 anyone wants to revisit it.
 
+**Correction, after the first commit of this patch:** the re-route also called
+`cs_8409_headplay_setup()`, mirroring the normal capture-start sequence, which
+does reconfigure the playback/ASP path. With OBS holding the mic open the
+re-route fired on every plug, and reconfiguring playback from inside a jack
+event **left the speakers silent**. Removed — a capture-side re-route has no
+business touching playback. Verified after removal: speakers work, both mics
+work, jack reads correctly.
+
+**Diagnostic lesson worth keeping:** "the speakers don't work" turned out to be
+one application (the `blow-off-some-steam` shell plugin) while YouTube played
+fine. Qt `SoundEffect` binds to the audio device when the plugin loads; ~5
+driver reloads had left it holding handles to a device that no longer existed.
+Restarting quickshell fixed it. **Before chasing a hardware output fault, check
+whether a second application also has no sound** — and note that every driver
+reload silently disconnects OBS, Chromium and the shell plugins from audio.
+
 **Known remaining issue:** a loud high-pitched artefact on the headset output at
 the moment of plug-in, reported repeatedly by the owner. Not diagnosed. Most
 likely HSBIAS asserted abruptly or the output SRC failing to lock cleanly.
