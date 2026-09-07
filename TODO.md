@@ -502,8 +502,44 @@ The kernel has **no quirk for this reader at all** — `grep -rn 57765` over
 `sdhci-pci*.c` returns nothing, and the device is
 `14e4:16bc BCM57765/57785 SDXC/MMC` on `sdhci-pci`.
 
-Next things to try (each a module reload, all reversible): `debug_quirks2` bits to
-disable UHS/1.8 V signalling, and forcing a lower bus speed or 1-bit width.
+**Three configurations tested on 2026-09-07 and eliminated** (each a
+`modprobe -r` / `modprobe` cycle, all restored to stock afterwards):
+
+| Config | Effect observed | Result |
+|---|---|---|
+| `debug_quirks=0x40` (BROKEN_ADMA) | controller ran `using PIO` | same CMD51 failure |
+| `debug_quirks2=0x4` (NO_1_8_V) | the published Mac fix from Ubuntu #1307674 | same failure |
+| `debug_quirks=0x10001380 debug_quirks2=0x204` | ChromeOS Broadcom set; `using ADMA` 32-bit, `ADMA Ptr` dropped to `0x79c43208` — below 4 GiB | same failure |
+
+So **64-bit DMA, UHS/1.8 V signalling, and the DMA engine itself are all ruled
+out.** The failure signature is identical every time: `Cmd: 0x0000333a`
+(CMD51 `SEND_SCR`) → `Timeout waiting for hardware interrupt` → `-110`. The host
+never raises Buffer Read Ready for the 8-byte SCR block.
+
+**What is left, and it needs a patch.** ChromeOS kernels carry a fixup for this
+exact device (`{ PCI_VENDOR_ID_BROADCOM, 0x16bc, ... }` →
+`SDHCI_QUIRK2_BROADCOM_REGISTERS`) that mainline has no equivalent of: an
+undocumented PHY/data-path setup re-applied on **every `set_clock`** — clear bits
+`0x3000` in register `0x198`; in `0x19c` clear `0x01a03f30`, set `0x00500000`,
+and set bit 24 when `CTRL2 & VDD_180 && clock >= 200 MHz`. Those writes cannot be
+expressed as a module parameter. On stock Linux this reader's data path is simply
+left unconfigured, which matches the whole published BCM57765 corpus failing at
+"Timeout waiting for Buffer Read Ready".
+
+Origin: "[PATCH] mmc: disable UHS on broadcom sdhci", Stephen Hurd (Broadcom) via
+Grant Grundler, 16 Nov 2013. Objected to over header placement and **never
+merged**; it survives only in Chromium OS trees.
+
+Also worth trying before the patch: disabling PCIe active-state power management
+on the reader's root port. `tg3`, the Ethernet driver for the *same* BCM57765
+silicon, documents no DMA errata for this chip but does carry PCIe link-power
+workarounds and a `tg3_chk_missed_msi()` poll because the chip **drops
+interrupts** — which is a better match for "timeout waiting for an interrupt"
+than any DMA theory. The community workaround for this reader is
+`setpci -s <bridge> 0x50.B=0x41`.
+
+Superseded next steps (kept for the record): `debug_quirks2` UHS bits, and
+forcing a lower bus speed or 1-bit width.
 Everything was restored to stock (`debug_quirks=0`) afterwards. **Caution:**
 unbinding `sdhci-pci` via sysfs while a card is failing wedges the writing process
 in `D` state until the module is removed; use `modprobe -r` rather than
