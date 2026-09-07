@@ -433,7 +433,53 @@ line-in — uncommenting `snd_hda_apply_pincfgs` would not touch the mic.
 `reg9_linein_dmic_mo` is genuinely never assigned but is read only in the
 line-in path.
 
-### FIXED 2026-09-07: capture now follows the jack
+### FIXED 2026-09-07: headset capture works and follows the jack live
+
+`patches/cs8409-headset-capture.patch` — one patch, four related fixes, all
+confirmed on hardware. Supersedes the three separate patch files this section
+previously referenced.
+
+**The headline bug was that plug/unplug while capturing did nothing at all.**
+The driver said so itself: `PLUGIN WHILE CAPTURING UNIMPLEMENTED!!`, with
+`// NOTA BENE - no concept/implementation of plugging in while capturing!!` at
+the top of the function. Since the routing setup only ran at stream start, any
+application holding the microphone open across a jack change kept the old
+routing forever. OBS does exactly that — which is why the mic appeared to work
+and then died permanently the first time the jack was touched, and why it looked
+random rather than reproducible.
+
+Verified with a 90-second capture held open across a physical unplug and replug:
+
+```
+21:55:09  unplug     -> capture nid 0x1a -> 0x23 (jack 0 mike 0)
+21:55:20  plug in
+21:55:22  headset detected -> capture nid 0x23 -> 0x1a (jack 1 mike 1)
+```
+
+The converters swapped in `/proc/asound/card0/codec#0` to match, and **not one
+2-second window lost audio** across either transition.
+
+Also in the patch: capture follows the jack at stream start (the driver was
+configuring one mic and recording from the other — silence with a headset in);
+the internal mic amp is owned by the mixer instead of being stamped with a
+hardcoded −12 dB while the control claimed +12 dB (−51.0 → −22.9 dBFS); and the
+headset mic gets the +32 dB the CS42L83 has available but nobody was applying
+(it was 35× quieter than the internal mic). Full reasoning is in the patch
+header.
+
+**Deliberately excluded: headset buttons.** All three were made to work
+(84 play/pause, 65 volume down, 5 volume up delivered to userspace), but the
+level-detect sweep made the audio audibly crackle and the interrupt handler
+jammed with `read_status_and_clear_interrupt - ERROR - max count exceeded` when
+buttons were used during playback, killing detection for the session. Removed
+rather than shipped. The work is recoverable from this session's history if
+anyone wants to revisit it.
+
+**Known remaining issue:** a loud high-pitched artefact on the headset output at
+the moment of plug-in, reported repeatedly by the owner. Not diagnosed. Most
+likely HSBIAS asserted abruptly or the output SRC failing to lock cleanly.
+
+### Superseded: capture follows the jack
 
 `patches/cs8409-capture-follows-jack.patch` (applied and running; module
 srcversion `F265460E88F25059306A73A`). **Measured with a headset plugged in:

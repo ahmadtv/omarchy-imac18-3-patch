@@ -1,0 +1,621 @@
+iMac 18,3 CS8409/CS42L83: make headset capture work, follow the jack live, and
+give both microphones a usable level.
+
+Applies to the snd_hda_macbookpro DKMS driver (davidjo/snd_hda_macbookpro),
+against the tree at commit be90113. Every part below was confirmed on hardware
+on an iMac18,3 running kernel 7.1.9-arch1-2.
+
+Four related fixes, all on the capture path. Deliberately no headset-button
+code: that was attempted separately, made the audio crackle and jammed the
+codec's interrupt handler, and was removed.
+
+1. Capture follows the jack.
+   The driver sets up one microphone and records from the other. On plug-in
+   cs_8409_pcm_capture_pre_prepare_hook branches on have_mike and calls
+   cs_8409_headcapture_setup, routing the headset mike (pin 0x3c) to the
+   cs42l83 ADC 0x1a -- but the PCM stays bound to intmike_adc_nid (0x23 on
+   iMacs). Nothing feeds 0x23, so capture is digital silence: peak 0.00000
+   with a headset in, while the internal mike alone worked fine.
+   Proof: vendor coef 0x82 read back 0x0000 mid-capture (DMIC2_SCL_EN never
+   set) and pin 0x45 stayed Pin-ctls 0x00, while coef 0x09 showed the iMac
+   model config was correct -- the path was skipped, not misconfigured.
+   Fix: in cs_8409_capture_pcm_prepare pick the ADC the hook is about to
+   configure and move hinfo->nid there. It must happen BEFORE the hook, since
+   cs_8409_store_stream_format caches the DMA stream tag against hinfo->nid
+   and cs_8409_really_update_stream_format(0x1a,...) would otherwise find an
+   empty cache. It must also switch both ways: hinfo is persistent for the
+   life of the codec, so a one-way switch strands the PCM on 0x1a and breaks
+   the internal mike for every recording after the first unplug.
+
+2. Plugging or unplugging while capturing.
+   The driver's own comment said it: "NOTA BENE - no concept/implementation of
+   plugging in while capturing!!", and the handler logged
+   "PLUGIN WHILE CAPTURING UNIMPLEMENTED!!" and did nothing. Since the setup
+   above only runs at stream start, any application holding the microphone
+   open across a jack change kept the old routing forever. OBS does exactly
+   that, which made the microphone appear to work and then die permanently the
+   first time the jack was touched.
+   Fix: cs_8409_capture_follow_jack() re-runs the selection, the setup and
+   snd_hda_codec_setup_stream() for the new state, called from the have_mike
+   block in cs_8409_plugin_event_continued and from the end of
+   cs_8409_unplug_handle_disconnect. The capture hinfo, stream tag and format
+   are saved in the spec at prepare time so the handler can rebuild the stream.
+   These run from the HDA unsol work item, i.e. process context -- the
+   surrounding code already msleeps and does long i2c sequences -- so the call
+   is direct rather than deferred. spec->block_unsol is saved and restored
+   around it because cs_8409_capture_real clears it on exit and we are nested
+   inside an unsol response.
+   Verified: 90 s capture held open across a physical unplug and replug. The
+   driver logged "capture nid 0x1a -> 0x23 (jack 0 mike 0)" then
+   "0x23 -> 0x1a (jack 1 mike 1)", the converters swapped in
+   /proc/asound/card0/codec#0 to match, and not one 2-second window lost audio.
+
+3. Internal mike gain -- let the mixer own it.
+   cs_8409_intmike_volume_setup was called with a hardcoded 0x27 from four
+   sites. Node 0x23's amp caps are ofs=0x33, nsteps=0x3f, stepsize=0x03, so
+   0x33 is 0 dB and 0x27 is -12 dB -- while the ALSA control simultaneously
+   reported 63 [100%] [12.00dB]. A 24 dB lie, and the driver stamped its value
+   over the user's on every capture setup.
+   Fix: once the mixer exists, read the value ALSA holds and write that, so the
+   control genuinely drives the amp. Before the mixer is built (boot setup runs
+   during codec init) the new intmike_gain parameter seeds it, default 0x33.
+   Measured: -51.0 dBFS RMS before, -22.9 dBFS after, same room, same capture.
+   Note nid 0x45's amp range is only 0..2, so it keeps the original constant
+   through a clamp -- passing 0x27 there latches 3, which is out of range, and
+   WirePlumber then fails "Failed to set volume of 'Internal Mic Boost'" and
+   drops the whole analog device.
+
+4. Headset mike gain.
+   The HDA widget for the headset ADC has no Amp-In at all, so ALSA exposes no
+   control and the user cannot turn it up. At the codec's reset values the
+   earbud mike measured 35x quieter than the internal one: peak 0.0253 versus
+   0.905, a 31 dB shortfall.
+   All the gain lives in the cs42l83, per CS42L42 DS1083F8 sections 4.1 and
+   7.11.3 (same silicon family; mainline sound/soc/codecs/cs42l42.c agrees on
+   the register map): 0x1D01 bit 0 ADC_DIG_BOOST is +20 dB, reset 0; 0x1D03
+   ADC_VOL is two's complement in 1.0 dB steps, +12 dB (0x0C) down to -96 dB.
+   That is +32 dB total, almost exactly the measured deficit.
+   macOS does NOT do this -- davidjo's trace of
+   AppleHDATDM_CS42L83::enableExtMicrophone shows OSX writing 0x1d03 = 0x00 and
+   never touching 0x1d01. Its loudness comes from CoreAudio applying gain in
+   software, which has no register equivalent. Going beyond what OSX writes is
+   therefore correct here, not a workaround.
+   Defaults: boost on plus the full +12 dB trim. With the owner speaking that
+   put his voice at -21.7 dBFS with peaks at -8.9 dBFS and no clipped samples.
+   Both stages are applied after the ADC, so this is pure digital gain -- it
+   lifts the noise floor with the signal and does not improve SNR (measured
+   28 dB either way, which belongs to the earbud mike and Apple's analogue
+   path). Do not raise the trim further: at +32 dB a plosive close to the mike
+   reaches 0 dBFS and clips.
+
+Known remaining issue: a loud high-pitched artefact is audible on the headset
+output at the moment of plug-in. Not diagnosed. Most likely HSBIAS being
+asserted abruptly or the output SRC not locking cleanly.
+
+diff --git i/patch_cirrus/cirrus_apple.h w/patch_cirrus/cirrus_apple.h
+index 7e9bcd1..cbae395 100644
+--- i/patch_cirrus/cirrus_apple.h
++++ w/patch_cirrus/cirrus_apple.h
+@@ -512,6 +512,18 @@ struct cs8409_apple_spec {
+ 	// set when capturing for plug/unplug events while capturing
+ 	int capturing;
+ 
++	// saved capture stream parameters.
++	// cs_8409_capture_pcm_prepare picks the capture ADC (headset mike 0x1a vs
++	// internal mike intmike_adc_nid) once, when the stream starts. A headset
++	// plug or unplug that happens while a capture stream is already open would
++	// otherwise leave the stream bound to the now wrong ADC and the recording
++	// goes silent (this was the "PLUGIN WHILE CAPTURING UNIMPLEMENTED" case).
++	// We stash the prepare arguments here so cs_8409_capture_follow_jack can
++	// redo that selection and setup from the plug/unplug handlers.
++	struct hda_pcm_stream *capture_hinfo;
++	unsigned int capture_stream_tag;
++	unsigned int capture_format;
++
+ 	// changing coding - OSX sets up the format on plugin
+ 	// then does some minimal setup when start play
+ 	// initial coding delayed any format setup till actually play
+@@ -792,6 +804,45 @@ static int cs_8409_capture_pcm_prepare(struct hda_pcm_stream *hinfo,
+         mycodec_info(codec, "cs_8409_capture_pcm_prepare: NID=0x%x, stream=0x%x, format=0x%x\n",
+                   hinfo->nid, stream_tag, format);
+ 
++	// Follow the jack: point the capture PCM at whichever ADC is actually going
++	// to be set up by the pre prepare hook below.
++	//   headset with a mike plugged in -> cs_8409_headcapture_setup routes the
++	//     headset mike (pin 0x3c) to the cs42l83 ADC 0x1a
++	//   nothing plugged in (or a 3 pole headset with no mike)
++	//     -> cs_8409_capture_setup brings up the internal mike on intmike_adc_nid
++	// This has to happen BEFORE the hook so that cs_8409_store_stream_format
++	// caches the DMA stream tag against the right nid - otherwise
++	// cs_8409_really_update_stream_format(0x1a,...) inside the headset setup
++	// finds an empty cache and we get a stream bound to one ADC while the other
++	// one is the one that was configured, ie silence.
++	// NOTE both directions are needed - hinfo is persistent for the life of the
++	// codec, so switching only on plugin would strand the PCM on 0x1a for every
++	// later recording once the headset had been unplugged.
++	{
++		hda_nid_t want_nid;
++
++		if (spec->jack_present && spec->have_mike)
++			want_nid = 0x1a;
++		else
++			want_nid = spec->intmike_adc_nid;
++
++		if (hinfo->nid != want_nid &&
++		    (hinfo->nid == 0x1a || hinfo->nid == spec->intmike_adc_nid))
++		{
++			dev_info(hda_codec_dev(codec),
++			         "cs_8409_capture_pcm_prepare: capture nid 0x%02x -> 0x%02x (jack %d mike %d)\n",
++			         hinfo->nid, want_nid, spec->jack_present, spec->have_mike);
++			snd_hda_codec_cleanup_stream(codec, hinfo->nid);
++			hinfo->nid = want_nid;
++		}
++	}
++
++	// remember what we were asked to set up so that a headset plug or unplug
++	// arriving while this stream is still open can redo the selection above
++	// for the new jack state - see cs_8409_capture_follow_jack
++	spec->capture_hinfo = hinfo;
++	spec->capture_stream_tag = stream_tag;
++	spec->capture_format = format;
+ 
+         cs_8409_pcm_capture_pre_prepare_hook(hinfo, codec, stream_tag, format, substream,
+                               HDA_GEN_PCM_ACT_PREPARE);
+@@ -2930,6 +2981,10 @@ static int cs8409_apple(struct hda_codec *codec)
+         spec->playing = 0;
+         spec->capturing = 0;
+ 
++        spec->capture_hinfo = NULL;
++        spec->capture_stream_tag = 0;
++        spec->capture_format = 0;
++
+         spec->headset_play_format_setup_needed = 1;
+         spec->headset_capture_format_setup_needed = 1;
+ 
+diff --git i/patch_cirrus/patch_cirrus_new84.h w/patch_cirrus/patch_cirrus_new84.h
+index a40a6f5..942442f 100644
+--- i/patch_cirrus/patch_cirrus_new84.h
++++ w/patch_cirrus/patch_cirrus_new84.h
+@@ -1007,6 +1007,114 @@ static void switch_input_src(struct hda_codec *codec)
+ 
+ 
+ 
++// Re-run the capture ADC selection and setup for the CURRENT jack state.
++//
++// cs_8409_capture_pcm_prepare chooses the capture ADC - headset mike on 0x1a
++// versus the internal mike on intmike_adc_nid - exactly once, when the stream
++// starts. A headset plug or unplug while a capture stream is already open used
++// to do nothing at all ("PLUGIN WHILE CAPTURING UNIMPLEMENTED"), leaving the
++// stream bound to an ADC that is no longer the one being driven, ie silence,
++// with no recovery until the recording application closed and reopened the
++// device. This redoes that selection using the prepare arguments saved in the
++// spec, mirroring the prepare path step for step:
++//   cleanup the old ADC stream -> point hinfo at the new ADC ->
++//   cache the stream parameters against the new nid (must be BEFORE the setup,
++//   or cs_8409_really_update_stream_format finds an empty cache) ->
++//   run the same setup the pre prepare hook would have run -> setup the stream.
++//
++// CONTEXT: this is called from the cs42l83 plug/unplug handlers, which run out
++// of the HDA bus unsolicited response work item, ie process context - the code
++// surrounding both call sites already does msleep() and long blocking i2c
++// sequences. So the sleeping setup helpers can be called directly here and
++// deferring to another work item would only add a cancel/lifetime problem on
++// module unload for no benefit.
++static void cs_8409_capture_follow_jack(struct hda_codec *codec)
++{
++	struct cs8409_apple_spec *spec = codec->spec;
++	struct hda_pcm_stream *hinfo;
++	hda_nid_t want_nid, old_nid;
++	int saved_block_unsol;
++
++	// nothing open - the next cs_8409_capture_pcm_prepare will get it right
++	if (!spec->capturing)
++		return;
++
++	hinfo = spec->capture_hinfo;
++	if (hinfo == NULL)
++		return;
++
++	old_nid = hinfo->nid;
++
++	if (spec->jack_present && spec->have_mike)
++		want_nid = 0x1a;
++	else
++		want_nid = spec->intmike_adc_nid;
++
++	// only ever move between the two ADCs we know how to set up
++	if (old_nid != 0x1a && old_nid != spec->intmike_adc_nid)
++	{
++		dev_info(hda_codec_dev(codec),
++		         "cs_8409_capture_follow_jack: unexpected capture nid 0x%02x - not touching\n",
++		         old_nid);
++		return;
++	}
++
++	if (old_nid == want_nid)
++	{
++		dev_info(hda_codec_dev(codec),
++		         "cs_8409_capture_follow_jack: already on nid 0x%02x - nothing to do\n",
++		         old_nid);
++		return;
++	}
++
++	dev_info(hda_codec_dev(codec),
++	         "cs_8409_capture_follow_jack: capture nid 0x%02x -> 0x%02x (jack %d mike %d)\n",
++	         old_nid, want_nid, spec->jack_present, spec->have_mike);
++
++	// we are running inside an unsolicited response - the setup helpers below
++	// manage block_unsol themselves and leave it clear, so put it back after
++	saved_block_unsol = spec->block_unsol;
++
++	// take the DMA stream off the old ADC before pointing the PCM elsewhere
++	snd_hda_codec_cleanup_stream(codec, old_nid);
++
++	hinfo->nid = want_nid;
++
++	cs_8409_store_stream_format(codec, want_nid, spec->capture_stream_tag, spec->capture_format);
++
++	if (want_nid == 0x1a)
++	{
++		// headset mike - note the headphone/ASP setup is needed even when we
++		// are only capturing (cs42l83_configure_serial_port sets the primary
++		// ASP receive frequency), same as cs_8409_pcm_capture_pre_prepare_hook
++		if (spec->headset_play_format_setup_needed)
++		{
++			cs_8409_headplay_setup(codec);
++			spec->headset_play_format_setup_needed = 0;
++		}
++		if (spec->headset_capture_format_setup_needed)
++		{
++			cs_8409_headcapture_setup(codec);
++			spec->headset_capture_format_setup_needed = 0;
++		}
++	}
++	else
++	{
++		// internal mike - the unplug sequence has already torn the cs42l83
++		// mike path down and left the input nids powered off, so this brings
++		// them back up exactly as a fresh capture start would
++		cs_8409_capture_setup(codec);
++	}
++
++	snd_hda_codec_setup_stream(codec, want_nid, spec->capture_stream_tag, 0, spec->capture_format);
++
++	spec->block_unsol = saved_block_unsol;
++
++	dev_info(hda_codec_dev(codec),
++	         "cs_8409_capture_follow_jack: capture now on nid 0x%02x\n", want_nid);
++}
++
++
+ static int read_gpio_status_check(struct hda_codec *codec);
+ 
+ #ifdef USE_DATA
+@@ -1804,8 +1912,12 @@ static void cs_8409_pcm_capture_pre_prepare_hook(struct hda_pcm_stream *hinfo, s
+ 						spec->headset_capture_format_setup_needed = 0;
+ 					}
+ 				}
+-				// I think this is impossible - this would say we tried to capture
+-				// using a headset without mike
++				else
++				{
++					// headset/headphones with no mike (3 pole plug) - fall back to
++					// the internal mike so capture still works while plugged in
++					cs_8409_capture_setup(codec);
++				}
+ 				// NOTE - still not fixed linein/lineout working - this may need
+ 				// changing here
+ 			}
+@@ -1927,6 +2039,8 @@ static void cs_8409_capture_pcm_hook(struct hda_pcm_stream *hinfo, struct hda_co
+ 		spec->capture_init_count = 0;
+ 		// not sure of this position yet
+ 		spec->capturing = 0;
++		// the saved prepare arguments are stale from here on
++		spec->capture_hinfo = NULL;
+ 		power_chk = snd_hda_codec_read(codec, codec->core.afg, 0, AC_VERB_GET_POWER_STATE, 0);
+ 		myprintk("snd_hda_intel: command cs_8409_capture_pcm_hook power check 0x01 4 %d", power_chk);
+ 		myprintk("snd_hda_intel: command cs_8409_capture_pcm_hook HOOK CLEANUP end");
+diff --git i/patch_cirrus/patch_cirrus_real84.h w/patch_cirrus/patch_cirrus_real84.h
+index 76de5e8..7dddf82 100644
+--- i/patch_cirrus/patch_cirrus_real84.h
++++ w/patch_cirrus/patch_cirrus_real84.h
+@@ -282,13 +282,100 @@ static void cs_8409_linein_volume_setup_new(struct hda_codec *codec, int volume)
+ }
+ 
+ 
++// Clamp a gain index to what the nid's input amp actually implements.
++//
++// cs_8409_intmike_volume_setup uses the same 0x27 for the ADC and for the
++// internal mike pin, but the pin (0x45 on the iMacs, 0x44 on the MacBook Pros)
++// is a 2 step boost - AC_PAR_AMP_IN_CAP reports nsteps 2. Writing 0x27 leaves
++// the low bits behind in the register, so ALSA reads back 3 on a control whose
++// max is 2. WirePlumber then fails "Failed to set volume of 'Internal Mic
++// Boost': Invalid argument" and drops the whole analog device.
++static int cs_8409_amp_in_clamp(struct hda_codec *codec, hda_nid_t nid, int volume)
++{
++        unsigned int caps;
++        int nsteps;
++
++        caps = snd_hda_param_read(codec, nid, AC_PAR_AMP_IN_CAP);
++        if (caps == (unsigned int)-1 || !caps)
++                return volume;
++
++        nsteps = (caps & AC_AMPCAP_NUM_STEPS) >> AC_AMPCAP_NUM_STEPS_SHIFT;
++        if (nsteps > 0 && volume > nsteps)
++                return nsteps;
++
++        return volume;
++}
++
++
++// Internal mike capture level.
++//
++// The OSX replay calls cs_8409_intmike_volume_setup(codec, 0x27) at every point
++// the internal mike is brought up - boot, capture start, headset unplug. Node
++// 0x23 (0x22 on the MacBook Pros) has Amp-In caps ofs=0x33 nsteps=0x3f
++// stepsize=0x03 mute=1, ie 1.0 dB a step with 0 dB sitting at index 0x33. So
++// 0x27 is -12 dB, and it was being stamped over the amp on every capture setup
++// while "Internal Mic Capture Volume" simultaneously read back 63 [100%]
++// [12.00dB] - a 24 dB lie, and a mixer control that did nothing. Measured on an
++// iMac18,3 with someone talking: 0x27 gave -40.6 dBFS (unusable), 0x3f gave
++// -26.2 dBFS RMS / -14.1 dBFS peak (good).
++//
++// The fix is to stop overriding userspace rather than just to raise the
++// constant. Once "Internal Mic Capture Volume" exists the control owns the amp:
++// we re-read whatever value ALSA holds for it and write that back, so the write
++// is a no-op refresh instead of a reset and PipeWire/WirePlumber can actually
++// manage the level. Before the mixer is built - the boot setup call happens
++// during codec init, well before build_controls - there is no control to
++// consult, so intmike_gain seeds it. Default 0x3f (+12 dB), the value that
++// measured well; 0x33 is 0 dB, which is what upstream PR #197 moves its
++// CS8409_CAPTURE_INPUT_GAIN_DEFAULT to. Setting intmike_gain to a negative
++// value restores the old hardcoded behaviour.
++//
++// Note the line-in path (cs_8409_linein_volume_setup) is deliberately left at
++// 0x27. PR #197 raises both, but line-in here is a line level input on the back
++// of the machine with nothing measured through it, and +24 dB on a line level
++// source is a good way to clip it.
++//
++// Only the ADC nid is affected. The internal mike pin nid keeps being passed the
++// original constant through cs_8409_amp_in_clamp - it is a 0..2 boost with its
++// own "Internal Mic Boost" control and must not get dragged around by the ADC
++// control.
++
++static int intmike_gain = 0x33;
++module_param(intmike_gain, int, 0644);
++MODULE_PARM_DESC(intmike_gain, "internal mike ADC input amp gain index used until the mixer exists, 0-0x3f, 0x33 = 0dB (default 0x33); negative = old hardcoded behaviour");
++
++static int cs_8409_intmike_adc_gain(struct hda_codec *codec, int volume)
++{
++        struct cs8409_apple_spec *spec = codec->spec;
++        int val;
++
++        // once the mixer control is there it is the authority on this amp
++        if (snd_hda_find_mixer_ctl(codec, "Internal Mic Capture Volume")) {
++                val = snd_hda_codec_amp_read(codec, spec->intmike_adc_nid, 0,
++                                             HDA_INPUT, 0);
++                if (val >= 0)
++                        return val & 0x7f;
++        }
++
++        if (intmike_gain >= 0)
++                return cs_8409_amp_in_clamp(codec, spec->intmike_adc_nid,
++                                            intmike_gain & 0x7f);
++
++        return volume;
++}
++
+ static void cs_8409_intmike_volume_setup(struct hda_codec *codec, int volume)
+ {
+         int retgain;
+         int newgain;
++        int gain;
+ 
+         struct cs8409_apple_spec *spec = codec->spec;
+ 
++        // the ADC gain comes from the mixer control (or intmike_gain before it
++        // exists), not from the hardcoded OSX constant - see above
++        gain = cs_8409_intmike_adc_gain(codec, volume);
++
+         // plausibly AppleHDAWidget::setWidgetAmplifierGain
+ 
+         //retgain = snd_hda_codec_read_check(codec, 0x22, 0, AC_VERB_GET_AMP_GAIN_MUTE, 0x00002000, 0x00000033, 0); // 0x022b2000
+@@ -296,7 +383,7 @@ static void cs_8409_intmike_volume_setup(struct hda_codec *codec, int volume)
+ //      snd_hda:     amp gain/mute 34 0x2000 index 0x00 left/right 1 left output/input 0 input
+ //      snd_hda:     amp gain/mute 34 0x0033 mute 0 gain 0x33 51
+ 
+-        newgain = (retgain & 0x80) | (volume & 0x7f) | 0x6000;
++        newgain = (retgain & 0x80) | (gain & 0x7f) | 0x6000;
+ 
+         snd_hda_codec_write(codec, spec->intmike_adc_nid, 0, AC_VERB_SET_AMP_GAIN_MUTE, newgain); // 0x02236027
+ 
+@@ -308,7 +395,7 @@ static void cs_8409_intmike_volume_setup(struct hda_codec *codec, int volume)
+ //      snd_hda:     amp gain/mute 34 0x0000 index 0x00 left/right 0 right output/input 0 input
+ //      snd_hda:     amp gain/mute 34 0x0033 mute 0 gain 0x33 51
+ 
+-        newgain = (retgain & 0x80) | (volume & 0x7f) | 0x5000;
++        newgain = (retgain & 0x80) | (gain & 0x7f) | 0x5000;
+ 
+         snd_hda_codec_write(codec, spec->intmike_adc_nid, 0, AC_VERB_SET_AMP_GAIN_MUTE, newgain); // 0x02235027
+ 
+@@ -352,7 +439,7 @@ static void cs_8409_intmike_volume_setup(struct hda_codec *codec, int volume)
+ //      snd_hda:     amp gain/mute 68 0x2000 index 0x00 left/right 1 left output/input 0 input
+ //      snd_hda:     amp gain/mute 68 0x0000 mute 0 gain 0x0 0
+ 
+-        newgain = (retgain & 0x80) | (volume & 0x7f) | 0x6000;
++        newgain = (retgain & 0x80) | (cs_8409_amp_in_clamp(codec, spec->intmike_nid, volume) & 0x7f) | 0x6000;
+ 
+         snd_hda_codec_write(codec, spec->intmike_nid, 0, AC_VERB_SET_AMP_GAIN_MUTE, newgain); // 0x04436000
+ 
+@@ -364,7 +451,7 @@ static void cs_8409_intmike_volume_setup(struct hda_codec *codec, int volume)
+ //      snd_hda:     amp gain/mute 68 0x0000 index 0x00 left/right 0 right output/input 0 input
+ //      snd_hda:     amp gain/mute 68 0x0000 mute 0 gain 0x0 0
+ 
+-        newgain = (retgain & 0x80) | (volume & 0x7f) | 0x5000;
++        newgain = (retgain & 0x80) | (cs_8409_amp_in_clamp(codec, spec->intmike_nid, volume) & 0x7f) | 0x5000;
+ 
+         snd_hda_codec_write(codec, spec->intmike_nid, 0, AC_VERB_SET_AMP_GAIN_MUTE, newgain); // 0x04435000
+ 
+@@ -4837,7 +4924,7 @@ static void cs_8409_plugin_event_continued(struct hda_codec *codec)
+                         {
+                                 if (spec->capturing)
+                                 {
+-                                        dev_info(hda_codec_dev(codec), "cs_8409_plugin_event_continued PLUGIN WHILE CAPTURING UNIMPLEMENTED!!\n");
++                                        dev_info(hda_codec_dev(codec), "cs_8409_plugin_event_continued PLUGIN WHILE CAPTURING - switching capture to headset mike\n");
+                                 }
+ 
+                                 // this is just calling this routine
+@@ -4869,6 +4956,13 @@ static void cs_8409_plugin_event_continued(struct hda_codec *codec)
+ 
+                                 cs_8409_headset_mike_buttons_enable(codec);
+ 
++                                // if a capture stream is open right now it is still bound to the
++                                // internal mike ADC which we just disabled above - move it onto the
++                                // headset mike so the held open stream keeps producing audio.
++                                // (no-op when not capturing - the next capture prepare picks the
++                                //  right ADC by itself)
++                                cs_8409_capture_follow_jack(codec);
++
+                         }
+                 }
+ 
+@@ -5703,6 +5797,17 @@ static void cs_8409_unplug_handle_disconnect(struct hda_codec *codec)
+ 
+         mycodec_info(codec, "cs_8409_unplug_handle_disconnect jack_present %d\n", spec->jack_present);
+ 
++        // if a capture stream is open right now it is still bound to the headset
++        // mike ADC 0x1a, whose cs42l83 has just been powered down above - move it
++        // back onto the internal mike so the held open stream keeps producing
++        // audio. Must be after the jack_present/have_mike resets just above so
++        // that the ADC selection sees the unplugged state.
++        // (no-op when not capturing)
++        if (spec->capturing)
++                dev_info(hda_codec_dev(codec), "cs_8409_unplug_handle_disconnect UNPLUG WHILE CAPTURING - switching capture to internal mike\n");
++
++        cs_8409_capture_follow_jack(codec);
++
+         mycodec_info(codec, "cs_8409_unplug_handle_disconnect end\n");
+ }
+ 
+@@ -6026,6 +6131,9 @@ static void cs_8409_enable_headset_mike_streaming(struct hda_codec *codec)
+         // unmute audio input
+         cs42l83_headset_mike_adc_unmutevol(codec, 1);
+ 
++        /* apply the earbud mike gain - must follow the unmute, which writes 0 dB */
++        cs42l83_headset_mike_adc_level(codec);
++
+ 
+         // for partial setup only
+         //cs42l83_headset_mike_pin_enable(codec);
+diff --git i/patch_cirrus/patch_cirrus_real84_i2c.h w/patch_cirrus/patch_cirrus_real84_i2c.h
+index 101f27c..5fc101c 100644
+--- i/patch_cirrus/patch_cirrus_real84_i2c.h
++++ w/patch_cirrus/patch_cirrus_real84_i2c.h
+@@ -1945,6 +1945,75 @@ static void cs42l83_hsbias_sense_on(struct hda_codec *codec)
+ }
+ 
+ 
++/*
++ * Headset (earbud) microphone gain.
++ *
++ * The CS42L83 is the only place any gain exists on this path: the HDA widget
++ * for the headset ADC (0x1a) has no Amp-In at all, so ALSA exposes no control
++ * for it and the user cannot turn it up. Left at the codec's reset values the
++ * earbud mike measured 35x quieter than the internal one -- peak 0.0253 versus
++ * 0.905, a 31 dB shortfall.
++ *
++ * Two stages, both digital, both inside the CS42L83, per the CS42L42 datasheet
++ * (DS1083F8 sections 4.1 and 7.11.3 -- the CS42L83 is the same silicon family
++ * and mainline's sound/soc/codecs/cs42l42.c agrees on the register map):
++ *
++ *   0x1D01 bit 0  ADC_DIG_BOOST  +20 dB, reset value 0 (off)
++ *   0x1D03        ADC_VOL        two's complement, 1.0 dB steps,
++ *                                +12 dB (0x0C) .. -96 dB (0xA0), 0x00 = 0 dB
++ *
++ * That is +32 dB available in total, which is almost exactly the measured
++ * shortfall -- the whole deficit is gain nobody was applying.
++ *
++ * Note macOS does NOT do this. davidjo's trace of
++ * AppleHDATDM_CS42L83::enableExtMicrophone (see the function below) shows OSX
++ * writing 0x1d03 = 0x00 and never touching 0x1d01, leaving both stages at
++ * reset. Its loudness comes from CoreAudio applying gain in software, which has
++ * no register equivalent. So we are deliberately going beyond what OSX writes,
++ * and that is correct rather than a workaround.
++ *
++ * Both stages are applied after the ADC, so they are pure digital gain: they
++ * lift the noise floor with the signal and do not improve signal-to-noise.
++ * Measured 28 dB SNR either way -- that figure belongs to the earbud mike and
++ * Apple's analogue path, not to these settings.
++ *
++ * Defaults are boost on plus the full +12 dB trim. With the owner speaking that
++ * put his voice at -21.7 dBFS with peaks at -8.9 dBFS and no clipped samples.
++ * Do not raise the trim further: at +32 dB a plosive close to the mike reaches
++ * 0 dBFS and hard-clips.
++ */
++static int headset_mike_boost = 1;
++module_param(headset_mike_boost, int, 0644);
++MODULE_PARM_DESC(headset_mike_boost, "headset mike ADC_DIG_BOOST: 1 = +20 dB (default), 0 = off");
++
++static int headset_mike_gain = 12;
++module_param(headset_mike_gain, int, 0644);
++MODULE_PARM_DESC(headset_mike_gain, "headset mike ADC_VOL in dB, -96..+12 (default +12)");
++
++/*
++ * Apply the two gain stages. Must run after cs42l83_headset_mike_adc_unmutevol(),
++ * which writes 0x1d03 = 0x00 (unmute at 0 dB) and would otherwise undo the trim.
++ */
++static void cs42l83_headset_mike_adc_level(struct hda_codec *codec)
++{
++	int gain = headset_mike_gain;
++	unsigned int vol;
++
++	if (gain > 12)
++		gain = 12;
++	if (gain < -96)
++		gain = -96;
++
++	/* two's complement in 1.0 dB steps; 0x00 is 0 dB */
++	vol = (unsigned int)(gain & 0xff);
++
++	cs_8409_vendor_i2cWrite(codec, 0x90, 0x1d01, headset_mike_boost ? 0x0001 : 0x0000, 1);
++	cs_8409_vendor_i2cWrite(codec, 0x90, 0x1d03, vol, 1);
++
++	codec_info(codec, "cs42l83_headset_mike_adc_level: boost %d gain %d dB (0x1d01 0x%02x 0x1d03 0x%02x)\n",
++		   headset_mike_boost, gain, headset_mike_boost ? 1 : 0, vol);
++}
++
+ static void cs42l83_headset_mike_adc_unmutevol(struct hda_codec *codec, int unmute)
+ {
+ 
+diff --git i/patch_cs8409.h.diff w/patch_cs8409.h.diff
+index aa6e981..ab9d60c 100644
+--- i/patch_cs8409.h.diff
++++ w/patch_cs8409.h.diff
+@@ -425,7 +425,7 @@
+  	unsigned int suspended:1;
+  	unsigned int paged:1;
+  	unsigned int last_page;
+-@@ -342,6 +368,129 @@
++@@ -342,6 +368,141 @@
+  	unsigned int init_done:1;
+  	unsigned int build_ctrl_done:1;
+  
+@@ -509,6 +509,18 @@
+ +       // set when capturing for plug/unplug events while capturing
+ +       int capturing;
+ +
+++       // saved capture stream parameters.
+++       // cs_8409_capture_pcm_prepare picks the capture ADC (headset mike 0x1a vs
+++       // internal mike intmike_adc_nid) once, when the stream starts. A headset
+++       // plug or unplug that happens while a capture stream is already open would
+++       // otherwise leave the stream bound to the now wrong ADC and the recording
+++       // goes silent (this was the "PLUGIN WHILE CAPTURING UNIMPLEMENTED" case).
+++       // We stash the prepare arguments here so cs_8409_capture_follow_jack can
+++       // redo that selection and setup from the plug/unplug handlers.
+++       struct hda_pcm_stream *capture_hinfo;
+++       unsigned int capture_stream_tag;
+++       unsigned int capture_format;
+++
+ +       // changing coding - OSX sets up the format on plugin
+ +       // then does some minimal setup when start play
+ +       // initial coding delayed any format setup till actually play
