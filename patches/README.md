@@ -74,11 +74,15 @@ erik2's original: the saved tile-group id buffer is 9 bytes like DRM's
 (`drm_tile_group.group_data[9]`); it was 8. erik2's own logging is still in
 this layer; leaning it is a later pass.
 
-**Equivalence:** core + layer is the same feature set as the default stack
+**Equivalence:** core + layer is the same feature set as the verbose stack
 (`imac5k-amdgpu-7.2.2.patch` + the five `5k-*.patch` increments), minus the
-core-side logging. The lean pair has not yet been booted in this form; the
-first lean pair (core + stitch, before the reboot/early-modeset/resync
-additions) was boot-tested 2026-09-06 from its own entry.
+core-side logging.
+
+**Status: promoted to the default on 2026-09-07** after two boots from its own
+entry (full-width password prompt, seam fine, straight Apple logo on the warm
+reboot out of it). The verbose module is kept as the `/Test - 5K-verbose-fallback`
+entry and as `amdgpu.ko.zst.prev-promote` beside the installed module; drop
+both once the lean default has run for a few days.
 
 ## Booting any build from its own entry: `scripts/imac-alt-entry`
 
