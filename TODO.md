@@ -382,32 +382,63 @@ sits at `0 [0%] [-51.00dB] [off]`. `Mic` and `Internal Mic` share
 `Capture exclusive group: 0`. PipeWire exposes exactly one input port,
 `analog-input-internal-mic`, marked *not available*, and no headset-mic port.
 
-**Why**, from the DKMS source (`/usr/src/snd_hda_macbookpro-0.2/patch_cirrus/`):
-the iMac input path is unfinished. `cirrus_apple.h` recognises our subsystem id
-(0x106b1000) well enough to set `fixup_found = 1`, but the iMac-specific verb
-handler is **commented out**:
+**Why — corrected 2026-09-07 after research; my first diagnosis was wrong.**
 
-```c
-/*
-if (codec->core.subsystem_id == 0x106b1000 || ... 0x106b0f00 || ... 0x106b0e00)
-{
-        codec->core.exec_verb = cs8409_cs42l83_imac_exec_verb;
-}
-*/
-```
+I originally blamed a commented-out `cs8409_cs42l83_imac_exec_verb` block in
+`cirrus_apple.h`. **That is a red herring** and the claim is retracted. Two
+reasons, both checked in the local tree:
 
-so iMacs run the MacBook path. The quirk table entries for iMac 18,2/18,3/19,1 are
-commented out too, and a half-finished `CS8409_CS42L83_IMAC_LINEIN_ADC_PIN_NID` is
-defined but unused. Mainline's `patch_cs8409.c` has no `0x106b` quirks at all.
+- The block (`cirrus_apple.h:2694-2705`) contains `else:` — a Python colon in C.
+  It has never compiled, so it was never "disabled support" that someone removed.
+- Read the function it would install (`cirrus_apple.h:2479-2545`): it only
+  intercepts `AC_VERB_GET_PIN_SENSE` to report jack presence on the line-in NID.
+  It configures no ADC and no capture path. Uncommenting it would not produce a
+  microphone.
 
-**Inline volume buttons do nothing** — no input device is registered for jack
-buttons (`/proc/bus/input/devices` has no cs8409/headset entry), and the driver's
-own `// if headphone has buttons or not` comment marks it as unimplemented.
+The iMac-specific microphone setup **is present and active** in this build, gated
+on our exact subsystem id (`cirrus_apple.h:2949-2952`): `intmike_nid = 0x45`,
+`intmike_adc_nid = 0x23`, with the DMIC2 register values for the iMac's swapped
+mic path. The boot log agrees — `autoconfig` finds `Internal Mic=0x45, Mic=0x3c`.
 
-Leads, in order: check whether a newer upstream `snd_hda_macbookpro` release
-finishes the iMac input path; otherwise the work is to implement
-`cs8409_cs42l83_imac_exec_verb` and the ADC/pin setup. This is real driver work,
-not configuration.
+**The actual cause is stated by the driver's own author** in
+`/usr/src/snd_hda_macbookpro-0.2/NOTES.md:13-14`:
+
+> Input nodes (internal mike, external mike, linein) now setup as per OSX ie
+> using OSX format. **NOT linked to any actual input streams.**
+
+So the pins are programmed to match what macOS does, but nothing wires an ADC to
+an ALSA capture stream. That is exactly the observed behaviour: pins configure,
+the capture switch will not latch, and recording returns digital silence. The
+README repeats the caveat ("microphone support may be incomplete").
+
+**Nobody has solved this.** Researched 2026-09-07:
+
+- `jackdanyell/imac18-3-cs8409-linux-audio` issue #2 (Aug 2026) is the *identical*
+  symptom on the same hardware, down to `Mic: Mono: Capture [off]`. No maintainer
+  reply, no diagnosis. v0.2 is still the latest release — what we run.
+- `davidjo/snd_hda_macbookpro` issues #130 (iMac 18,2 headset mic, Jul 2024) and
+  #113 (iMac 18,3, Dec 2023) are both open with zero replies.
+- Mainline `patch_cs8409.c` has never carried a `0x106b` quirk. A Launchpad report
+  (bug 2116889) claiming the fix landed in 6.16-rc6 is **wrong** — it quotes
+  symbols that exist only in davidjo's out-of-tree code, and quotes the MacBook
+  values at that.
+- The EndeavourOS thread marked "[SOLVED]" covers speakers and headphone output
+  only; its author lists the mics as untested.
+- The only real movement is davidjo master, Sep 2026: `ef27884` adds capture setup
+  when output-only headphones are plugged in, and `89b22ff` two days later walks
+  it back behind an opt-in `INTERNAL_MIKE_ONLY` build flag because it broke
+  headsets. MacBookPro14,3 tested, never on an iMac, and it addresses a different
+  case than ours.
+
+**Realistic assessment:** this is unwritten driver work — plumbing an ADC to a
+capture stream for the iMac's DMIC2 path — not a configuration mistake and not a
+patch waiting to be applied. Worth doing only as a deliberate project.
+
+**Inline buttons are likewise unwritten, not broken.** The CS42L83 button
+registers are documented in the source (`cirrus_apple.h:311-396`: press/release
+masks at 0x1b7a/0x1b7c), but `spec->have_buttons` is hardcoded to `0`
+(`cirrus_apple.h:2928`) and the tree contains no `input_report_key` and no
+`SND_JACK_BTN_*` anywhere — there is no input device to report to.
 
 ## SD card reader: broken, and not for the reason it first looks
 
