@@ -248,11 +248,14 @@ changes come through the root tile, and link-loss recovery uses HPD-RX (reason
 3), which stays untouched. Expected: one modeset per bring-up instead of four,
 fewer re-trains, and fewer chances for the genlock coin flip. Untested.
 
-**Lead, unrelated to the patch:** 4 s between "module verification failed"
-(2.05 s) and "unknown parameter" (6.01 s) — i.e. inside the kernel's module
-load, before amdgpu's init runs. Identical on both builds. That is most of the
-delay before 5K appears; the firmware framebuffer is what is on screen until
-then. Compare with the stock module before blaming the patch.
+**Measured, not the patch:** the 4 s between "module verification failed"
+(2.1 s) and "unknown parameter" (6.1 s) is the kernel's own module loading for
+a 30 MB module. On this machine xfs (8.7 MB) loads in 0.67 s, i915 (10.7 MB) in
+0.64 s, nouveau (7.4 MB) in 0.41 s — it scales with size, and the stock amdgpu
+is 33 MB (it carries 2.9 MB of BTF that ours lacks), so stock is no faster.
+Decompression is not it: an uncompressed xfs insmod takes the same 0.68 s. So
+5K cannot appear earlier than ~6.4 s with a modular amdgpu on this kernel; the
+firmware framebuffer covers the gap. Nothing to do in the patch.
 
 ### Half-dark panel at the disk-encryption password prompt
 
