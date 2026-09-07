@@ -339,6 +339,49 @@ session, so a GPU reset costs nothing. Capture the devcoredump at
 | HDMI audio | 7 devices present — untested |
 | Built-in Ethernet | Driver up, `NO-CARRIER` — untested (needs a cable) |
 | Bluetooth | Controller powered — pairing untested |
+| VA-API decode | Unverified — `vainfo`/`libva-utils` not installed |
+| Headphone jack | Jack-detect untested |
+
+Cleared 2026-09-07: the webcam needs no work — this model ships a standard USB
+UVC camera (`05ac:8511`, `/dev/video0`), not the Broadcom PCIe part that needs
+the reverse-engineered `facetimehd` driver. Nothing to patch.
+
+## Thermals and stress testing (Phase 2, measured 2026-09-07)
+
+Full run on the lean4 stack (srcversion 860A27A1), every load wrapped in a
+watchdog sampling CPU/GPU/fan every 5 s and aborting at CPU > 95 °C or
+GPU > 100 °C. Raw CSVs in `~/.cache/imac-phase2/`.
+
+**The CPU sits at its design limit under any real load.** 4 cores at 100 % hit
+97 °C in 30 s; at 60 % it hit 96 °C in 61 s; even 2 cores hit 96 °C by 171 s.
+Five runs were aborted by the watchdog. The ceiling is not mis-set — the SMC's
+own control target *is* ~95 °C, so the plan's limit sits exactly where the
+firmware deliberately holds the chip. **Consequence: a CPU endurance run cannot
+be performed inside that safety envelope.** Raising it (TJmax is 100 °C and the
+chip throttles itself) is a policy call for the owner, not a silent change.
+
+**The GPU is clean.** 25 minutes of 3D load total (5 min glmark2 @ 2560×1440,
+score 7979; 20 min @ 1920×1080 endurance): zero GPU resets, zero ring timeouts,
+zero amdgpu errors, and `sclk` pinned at 1096 MHz — its maximum — for *every*
+sample of both runs, so the GPU never thermally throttled. Endurance steady
+state: GPU 80 °C avg / 93 °C peak, CPU 84 °C avg, fan ~1791 RPM. Note the CPU
+rides at 83–88 °C during a pure GPU load; the two share one cooling path, which
+is why a combined burn trips the ceiling in 21 s. `power1_average` is not
+exposed by this ASIC, so GPU power draw could not be logged.
+
+**RAM** (`stress-ng --vm 2 --vm-bytes 8G --vm-method all`): passed, 0 failures.
+**Boot NVMe** (2 GB file, `--direct=1`): 3217 MB/s 1M read, 639 MB/s 1M write,
+165 060 IOPS 4k random read at qd32. **10GbE**: link up at 10000 Mb/s but no
+iperf3 peer answered, so throughput is untested. **VCE encode excluded** — it is
+the known hang and belongs to its own track with the safe protocol.
+
+Two notes for whoever repeats this. The original plan said "external boot SSD
+only, internal disks skipped", written when Omarchy booted from external media;
+the boot drive is now the internal NVMe, so that was benchmarked through a
+temporary file and the SATA disks carrying macOS filesystems were left alone.
+And Omarchy's `omarchy.idle` plugin was disabled for the duration
+(`omarchy-shell shell setPluginEnabled 'omarchy.idle' 'false'`) so the
+screensaver could not interfere, then re-enabled.
 
 ## Housekeeping
 
@@ -534,6 +577,9 @@ just doesn't track temperature closely, and 85–96 °C is uncomfortable but not
 dangerous on a chip that throttles at 100 °C. The daemon also caused audible
 noise during ordinary work. Removed; the SMC has fan control.
 
-If revisiting: establish the problem first — watch `sensors` and
-`/sys/devices/platform/applesmc.768/fan1_input` under sustained load for several
-minutes and confirm the fan genuinely stays pinned while temperatures climb.
+**Settled 2026-09-07 by measurement** (see "Thermals" below): the SMC ramps the
+fan on its own *and closes the loop* — under a 2-core burn it went 1200 → 1852 RPM
+over 76 s and then held the CPU flat at 93–95 °C instead of letting it climb. It
+is slow to start (25 s at minimum while the CPU is already at 94 °C) and never
+exceeded 1941 of 2700 RPM. So a daemon is not needed for safety; it would only
+buy the unused ~800 RPM at the cost of noise. Rejection stands.
