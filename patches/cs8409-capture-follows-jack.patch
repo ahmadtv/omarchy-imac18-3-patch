@@ -1,0 +1,128 @@
+iMac 18,3 CS8409/CS42L83: follow the jack for capture, so the mic switches with the headset.
+
+Applies to the snd_hda_macbookpro DKMS driver (davidjo/snd_hda_macbookpro),
+against the tree at commit be90113. Confirmed on hardware.
+
+Output already followed the jack -- plug a headset in and playback moves to
+the headphones, unplug and it returns to the speakers. Capture did not.
+With a headset plugged in, recording was completely silent: peak amplitude
+exactly 0.00000, while the stream itself ran and reported no error.
+
+The driver already knows how to set up both microphones. On plugin,
+cs_8409_pcm_capture_pre_prepare_hook calls cs_8409_headcapture_setup, which
+routes the headset mike (pin 0x3c) to the CS42L83 ADC 0x1a; with nothing
+plugged in it calls cs_8409_capture_setup, which brings up the internal mike
+on intmike_adc_nid (0x23 on the iMacs, 0x22 on the MacBook Pros). What it
+never did was move the capture PCM. hinfo->nid stays on intmike_adc_nid
+forever, so with a headset in, the driver configured the headset mike and
+then recorded from the internal mike's converter -- which nothing had
+switched on. Hence silence rather than the wrong microphone.
+
+Two things follow from that. cs_8409_store_stream_format caches the DMA
+stream tag against hinfo->nid, so the nid has to be corrected BEFORE the pre
+prepare hook runs, otherwise cs_8409_really_update_stream_format(0x1a, ...)
+inside the headset setup finds an empty cache. And the switch has to work in
+both directions: hinfo is persistent for the life of the codec, so switching
+only on plugin would strand the PCM on 0x1a and break the internal mike for
+every recording after the headset was unplugged once.
+
+So: in cs_8409_capture_pcm_prepare, pick the ADC that the hook is about to
+configure -- 0x1a when a mike-equipped headset is present, intmike_adc_nid
+otherwise -- and if it differs from the current one, cleanup the old stream
+and repoint hinfo->nid. The guard only ever moves between those two nids, so
+any other capture nid is left alone.
+
+The second hunk covers a headset that presents no mike (a 3 pole plug). That
+case fell through a "I think this is impossible" comment and set nothing up
+at all, which was the other way to get a silent capture while plugged in.
+Fall back to the internal mike there.
+
+Provenance: the ADC switch is the idea behind ExternPointer's
+davidjo/snd_hda_macbookpro PR #197 (open, unmerged), which switches
+hinfo->nid to 0x1a when jack_present && have_mike. That PR only switches one
+way, so once the headset came out the PCM stayed on 0x1a; the version here is
+bidirectional, which is what makes unplug work. The rest of PR #197 is not
+taken: its Makefile hunk turns on the MYSOUNDDEBUG build, its dkms.conf hunk
+is already in this tree, its second capture_pcm_prepare hunk edits
+patch_cirrus_apple.h (the pre-6.17 build variant -- this kernel builds
+cirrus_apple.h), and its capture gain change (0x27 -> 0x33) is unrelated to
+routing. Its cs_8409_linein_volume_setup fix, writing newgain instead of a
+hardcoded 0x000060a7, is a real bug but computes the same value at the
+volume actually used, so it is left out to keep this patch to one subject.
+
+ExternPointer's other patch from issue #29, which makes cs_8409_capture_setup
+run unconditionally, is deliberately NOT applied. It forces the internal mike
+on even with a headset plugged in, which is the opposite of switching, and it
+removes cs_8409_intmike_linein_resetup() from the unplug path -- the call
+that brings the internal mike back when the headset comes out.
+
+Verified on iMac18,3, kernel 7.1.9-arch1-2, codec subsystem id 0x106b1000,
+with a mike-equipped headset in the 3.5mm jack: capture DMA lands on ADC
+0x1a (Converter: stream=1), pin 0x3c reads Pin-ctls: 0x20: IN and the
+internal mike pin 0x45 reads 0x00, and recording gives peak 0.0253 where it
+was 0.00000. Output still moves to the headphones and back, the hardware
+alsa_output.pci-0000_00_1f.3.analog-stereo sink is unaffected, and repeated
+back-to-back captures work.
+
+diff --git a/patch_cirrus/cirrus_apple.h b/patch_cirrus/cirrus_apple.h
+index 7e9bcd1..a7d0f7f 100644
+--- a/patch_cirrus/cirrus_apple.h
++++ b/patch_cirrus/cirrus_apple.h
+@@ -792,6 +792,38 @@ static int cs_8409_capture_pcm_prepare(struct hda_pcm_stream *hinfo,
+         mycodec_info(codec, "cs_8409_capture_pcm_prepare: NID=0x%x, stream=0x%x, format=0x%x\n",
+                   hinfo->nid, stream_tag, format);
+ 
++	// Follow the jack: point the capture PCM at whichever ADC is actually going
++	// to be set up by the pre prepare hook below.
++	//   headset with a mike plugged in -> cs_8409_headcapture_setup routes the
++	//     headset mike (pin 0x3c) to the cs42l83 ADC 0x1a
++	//   nothing plugged in (or a 3 pole headset with no mike)
++	//     -> cs_8409_capture_setup brings up the internal mike on intmike_adc_nid
++	// This has to happen BEFORE the hook so that cs_8409_store_stream_format
++	// caches the DMA stream tag against the right nid - otherwise
++	// cs_8409_really_update_stream_format(0x1a,...) inside the headset setup
++	// finds an empty cache and we get a stream bound to one ADC while the other
++	// one is the one that was configured, ie silence.
++	// NOTE both directions are needed - hinfo is persistent for the life of the
++	// codec, so switching only on plugin would strand the PCM on 0x1a for every
++	// later recording once the headset had been unplugged.
++	{
++		hda_nid_t want_nid;
++
++		if (spec->jack_present && spec->have_mike)
++			want_nid = 0x1a;
++		else
++			want_nid = spec->intmike_adc_nid;
++
++		if (hinfo->nid != want_nid &&
++		    (hinfo->nid == 0x1a || hinfo->nid == spec->intmike_adc_nid))
++		{
++			dev_info(hda_codec_dev(codec),
++			         "cs_8409_capture_pcm_prepare: capture nid 0x%02x -> 0x%02x (jack %d mike %d)\n",
++			         hinfo->nid, want_nid, spec->jack_present, spec->have_mike);
++			snd_hda_codec_cleanup_stream(codec, hinfo->nid);
++			hinfo->nid = want_nid;
++		}
++	}
+ 
+         cs_8409_pcm_capture_pre_prepare_hook(hinfo, codec, stream_tag, format, substream,
+                               HDA_GEN_PCM_ACT_PREPARE);
+diff --git a/patch_cirrus/patch_cirrus_new84.h b/patch_cirrus/patch_cirrus_new84.h
+index a40a6f5..a974f43 100644
+--- a/patch_cirrus/patch_cirrus_new84.h
++++ b/patch_cirrus/patch_cirrus_new84.h
+@@ -1804,8 +1804,12 @@ static void cs_8409_pcm_capture_pre_prepare_hook(struct hda_pcm_stream *hinfo, s
+ 						spec->headset_capture_format_setup_needed = 0;
+ 					}
+ 				}
+-				// I think this is impossible - this would say we tried to capture
+-				// using a headset without mike
++				else
++				{
++					// headset/headphones with no mike (3 pole plug) - fall back to
++					// the internal mike so capture still works while plugged in
++					cs_8409_capture_setup(codec);
++				}
+ 				// NOTE - still not fixed linein/lineout working - this may need
+ 				// changing here
+ 			}

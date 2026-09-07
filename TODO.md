@@ -433,7 +433,53 @@ line-in — uncommenting `snd_hda_apply_pincfgs` would not touch the mic.
 `reg9_linein_dmic_mo` is genuinely never assigned but is read only in the
 line-in path.
 
-### Fixes available (published code, not ours to invent)
+### FIXED 2026-09-07: capture now follows the jack
+
+`patches/cs8409-capture-follows-jack.patch` (applied and running; module
+srcversion `F265460E88F25059306A73A`). **Measured with a headset plugged in:
+capture peak 0.0253, was 0.00000.** Verified at hardware level mid-capture, not
+just by amplitude: the DMA runs on ADC **0x1a** while 0x23 sits idle, headset pin
+`0x3c` reads `Pin-ctls: 0x20: IN` while internal pin `0x45` reads `0x00`, and the
+driver logs `capture nid 0x23 -> 0x1a (jack 1 mike 1)`.
+
+The fix: in `cs_8409_capture_pcm_prepare`, choose the ADC the pre-prepare hook is
+about to configure — `0x1a` when a mic-equipped headset is present, otherwise
+`intmike_adc_nid` — and move `hinfo->nid` there. Two details make it work.
+It must happen **before** the hook, because `cs_8409_store_stream_format` caches
+the DMA stream tag against `hinfo->nid` and the headset setup's
+`cs_8409_really_update_stream_format(0x1a, ...)` would otherwise find an empty
+cache. And it must switch **both ways**: `hinfo` is persistent for the life of
+the codec, so switching only on plug-in would strand the PCM on `0x1a` and break
+the internal mic for every recording after the first unplug.
+
+**Output switching already worked** and still does: `Active Port:
+analog-output-headphones` with the headset in, speakers marked *not available*.
+
+**Still to confirm physically:** the unplug direction. The headset was plugged in
+throughout the work, so "unplugged → internal mic" is inferred, not measured —
+though `jack_present` is cleared at `patch_cirrus_real84.h:5496` and `have_mike`
+at `:5695`, so the reverse switch is guaranteed to fire.
+
+**Two published patches were considered and rejected.** ExternPointer's (davidjo
+issue #29) makes the internal mic run unconditionally, which is the *opposite* of
+jack-following behaviour, and it deletes `cs_8409_intmike_linein_resetup()` from
+the unplug path — the very call that restores the internal mic when the headset
+comes out. PR #197 has the right idea but switches one way only, stranding the
+PCM on `0x1a` after the first unplug; its Makefile hunk also enables
+`MYSOUNDDEBUG`, and its `patch_cirrus_apple.h` hunk targets the wrong build
+variant (this kernel compiles `cirrus_apple.h`).
+
+### Separate pre-existing driver bug: WirePlumber drops the card
+
+The driver leaves `Internal Mic Boost Volume` at **3** when its ALSA range is
+`max=2`. WirePlumber then fails with `Failed to set volume of 'Internal Mic
+Boost': Invalid argument` and **drops the entire analog device**. Seen once
+during this work (triggered by unplugging during module probe, which also logs
+`headphone REMOVED 6 - UNIMPLEMENTED!!`). Clamping the control to 2 recovers it.
+**This will recur** after any internal-mic capture if WirePlumber restarts. Not
+fixed — needs a one-line clamp in the driver's control setup.
+
+### Fixes previously surveyed (superseded by the above)
 
 1. **ExternPointer's patch**, davidjo issue #29, 5 Sep 2026, tested on
    MacBookPro14,3 on this same kernel 7.1.9. Deletes the `have_mike` branch so
