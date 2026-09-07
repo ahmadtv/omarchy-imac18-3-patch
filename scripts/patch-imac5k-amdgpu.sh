@@ -55,7 +55,12 @@ BUILDLINK="/usr/lib/modules/${KREL}/build"
 say()  { printf '\033[1;33m==>\033[0m %s\n' "$*"; }
 die()  { printf '\033[1;31mERROR:\033[0m %s\n' "$*" >&2; exit 1; }
 
-[[ $EUID -eq 0 ]] || die "run with sudo: sudo $0 ${*:-}"
+# --build-only: run the whole build as a normal user and stop before
+# installing anything (prints the built module). Used to verify that the
+# installer reproduces a known-good module, e.g. after a patch update.
+BUILD_ONLY=0
+[[ "${1:-}" == "--build-only" ]] && BUILD_ONLY=1
+[[ $EUID -eq 0 || $BUILD_ONLY -eq 1 ]] || die "run with sudo: sudo $0 ${*:-}"
 
 # ── restore mode ───────────────────────────────────────────────────────────
 find_amdgpu() { find "$(dirname "$MODDIR")" -maxdepth 2 -name 'amdgpu.ko*' ! -name '*.stock-backup' 2>/dev/null | head -1; }
@@ -91,12 +96,32 @@ command -v gcc >/dev/null || die "install build tools first:  pacman -S --needed
 # ── fetch matching kernel source (for the driver .c files) ─────────────────
 mkdir -p "$WORK"; cd "$WORK"
 SRC="linux-${KVER}"
+STAMPDIR=".imac5k-applied"
+
+# A tree left by an earlier run is reusable only if exactly our patch set is
+# stamped on it. Anything else (a different stack, a tree patched by hand, an
+# older script without stamps) is discarded and extracted fresh -- a minute,
+# versus a failed apply.
+expected_stamps() {
+	local f
+	for f in "$PATCH_FILE" "${EXTRA_PATCHES[@]}"; do
+		printf '%s.%s\n' "$(basename "$f")" "$(sha256sum "$f" | cut -c1-16)"
+	done | sort
+}
+if [[ -d "$SRC" ]]; then
+	if [[ "$(ls "$SRC/$STAMPDIR" 2>/dev/null | sort)" != "$(expected_stamps)" ]]; then
+		say "existing ${SRC} tree does not carry this patch set — extracting fresh"
+		rm -rf "$SRC"
+	fi
+fi
 if [[ ! -d "$SRC" ]]; then
-	say "downloading kernel ${KVER} source"
 	MAJ="${KVER%%.*}"
-	curl -fL --retry 3 -o "${SRC}.tar.xz" \
-		"https://cdn.kernel.org/pub/linux/kernel/v${MAJ}.x/${SRC}.tar.xz" \
-		|| die "could not download ${SRC}.tar.xz from kernel.org"
+	if [[ ! -f "${SRC}.tar.xz" ]]; then
+		say "downloading kernel ${KVER} source"
+		curl -fL --retry 3 -o "${SRC}.tar.xz" \
+			"https://cdn.kernel.org/pub/linux/kernel/v${MAJ}.x/${SRC}.tar.xz" \
+			|| die "could not download ${SRC}.tar.xz from kernel.org"
+	fi
 	say "extracting"
 	tar -xf "${SRC}.tar.xz"
 fi
@@ -123,7 +148,6 @@ say "kernelrelease matches running kernel: $BUILTREL"
 # dry-run: once two patches touch the same context, reversing the first one no
 # longer matches and a correctly-patched tree looks unpatched. The stamp records
 # the patch content hash, so editing a patch re-applies it on the next run.
-STAMPDIR=".imac5k-applied"
 apply_patch() {          # apply_patch <file> <label>
 	local f="$1" label="$2" sum stamp
 	[[ -f "$f" ]] || die "patch not found: $f"
@@ -141,7 +165,7 @@ apply_patch() {          # apply_patch <file> <label>
 		touch "$stamp"
 		return
 	fi
-	die "${label} did not apply cleanly to ${KVER} source. It likely needs re-porting for this kernel. Nothing installed. If this tree was patched by an older version of this script, delete it and re-run:  rm -rf ${WORK}/${SRC}"
+	die "${label} did not apply cleanly to pristine ${KVER} source. It needs re-porting for this kernel. Nothing installed."
 }
 
 apply_patch "$PATCH_FILE" "iMac 5K patch stack"
@@ -163,6 +187,12 @@ BUILT="$(find drivers/gpu/drm/amd/amdgpu -name amdgpu.ko | head -1)"
 # quick sanity: vermagic must match the running kernel or it won't load
 VM="$(modinfo -F vermagic "$BUILT" 2>/dev/null | awk '{print $1}')"
 [[ "$VM" == "$KREL" ]] || say "WARNING: built vermagic '$VM' != running '$KREL' — module may need --force; test on the clone first."
+
+if [[ $BUILD_ONLY -eq 1 ]]; then
+	say "build-only: nothing installed. Module: $PWD/$BUILT"
+	say "srcversion $(modinfo -F srcversion "$BUILT")  vermagic $(modinfo -F vermagic "$BUILT")"
+	exit 0
+fi
 
 # ── install (compressed to match Arch's .ko.zst) with a stock backup ───────
 AMDKO="$(find_amdgpu)" || die "stock amdgpu module not found under $MODDIR"
