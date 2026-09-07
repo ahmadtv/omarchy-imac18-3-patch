@@ -363,82 +363,106 @@ loader's cmdline reaches the stub. Expected result: `amdgpu_bl0` appears under
 If it works, the change belongs in `/etc/default/limine` `KERNEL_CMDLINE[default]`
 and unlocks auto-brightness from the ALS.
 
-## Audio: headphones work, no microphone does
+## Audio: headphones work, microphone does not (root cause narrowed)
 
 Tested with Apple earbuds (3.5 mm headset with mic and inline buttons).
 
-**Headphone output works.** Jack detect fires (`Headphone Jack` = on), the driver
-logs `cs_8409_interrupt_action - headset detected` and
+**Headphone output path enables correctly — not confirmed audible.** Jack detect
+fires (`Headphone Jack` = on), the driver logs
+`cs_8409_interrupt_action - headset detected` and
 `cs_8409_headset_type_detect_event headset has mike!!`, and during playback pin
-node 0x2c goes `Pin-ctls: 0x00` → `0x40: OUT` while PipeWire switches to
-`Active Port: analog-output-headphones`. Verified by playing a tone and watching
-the pin.
+node 0x2c goes `Pin-ctls: 0x00` -> `0x40: OUT` while PipeWire switches to
+`Active Port: analog-output-headphones`. That proves the *pin widget* was
+enabled; nobody has yet listened to confirm the analog amp is driving the jack.
 
-**No microphone works — headset or internal.** Recording 3–4 s through both ALSA
-(`arecord -D hw:0,0 -f S32_LE`) and PipeWire (`parecord`) yields **peak 0.00000 of
-full scale**, exact digital silence. Both capture switches read `Capture [off]`
-and refuse to latch on: `amixer sset 'Mic' cap` does not stick, and `Internal Mic`
-sits at `0 [0%] [-51.00dB] [off]`. `Mic` and `Internal Mic` share
-`Capture exclusive group: 0`. PipeWire exposes exactly one input port,
-`analog-input-internal-mic`, marked *not available*, and no headset-mic port.
+**Two earlier claims here were wrong and are retracted:**
 
-**Why — corrected 2026-09-07 after research; my first diagnosis was wrong.**
+- "PipeWire exposes only `analog-input-internal-mic` and no headset-mic port" —
+  **false**. With the headset plugged there are two ports, and
+  `analog-input-mic: Microphone` is *available* and the *active* port.
+- "iMacs run the MacBook path because the iMac `exec_verb` is commented out" —
+  **false**. The live handler is the *common* `cs8409_cs42l83_exec_verb`,
+  assigned on the line immediately above that commented block. The block also
+  contains `else:` (a Python colon in C), so it never compiled and was never a
+  working path anyone disabled. The iMac input setup is largely **active**:
+  `cirrus_apple.h:2668, 2822, 2949, 3006, 3028` set `intmike_nid = 0x45`,
+  `intmike_adc_nid = 0x23`, `linein_nid = 0x44`, `reg9_intmike_dmic_mo = 0x0080`
+  (DMIC2), `reg82_intmike_dmic_scl = 0x0002`.
 
-I originally blamed a commented-out `cs8409_cs42l83_imac_exec_verb` block in
-`cirrus_apple.h`. **That is a red herring** and the claim is retracted. Two
-reasons, both checked in the local tree:
+**The mixer was also ruled out.** An adversarial review noted this session had
+left the capture controls at zero, which would explain silence on its own. The
+mixer was restored from `asound.state` to the as-booted values
+(`Internal Mic` 63/100 % **on**, boost 2 = +20 dB, `Digital` 60 = 0 dB) and
+capture re-tested: **still exact digital silence, peak 0.00000, RMS 0.000000.**
+So the fault is real and is not a muted control.
 
-- The block (`cirrus_apple.h:2694-2705`) contains `else:` — a Python colon in C.
-  It has never compiled, so it was never "disabled support" that someone removed.
-- Read the function it would install (`cirrus_apple.h:2479-2545`): it only
-  intercepts `AC_VERB_GET_PIN_SENSE` to report jack presence on the line-in NID.
-  It configures no ADC and no capture path. Uncommenting it would not produce a
-  microphone.
+### What is actually observed, from a known-good mixer
 
-The iMac-specific microphone setup **is present and active** in this build, gated
-on our exact subsystem id (`cirrus_apple.h:2949-2952`): `intmike_nid = 0x45`,
-`intmike_adc_nid = 0x23`, with the DMIC2 register values for the iMac's swapped
-mic path. The boot log agrees — `autoconfig` finds `Internal Mic=0x45, Mic=0x3c`.
+- The PCM capture stream **runs**: `/proc/asound/card0/pcm0c/sub0/status` reads
+  `state: RUNNING` with hardware parameters negotiated (S32_LE, 2 ch, 44100).
+- The ADC is **live and open**: node 0x23 (`intmike_adc_nid`) reports
+  `Amp-In vals: [0x3f 0x3f]` — maximum gain, unmuted — and
+  `Converter: stream=1, channel=0`.
+- The driver's own capture hook fires:
+  `cs_8409_capture_pcm_hook - performing UNSOL responses` on every recording.
+- Yet every sample is zero.
+- The `Capture Source` enum **silently rejects writes**: `amixer -c0 cset
+  numid=1 1` (select `Mic`) reads back `values=0`. This is the driver refusing,
+  not PipeWire reverting — the value does not change even momentarily. The `Mic`
+  capture switch likewise will not latch on.
 
-**The actual cause is stated by the driver's own author** in
-`/usr/src/snd_hda_macbookpro-0.2/NOTES.md:13-14`:
+So the stream and the ADC are both up, and no data arrives at them. The fault is
+**upstream of the ADC**, in the CS42L83 analog/DMIC front end, plus whatever
+makes the input enum unselectable.
 
-> Input nodes (internal mike, external mike, linein) now setup as per OSX ie
-> using OSX format. **NOT linked to any actual input streams.**
+### This is a port/debug problem, not a missing implementation
 
-So the pins are programmed to match what macOS does, but nothing wires an ADC to
-an ALSA capture stream. That is exactly the observed behaviour: pins configure,
-the capture switch will not latch, and recording returns digital silence. The
-README repeats the caveat ("microphone support may be incomplete").
+The MacBook path in this same driver **does** capture — the author records real
+audio and analyses it in Audacity in comments at `cirrus_apple.h:811-821`. The
+`NOTES.md:13-14` line "NOT linked to any actual input streams", which an earlier
+version of this file quoted as the root cause, is **stale prose predating that
+work**. Capture is wired end to end: `.build_pcms = cs_8409_apple_build_pcms`
+(`cirrus_apple.h:1772` -> `:1528`), and `cs_8409_apple_boot_init()` installs
+`cs_8409_capture_pcm_prepare` for `intmike_adc_nid` (`:1311-1327`) and for `0x1a`
+the headset mic (`:1329-1343`).
 
-**Nobody has solved this.** Researched 2026-09-07:
+Three concrete defects are the candidates, in priority order:
 
-- `jackdanyell/imac18-3-cs8409-linux-audio` issue #2 (Aug 2026) is the *identical*
-  symptom on the same hardware, down to `Mic: Mono: Capture [off]`. No maintainer
-  reply, no diagnosis. v0.2 is still the latest release — what we run.
-- `davidjo/snd_hda_macbookpro` issues #130 (iMac 18,2 headset mic, Jul 2024) and
-  #113 (iMac 18,3, Dec 2023) are both open with zero replies.
-- Mainline `patch_cs8409.c` has never carried a `0x106b` quirk. A Launchpad report
-  (bug 2116889) claiming the fix landed in 6.16-rc6 is **wrong** — it quotes
-  symbols that exist only in davidjo's out-of-tree code, and quotes the MacBook
-  values at that.
-- The EndeavourOS thread marked "[SOLVED]" covers speakers and headphone output
-  only; its author lists the mics as untested.
-- The only real movement is davidjo master, Sep 2026: `ef27884` adds capture setup
-  when output-only headphones are plugged in, and `89b22ff` two days later walks
-  it back behind an opt-in `INTERNAL_MIKE_ONLY` build flag because it broke
-  headsets. MacBookPro14,3 tested, never on an iMac, and it addresses a different
-  case than ours.
+1. **`snd_hda_apply_pincfgs(codec, imac_pincfgs)` is commented out**
+   (`cirrus_apple.h:2834-2836`) though the table exists at `:2330-2333`. If the
+   Apple BIOS pin defaults for 0x44/0x45 do not match the MacBook layout, the
+   parser builds no usable input path — which would explain both the silence and
+   the unselectable enum. Most likely cause, and iMac-specific.
+2. **The `have_mike == 0` headset case.** `have_mike` is set on headset detect
+   (`patch_cirrus_real84.h:5105,5114`) and gates `cs_8409_headcapture_setup`
+   (`patch_cirrus_new84.h:1792-1803`). If it never fires on iMac we fall into
+   `new84.h:1807`, the branch commented "I think this is impossible", and the
+   headset mic gets no setup at all.
+3. **`reg9_linein_dmic_mo`** is declared (`cirrus_apple.h:475`) and read
+   (`real84.h:4430`) but **never assigned for any model**, so that OR is a no-op.
 
-**Realistic assessment:** this is unwritten driver work — plumbing an ADC to a
-capture stream for the iMac's DMIC2 path — not a configuration mistake and not a
-patch waiting to be applied. Worth doing only as a deliberate project.
+Estimated 20-40 lines plus a debug cycle, using the `-DMYSOUNDDEBUGFULL` build
+(`Makefile:2`) to get `cs_8409_dump_auto_config` and the resulting `adc_nids`.
 
-**Inline buttons are likewise unwritten, not broken.** The CS42L83 button
-registers are documented in the source (`cirrus_apple.h:311-396`: press/release
-masks at 0x1b7a/0x1b7c), but `spec->have_buttons` is hardcoded to `0`
-(`cirrus_apple.h:2928`) and the tree contains no `input_report_key` and no
-`SND_JACK_BTN_*` anywhere — there is no input device to report to.
+### Nobody upstream has solved this
+
+- `jackdanyell/imac18-3-cs8409-linux-audio` issue #2 (Aug 2026) is the identical
+  symptom on identical hardware, including `Mic: Mono: Capture [off]`. No
+  maintainer reply. v0.2 is still the latest release — what we run.
+- `davidjo/snd_hda_macbookpro` #130 (iMac 18,2) and #113 (iMac 18,3): open,
+  unanswered since 2024 and 2023.
+- Mainline `patch_cs8409.c` has never carried a `0x106b` quirk. The Launchpad
+  claim (bug 2116889) that 6.16-rc6 fixed it is **wrong** — it quotes symbols
+  that exist only out-of-tree, and quotes the MacBook values.
+- Best lead to mine: davidjo `ef27884` (4 Sep 2026) added capture setup for the
+  output-only-headphones case and was **reverted** by `89b22ff` two days later
+  behind `-DINTERNAL_MIKE_ONLY` because it broke headsets with mics. That revert
+  reason may not apply to us, and it sits on the `have_mike` path above.
+
+**Inline buttons are unwritten, not broken.** The CS42L83 button registers are
+documented in the source (`cirrus_apple.h:311-396`), but `spec->have_buttons`
+(`:2928`) has no consumers and the tree contains no `input_report_key` and no
+`SND_JACK_BTN_*`.
 
 ## SD card reader: broken, and not for the reason it first looks
 
@@ -464,7 +488,14 @@ disable UHS/1.8 V signalling, and forcing a lower bus speed or 1-bit width.
 Everything was restored to stock (`debug_quirks=0`) afterwards. **Caution:**
 unbinding `sdhci-pci` via sysfs while a card is failing wedges the writing process
 in `D` state until the module is removed; use `modprobe -r` rather than
-bind/unbind.
+bind/unbind. That experiment also left this boot with a `W` kernel taint —
+`WARNING drivers/mmc/host/sdhci.c:1180 sdhci_prepare_dma`, preceded by
+`swiotlb ... overflow (mask 0)` because the DMA mask is not re-established after
+a remove/re-probe — plus a logged 122 s hung task. Both are harmless and clear on
+reboot; noted so nobody chases the WARN later as a real bug.
+
+**Never worked, so not a regression:** 96 boots in the journal, zero `mmcblk`
+devices ever, and only boot 0 had a card inserted.
 
 Cleared 2026-09-07: the webcam needs no work — this model ships a standard USB
 UVC camera (`05ac:8511`, `/dev/video0`), not the Broadcom PCIe part that needs
@@ -478,7 +509,8 @@ GPU > 100 °C. Raw CSVs in `~/.cache/imac-phase2/`.
 
 **The CPU sits at its design limit under any real load.** 4 cores at 100 % hit
 97 °C in 30 s; at 60 % it hit 96 °C in 61 s; even 2 cores hit 96 °C by 171 s.
-Five runs were aborted by the watchdog. The ceiling is not mis-set — the SMC's
+Five runs were aborted by the watchdog — three CPU runs plus the combined burn
+and the RAM run. The ceiling is not mis-set — the SMC's
 own control target *is* ~95 °C, so the plan's limit sits exactly where the
 firmware deliberately holds the chip. **Consequence: a CPU endurance run cannot
 be performed inside that safety envelope.** Raising it (TJmax is 100 °C and the
@@ -486,16 +518,22 @@ chip throttles itself) is a policy call for the owner, not a silent change.
 
 **The GPU is clean.** 25 minutes of 3D load total (5 min glmark2 @ 2560×1440,
 score 7979; 20 min @ 1920×1080 endurance): zero GPU resets, zero ring timeouts,
-zero amdgpu errors, and `sclk` pinned at 1096 MHz — its maximum — for *every*
-sample of both runs, so the GPU never thermally throttled. Endurance steady
-state: GPU 80 °C avg / 93 °C peak, CPU 84 °C avg, fan ~1791 RPM. Note the CPU
-rides at 83–88 °C during a pure GPU load; the two share one cooling path, which
+zero amdgpu errors. `sclk` held its 1096 MHz maximum for all 61 samples of the
+5-minute run and for 225 of 240 endurance samples (the other 15 dip to 976 or
+1068 MHz, clustered away from the temperature peaks and consistent with
+inter-scene idle rather than throttling). Endurance steady
+state: GPU 80 °C avg / **95 °C peak**, CPU 84 °C avg (peak 95), fan ~1790 RPM.
+Note the CPU
+averages 84 °C, peaking at 95 °C, during a pure GPU load; the two share one cooling path, which
 is why a combined burn trips the ceiling in 21 s. `power1_average` is not
 exposed by this ASIC, so GPU power draw could not be logged.
 
-**RAM** (`stress-ng --vm 2 --vm-bytes 8G --vm-method all`): passed, 0 failures.
+**RAM** (`stress-ng --vm 2 --vm-bytes 8G --vm-method all`): 0 failures, but the
+run was **aborted by the thermal watchdog at 25 s** of a planned 120 s, so this
+is a 25-second pass, not a memory soak.
 **Boot NVMe** (2 GB file, `--direct=1`): 3217 MB/s 1M read, 639 MB/s 1M write,
-165 060 IOPS 4k random read at qd32. **10GbE**: link up at 10000 Mb/s but no
+165 060 IOPS 4k random read at qd32. *No fio output was retained — re-run with
+`--output-format=json` saved before citing these.* **10GbE**: link up at 10000 Mb/s but no
 iperf3 peer answered, so throughput is untested. **VCE encode excluded** — it is
 the known hang and belongs to its own track with the safe protocol.
 
