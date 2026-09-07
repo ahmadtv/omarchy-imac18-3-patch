@@ -27,6 +27,13 @@ sudo ../scripts/patch-imac5k-amdgpu.sh --restore  # undo everything
 The script rebuilds **only the amdgpu module** for your *running* kernel and
 swaps it in (stock module backed up first). Re-run it after a kernel update.
 
+**Verified 2026-09-07:** run in `--build-only` mode from a pristine 7.1.9
+tarball in an empty directory, the installer produced a module with the same
+srcversion (`860A27A1C9C98B896C072A3`) as the one this machine boots — i.e. a
+fresh install reproduces the tested build exactly. The installer also resets a
+leftover source tree whose stamped patch set is not the current one, instead
+of failing to apply over it.
+
 Since 2026-09-07 the installer builds the **lean pair** (`imac5k-lean-core-7.2.x.patch`
 + `imac5k-stitch-layer-7.x.patch`). The verbose stack (full-stack patch + the
 five `5k-*.patch` increments) is still available: `IMAC5K_STACK=verbose sudo
