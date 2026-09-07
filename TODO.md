@@ -494,7 +494,46 @@ out.** The failure signature is identical every time: `Cmd: 0x0000333a`
 (CMD51 `SEND_SCR`) → `Timeout waiting for hardware interrupt` → `-110`. The host
 never raises Buffer Read Ready for the 8-byte SCR block.
 
-**What is left, and it needs a patch.** ChromeOS kernels carry a fixup for this
+**RULED OUT 2026-09-07: the ChromeOS register fixup is a no-op on this silicon.**
+It was ported cleanly (entirely inside `sdhci-pci-core.c` as an `.ops` override
+plus a `pci_ids` entry for `14e4:16bc`; no core `sdhci.c` change needed), built,
+and instrumented with a printk to read the registers back. The writes land, but
+they change nothing: `0x198` already had the `0x3000` bits clear, and `0x19c`
+already held exactly `0x00500000`, the value the fixup writes. Decisive, not
+merely untested. Source confirmed against the original LKML posting
+(https://lkml.iu.edu/1311.1/04270.html) and the ChromeOS commit
+(`fd1acc54a6b3db4e6503ccc4a9349f28b436031a`): `BCM57785_CR_MUX_CTL 0x198`,
+`BCM57785_CR_CLK_CTL 0x19c`, hooked at the top of `sdhci_set_clock`.
+
+**PCIe ASPM was eating the interrupts — and it explains a bad call I made.**
+Both functions of `04:00.x` had ASPM L1 enabled. Measured: with ASPM on, `mmc0`
+took **0 interrupts across 3 command timeouts in 30 s**; with it off, **459
+interrupts in 35 s**. Disabling it also moved the failure back from
+`Timeout waiting for hardware **cmd** interrupt` to the original data-phase
+CMD51 failure. So the "worse signature" recorded earlier today was an **ASPM
+artifact, not the card degrading** — that earlier note is retracted. The correct
+register is `CAP_EXP+0x10.W`, not the `0x50` in the community workaround:
+`sudo setpci -s 04:00.1 CAP_EXP+0x10.W=0x0040` (likewise `04:00.0`, `00:1c.1`).
+This is a runtime config-space write and **reverts on reboot**.
+
+**The true remaining fault: the DAT lines never deliver a byte.** At
+`Cmd: 0x0000333a` (ACMD51) the card *responds correctly* (`Resp[0]: 0x00000920`).
+`Present: 0x1fff0206` shows DAT inhibit, DAT line active and read transfer
+active; `Int stat` stays `0x00000000` and `Sys addr` never advances. The
+controller's own hardware data timeout (`Timeout: 0x0e`) never fires either — the
+data state machine is **wedged, not slow**. Reproduced identically across ADMA
+64-bit, ADMA 32-bit (pointer below 4 GiB), and plain SDMA, at 1-bit width and
+100 kHz.
+
+Command path works end to end; only the DAT path is dead, at any clock, any
+width, any DMA engine, with the card answering. That points at the DAT lines
+themselves — Apple's board wiring or mux between the BCM57765 and the slot —
+rather than anything a driver can configure. **Cheapest remaining test: a
+different card**, ideally a small non-UHS SDHC. A card that answers on the
+command line but never drives DAT is also a known failure mode of a worn card,
+so this specific card must be eliminated before blaming the board.
+
+Superseded (kept for the record): ChromeOS kernels carry a fixup for this
 exact device (`{ PCI_VENDOR_ID_BROADCOM, 0x16bc, ... }` →
 `SDHCI_QUIRK2_BROADCOM_REGISTERS`) that mainline has no equivalent of: an
 undocumented PHY/data-path setup re-applied on **every `set_clock`** — clear bits
