@@ -34,22 +34,29 @@ five `5k-*.patch` increments) is still available: `IMAC5K_STACK=verbose sudo
 
 ## Lean mainline candidate: `imac5k-lean-core-7.2.x.patch`
 
-A human-edited strip-down of taprobane99's base patch (no stitch layer), now
-carrying everything core-side that this machine runs:
-**+770 added lines / 13 files** (his base: +1631 / 12, and it lacks the last two items).
+The upstream candidate: taprobane99's mechanism, reworked. **+355 code / +89
+comment lines, 13 files** (his 7.2.3 base: +1631 / 12; the first lean pass was
++616 / +166). Same feature set as the machine runs:
 
-- the panel-ID quirk table, tile-peer wiring, `0x4F1` latch pulse, slave AUX
-  pre-detect, source-table revision, stream-enable latch, root EDID re-read
-  (his mechanism, logging and its plumbing removed, `dc/core/dc.c` no-op
-  refactor dropped);
-- **deterministic genlock**: both tile streams flagged before the master pick
-  (the earlier one-sided form was a coin flip per modeset);
-- **clean firmware handoff at reboot**: `amdgpu_pci_shutdown()` runs
-  `drm_atomic_helper_shutdown()` for a tiled panel with a going-down flag set
-  (wake paths and tiled re-detects become no-ops), the slave's stream-off
-  clears `0x4F1` / `0x310` / `0x10A`, and the root eDP panel is powered off
-  and held for T12. Without this Apple's firmware draws a skewed boot logo on
-  every warm reboot (patch-caused: a stock warm reboot is straight).
+- the panel-ID quirk, tile-peer wiring, `0x4F1` latch pulse, slave AUX
+  pre-detect, source-table revision, stream-enable latch, root EDID re-read;
+- **deterministic genlock** (both tile streams flagged before the master pick);
+- **clean firmware handoff at reboot** (atomic shutdown with the going-down
+  gate, slave registers cleared, root panel off for T12) — without it Apple's
+  firmware draws a skewed boot logo on every warm reboot;
+- **no self-inflicted re-detects**: HPD on a slave that already has its sink
+  is the pulse our own latch write causes, not a plug event.
+
+What the rework changed (lean4, 2026-09-07): the six per-role quirk flags are
+two (`apple_tiled_root` / `apple_tiled_slave`) and the nine `dc_link_*` inline
+helpers three; the two near-identical AUX-ready polls are one helper
+(`link_apple_5k_slave_aux_ready`); `dpcd_set_link_settings()` is back to its
+mainline shape with a per-write retry for the second tile instead of a
+rewritten function; the panel-latch/DPCD constants live in one header; the
+leftover `dmi.h`/`utsrelease.h`/`grph_object_id.h` includes from the logging
+era are gone; comments say why, once. Behaviour is unchanged except the
+link-config retry, which now retries each failed write rather than the whole
+block.
 
 Compiles clean; applies with zero rejects to pristine 7.1.9 and 7.2.2. Kernel
 exposes two proper tiles; the compositor stitches (Mutter today, KWin in
@@ -61,7 +68,7 @@ erik2's single-display stitch (`amdgpu.tiled_stitch`, slave tile non-desktop)
 as a layer that applies **on top of** the lean core, plus the two
 stitch-specific boot fixes: the early modeset before Plymouth (full-width
 disk-password prompt) and the settle-and-resync after tiled commits.
-**+1315 added lines / 10 files.** Needed only for compositors without tile
+**+1038 code / +276 comment lines, 10 files.** Needed only for compositors without tile
 support — Hyprland. Upstream will not take this layer.
 
 ```bash
