@@ -242,11 +242,16 @@ Writing the latch pulses the slave's own HPD line; the driver treats its own
 side effect as a plug event. Each round is one black blink, at the prompt and
 again at session start (18–21 s) and at session exit. Same on the lean pair.
 
-**Fix candidate (core, one hunk):** in `link_detect()`, ignore
-`DETECT_REASON_HPD` on a tiled slave link that already has its sink — real state
-changes come through the root tile, and link-loss recovery uses HPD-RX (reason
-3), which stays untouched. Expected: one modeset per bring-up instead of four,
-fewer re-trains, and fewer chances for the genlock coin flip. Untested.
+**Fixed 2026-09-07 (lean3, promoted):** `link_detect()` ignores
+`DETECT_REASON_HPD` on a tiled slave that already has its sink; HPD-RX is
+untouched. Re-detect rounds per boot 3 → 0, "enabling link 1 failed" gone,
+modesets before the LUKS prompt 5 → 3. What remains is not the driver's: the
+firmware→amdgpu takeover at 5.7 s (one frame), Plymouth's first two paints at
+7.6 s (plane updates, not modesets), the 1.4 s black between Plymouth quitting
+(15.8 s) and Hyprland's first modeset (17.3 s), and Hyprland's own config pass
+at 19.7 s (three commits in 3 ms: aquamarine test commit, real commit, 10-bit
+switch). A seamless splash→compositor handoff would be a Plymouth/Omarchy
+arrangement.
 
 **Measured, not the patch:** the 4 s between "module verification failed"
 (2.1 s) and "unknown parameter" (6.1 s) is the kernel's own module loading for
