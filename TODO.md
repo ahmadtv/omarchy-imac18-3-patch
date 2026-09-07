@@ -572,12 +572,41 @@ data state machine is **wedged, not slow**. Reproduced identically across ADMA
 100 kHz.
 
 Command path works end to end; only the DAT path is dead, at any clock, any
-width, any DMA engine, with the card answering. That points at the DAT lines
-themselves — Apple's board wiring or mux between the BCM57765 and the slot —
-rather than anything a driver can configure. **Cheapest remaining test: a
-different card**, ideally a small non-UHS SDHC. A card that answers on the
-command line but never drives DAT is also a known failure mode of a worn card,
-so this specific card must be eliminated before blaming the board.
+width, any DMA engine, with the card answering.
+
+**SECOND CARD TESTED 2026-09-07 — the diagnosis is confirmed and this is a
+hardware fault, not a software one.** A different 128 GB card was inserted. It
+got *further* than the first: it enumerated correctly and the kernel created a
+block device — `mmcblk0: mmc0:e624 SD128 119 GiB`, and `lsblk` showed
+`mmcblk0 119.1G`. So card identification, which reads the CID and CSD registers,
+completed and reported the right capacity.
+
+Then every data transfer failed:
+
+```
+dd if=/dev/mmcblk0 of=/dev/null bs=1M count=1   ->  0 bytes copied
+fdisk -l /dev/mmcblk0                           ->  Input/output error
+I/O error, dev mmcblk0, sector 0 op 0x0:(READ)
+mmcblk0: recovery failed!
+mmc0: tried to HW reset card, got error -2
+```
+
+**Zero bytes were ever read.** Two different cards, one of which the controller
+identifies perfectly, both fail the moment the DAT lines must carry data — with
+ASPM disabled, at 1-bit width, at 100 kHz, and across every DMA mode. The
+possibility that the first card was simply worn is now eliminated.
+
+**Conclusion: the SD reader's data path is broken at the hardware level** —
+Apple's board wiring or mux between the BCM57765 and the slot, or a fault in the
+reader itself. No driver change can fix this. Software avenues are exhausted:
+the ChromeOS register fixup is a proven no-op on this silicon, every relevant
+sdhci quirk combination has been tested, and disabling ASPM restored interrupt
+delivery without restoring data.
+
+**Status: closed as not fixable in software.** If anyone revisits it, the one
+untried angle is whether macOS can read a card in this slot on this specific
+machine — if macOS also cannot, the reader is simply dead and the row should be
+removed from the hardware table rather than tracked as a gap.
 
 Superseded (kept for the record): ChromeOS kernels carry a fixup for this
 exact device (`{ PCI_VENDOR_ID_BROADCOM, 0x16bc, ... }` →
