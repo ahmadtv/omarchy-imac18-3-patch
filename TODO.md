@@ -382,106 +382,84 @@ PWM pin, and the next lead becomes `applesmc`, not amdgpu. Do **not** set
 If it works, the change belongs in `/etc/default/limine` `KERNEL_CMDLINE[default]`
 and unlocks auto-brightness from the ALS.
 
-## Audio: headphones work, microphone does not (root cause narrowed)
+## Audio: the internal mic works; a plugged-in headset breaks it (SOLVED, root cause proven)
 
-Tested with Apple earbuds (3.5 mm headset with mic and inline buttons).
+**Confirmed on hardware 2026-09-07.** With nothing in the 3.5 mm jack, the
+internal microphone records normally: `arecord -D hw:0,0 -f S32_LE -d4` gives
+**peak 0.905, RMS 0.102** of full scale. Earlier reports in this file that "no
+microphone works" were taken with a headset plugged in the whole time, which is
+precisely the broken case.
 
-**Headphone output path enables correctly — not confirmed audible.** Jack detect
-fires (`Headphone Jack` = on), the driver logs
-`cs_8409_interrupt_action - headset detected` and
-`cs_8409_headset_type_detect_event headset has mike!!`, and during playback pin
-node 0x2c goes `Pin-ctls: 0x00` -> `0x40: OUT` while PipeWire switches to
-`Active Port: analog-output-headphones`. That proves the *pin widget* was
-enabled; nobody has yet listened to confirm the analog amp is driving the jack.
+Accurate state of this hardware:
 
-**Two earlier claims here were wrong and are retracted:**
+| Case | Works? |
+|---|---|
+| Internal mic, nothing plugged in | **Yes** |
+| Internal mic, headset plugged in | **No — silence** |
+| Headset mic | **No — no route exists** |
+| Headphone output | Pin path enables correctly; not yet confirmed audible |
+| Inline headset buttons | Unimplemented in the driver |
 
-- "PipeWire exposes only `analog-input-internal-mic` and no headset-mic port" —
-  **false**. With the headset plugged there are two ports, and
-  `analog-input-mic: Microphone` is *available* and the *active* port.
-- "iMacs run the MacBook path because the iMac `exec_verb` is commented out" —
-  **false**. The live handler is the *common* `cs8409_cs42l83_exec_verb`,
-  assigned on the line immediately above that commented block. The block also
-  contains `else:` (a Python colon in C), so it never compiled and was never a
-  working path anyone disabled. The iMac input setup is largely **active**:
-  `cirrus_apple.h:2668, 2822, 2949, 3006, 3028` set `intmike_nid = 0x45`,
-  `intmike_adc_nid = 0x23`, `linein_nid = 0x44`, `reg9_intmike_dmic_mo = 0x0080`
-  (DMIC2), `reg82_intmike_dmic_scl = 0x0002`.
+### Root cause, proven
 
-**The mixer was also ruled out.** An adversarial review noted this session had
-left the capture controls at zero, which would explain silence on its own. The
-mixer was restored from `asound.state` to the as-booted values
-(`Internal Mic` 63/100 % **on**, boost 2 = +20 dB, `Digital` 60 = 0 dB) and
-capture re-tested: **still exact digital silence, peak 0.00000, RMS 0.000000.**
-So the fault is real and is not a muted control.
+The driver has two bring-up routines. `cs_8409_pcm_capture_pre_prepare_hook`
+branches on `have_mike`: with a mic-equipped headset detected it calls
+`cs_8409_headcapture_setup` (headset mic → CS8409 ADC **0x1a**) and **never calls
+`cs_8409_capture_setup`**, which is what brings up the internal mic. But the PCM
+stream stays bound to `intmike_adc_nid` = **0x23**. So the driver configures one
+microphone and records from the other.
 
-### What is actually observed, from a known-good mixer
+Two hardware reads confirm it, taken during a failing capture with a headset in:
 
-- The PCM capture stream **runs**: `/proc/asound/card0/pcm0c/sub0/status` reads
-  `state: RUNNING` with hardware parameters negotiated (S32_LE, 2 ch, 44100).
-- The ADC is **live and open**: node 0x23 (`intmike_adc_nid`) reports
-  `Amp-In vals: [0x3f 0x3f]` — maximum gain, unmuted — and
-  `Converter: stream=1, channel=0`.
-- The driver's own capture hook fires:
-  `cs_8409_capture_pcm_hook - performing UNSOL responses` on every recording.
-- Yet every sample is zero.
-- The `Capture Source` enum **silently rejects writes**: `amixer -c0 cset
-  numid=1 1` (select `Mic`) reads back `values=0`. This is the driver refusing,
-  not PipeWire reverting — the value does not change even momentarily. The `Mic`
-  capture switch likewise will not latch on.
+- Vendor coef `0x82` read back **`0x0000`** — `DMIC2_SCL_EN (0x0002)` never set.
+  Only `cs_8409_intmike_stream_on_nid` sets it (`patch_cirrus_real84.h:481`).
+- Pin node `0x45` showed `Pin-ctls: 0x00` even mid-capture; that same function
+  writes `SET_PIN_WIDGET_CONTROL 0x20` to it (`real84.h:489`). It never ran.
+- Coef `0x09` = `0x0093`, so the iMac DMIC2 model config is **correct**. The
+  per-model setup is fine; the code path is simply skipped.
 
-So the stream and the ADC are both up, and no data arrives at them. The fault is
-**upstream of the ADC**, in the CS42L83 analog/DMIC front end, plus whatever
-makes the input enum unselectable.
+**The `Capture Source` enum being unwritable is a red herring, not our bug.**
+`mux_select()` in `sound/hda/codecs/generic.c` does
+`old_path = get_input_path(...); if (!old_path) return 0;` — a *silent* no-change
+return before `cur_mux` is assigned, so the write reports success and readback
+stays 0. `input_paths[0][0]` is NULL because node 0x23's connection list is
+`{0x45}` only: there is no route from headset-mic pin 0x3c to ADC 0x23. The imux
+advertises an item the hardware cannot reach.
 
-### This is a port/debug problem, not a missing implementation
+Candidate defects 1 and 3 from the earlier draft are **both wrong** and are
+retracted. The one published iMac18,3 alsa-info dump is byte-identical to this
+machine's pins, and `imac_pincfgs {0x44, 0x00800101}` only retasks the dead
+line-in — uncommenting `snd_hda_apply_pincfgs` would not touch the mic.
+`reg9_linein_dmic_mo` is genuinely never assigned but is read only in the
+line-in path.
 
-The MacBook path in this same driver **does** capture — the author records real
-audio and analyses it in Audacity in comments at `cirrus_apple.h:811-821`. The
-`NOTES.md:13-14` line "NOT linked to any actual input streams", which an earlier
-version of this file quoted as the root cause, is **stale prose predating that
-work**. Capture is wired end to end: `.build_pcms = cs_8409_apple_build_pcms`
-(`cirrus_apple.h:1772` -> `:1528`), and `cs_8409_apple_boot_init()` installs
-`cs_8409_capture_pcm_prepare` for `intmike_adc_nid` (`:1311-1327`) and for `0x1a`
-the headset mic (`:1329-1343`).
+### Fixes available (published code, not ours to invent)
 
-Three concrete defects are the candidates, in priority order:
+1. **ExternPointer's patch**, davidjo issue #29, 5 Sep 2026, tested on
+   MacBookPro14,3 on this same kernel 7.1.9. Deletes the `have_mike` branch so
+   `cs_8409_capture_setup()` runs unconditionally, always calls
+   `cs_8409_capture_cleanup`, drops `cs_8409_intmike_linein_disable()` and
+   `switch_input_src()` from three call sites, and guards every
+   `cs_8409_inputs_power_nids_off()` with `!spec->capturing`. Author reports the
+   internal mic then records with a mic-equipped headset plugged in, surviving
+   mid-capture plug and unplug. **Exactly our failure mode.**
+2. **`petershevchenko/imac-sound`** (pushed 2026-06-30) — a complete
+   iMac18,3-specific DKMS driver built on the **in-kernel**
+   `sound/hda/codecs/cirrus/` driver rather than the davidjo fork. Carries a real
+   `SND_PCI_QUIRK(0x106b, 0x1000, "iMac18,3", ...)`, an iMac pin table, a
+   CS42L83 init sequence with iMac tip-sense inversion, and keeps the internal
+   mic's DMIC clock on permanently with the comment that gating it per-capture
+   "relied on the capture hook, which PipeWire does not reliably invoke" — the
+   same diagnosis reached independently. Claims both mics work.
 
-1. **`snd_hda_apply_pincfgs(codec, imac_pincfgs)` is commented out**
-   (`cirrus_apple.h:2834-2836`) though the table exists at `:2330-2333`. If the
-   Apple BIOS pin defaults for 0x44/0x45 do not match the MacBook layout, the
-   parser builds no usable input path — which would explain both the silence and
-   the unselectable enum. Most likely cause, and iMac-specific.
-2. **The `have_mike == 0` headset case.** `have_mike` is set on headset detect
-   (`patch_cirrus_real84.h:5105,5114`) and gates `cs_8409_headcapture_setup`
-   (`patch_cirrus_new84.h:1792-1803`). If it never fires on iMac we fall into
-   `new84.h:1807`, the branch commented "I think this is impossible", and the
-   headset mic gets no setup at all.
-3. **`reg9_linein_dmic_mo`** is declared (`cirrus_apple.h:475`) and read
-   (`real84.h:4430`) but **never assigned for any model**, so that OR is a no-op.
+`davidjo` `ef27884`, the reverted commit, **does not help us**: its gate is
+`jack_present && !have_mike`, and ours is `have_mike == 1`.
 
-Estimated 20-40 lines plus a debug cycle, using the `-DMYSOUNDDEBUGFULL` build
-(`Makefile:2`) to get `cs_8409_dump_auto_config` and the resulting `adc_nids`.
+### Not a defect, but worth tuning
 
-### Nobody upstream has solved this
-
-- `jackdanyell/imac18-3-cs8409-linux-audio` issue #2 (Aug 2026) is the identical
-  symptom on identical hardware, including `Mic: Mono: Capture [off]`. No
-  maintainer reply. v0.2 is still the latest release — what we run.
-- `davidjo/snd_hda_macbookpro` #130 (iMac 18,2) and #113 (iMac 18,3): open,
-  unanswered since 2024 and 2023.
-- Mainline `patch_cs8409.c` has never carried a `0x106b` quirk. The Launchpad
-  claim (bug 2116889) that 6.16-rc6 fixed it is **wrong** — it quotes symbols
-  that exist only out-of-tree, and quotes the MacBook values.
-- Best lead to mine: davidjo `ef27884` (4 Sep 2026) added capture setup for the
-  output-only-headphones case and was **reverted** by `89b22ff` two days later
-  behind `-DINTERNAL_MIKE_ONLY` because it broke headsets with mics. That revert
-  reason may not apply to us, and it sits on the `have_mike` path above.
-
-**Inline buttons are unwritten, not broken.** The CS42L83 button registers are
-documented in the source (`cirrus_apple.h:311-396`), but `spec->have_buttons`
-(`:2928`) has no consumers and the tree contains no `input_report_key` and no
-`SND_JACK_BTN_*`.
+At `Internal Mic` 100 % plus +20 dB boost the capture peaks at 0.905, close to
+clipping on ordinary room noise. Whoever wires this up should set a sane default
+gain rather than leaving it at maximum.
 
 ## SD card reader: broken, and not for the reason it first looks
 
