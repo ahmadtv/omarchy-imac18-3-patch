@@ -28,6 +28,17 @@ still open — see the patch layout note above.
 
 ### Skewed Apple logo on warm reboot (cold boot is fine)
 
+**2026-09-07, control with `reboot=pci`:** booted the pre-logo-fix module
+(verbose core + stitch, no shutdown handling) with `reboot=pci` on the cmdline;
+warm reboot gave a **straight logo**. So a hard PCI reset alone hides the woken
+tile — which is why taprobane99 (who runs `reboot=pci`) never sees the skew.
+Cost: a visibly longer black gap before the Apple logo (fuller firmware
+re-init), and the ramoops region did not survive the reset (pstore empty
+afterwards), so crash/shutdown captures are lost. The driver-side handoff in
+the lean core gives the straight logo at normal reboot speed and keeps
+ramoops; it stays. Not adopting `reboot=pci`.
+
+
 The patch writes the panel-latch DPCD `0x4F1 = 1` to wake the slave tile in four
 code paths, and **never tears it down** — there is no shutdown hook, `.remove`,
 or suspend handler anywhere in the diff. The woken state therefore survives a
@@ -215,6 +226,33 @@ of the test entry, this proves it fired at the previous shutdown:
 ```
 journalctl -k -b -1 | grep 'stream-disable latch'
 ```
+
+### Blinks during the password prompt and at session start/exit (both builds)
+
+Real kernel timestamps (dmesg, not journalctl -o short-monotonic — the journal
+stamps early kernel lines with its own import time, ~14 s, which misled a first
+read): amdgpu module load starts at 2.05 s, its init only runs at 6.01 s, fb0 at
+6.38 s, the early modeset lands 1 ms later, cryptsetup prompt at 8.3 s. Between
+6.4 s and 8.3 s there are **four more modesets**, and the verbose log shows why,
+in strict order each time: stream enable → root latch + slave latch write (0x4F1)
+→ `detect connection link[1] reason=2` (DETECT_REASON_HPD) on the slave →
+connector-update → hotplug uevent → userspace re-modesets → atomic-disable /
+atomic-enable → re-train → latch write → HPD… Three rounds until it settles.
+Writing the latch pulses the slave's own HPD line; the driver treats its own
+side effect as a plug event. Each round is one black blink, at the prompt and
+again at session start (18–21 s) and at session exit. Same on the lean pair.
+
+**Fix candidate (core, one hunk):** in `link_detect()`, ignore
+`DETECT_REASON_HPD` on a tiled slave link that already has its sink — real state
+changes come through the root tile, and link-loss recovery uses HPD-RX (reason
+3), which stays untouched. Expected: one modeset per bring-up instead of four,
+fewer re-trains, and fewer chances for the genlock coin flip. Untested.
+
+**Lead, unrelated to the patch:** 4 s between "module verification failed"
+(2.05 s) and "unknown parameter" (6.01 s) — i.e. inside the kernel's module
+load, before amdgpu's init runs. Identical on both builds. That is most of the
+delay before 5K appears; the firmware framebuffer is what is on screen until
+then. Compare with the stock module before blaming the patch.
 
 ### Half-dark panel at the disk-encryption password prompt
 
