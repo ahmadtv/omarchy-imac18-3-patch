@@ -88,10 +88,20 @@ codec's interrupt handler, and was removed.
    path). Do not raise the trim further: at +32 dB a plosive close to the mike
    reaches 0 dBFS and clips.
 
+Correction, made after the first version of this patch was committed: the
+re-route originally also called cs_8409_headplay_setup(), mirroring the normal
+capture-start sequence which does reconfigure the playback/ASP path. Doing that
+from inside a jack event, with OBS holding the microphone open so the re-route
+fired on every plug, left the speakers silent. It is removed: this is a
+capture-side re-route and has no business reconfiguring playback, which the
+playback prepare path handles on its own.
+
 Known remaining issue: a loud high-pitched artefact is audible on the headset
 output at the moment of plug-in. Not diagnosed. Most likely HSBIAS being
 asserted abruptly or the output SRC not locking cleanly.
 
+diff --git i/patch_cirrus/cirrus_apple.h w/patch_cirrus/cirrus_apple.h
+index 7e9bcd1..cbae395 100644
 diff --git i/patch_cirrus/cirrus_apple.h w/patch_cirrus/cirrus_apple.h
 index 7e9bcd1..cbae395 100644
 --- i/patch_cirrus/cirrus_apple.h
@@ -173,7 +183,7 @@ index 7e9bcd1..cbae395 100644
          spec->headset_capture_format_setup_needed = 1;
  
 diff --git i/patch_cirrus/patch_cirrus_new84.h w/patch_cirrus/patch_cirrus_new84.h
-index a40a6f5..942442f 100644
+index a40a6f5..659fbb1 100644
 --- i/patch_cirrus/patch_cirrus_new84.h
 +++ w/patch_cirrus/patch_cirrus_new84.h
 @@ -1007,6 +1007,114 @@ static void switch_input_src(struct hda_codec *codec)
@@ -260,11 +270,11 @@ index a40a6f5..942442f 100644
 +		// headset mike - note the headphone/ASP setup is needed even when we
 +		// are only capturing (cs42l83_configure_serial_port sets the primary
 +		// ASP receive frequency), same as cs_8409_pcm_capture_pre_prepare_hook
-+		if (spec->headset_play_format_setup_needed)
-+		{
-+			cs_8409_headplay_setup(codec);
-+			spec->headset_play_format_setup_needed = 0;
-+		}
++		// NOTE: deliberately NOT calling cs_8409_headplay_setup() here.
++		// This is a capture-side re-route. Reconfiguring the playback/ASP
++		// path from inside a jack event left the speakers silent and produced
++		// a continuous high-pitched tone on the headset output. The playback
++		// setup belongs to the playback prepare path, which runs on its own.
 +		if (spec->headset_capture_format_setup_needed)
 +		{
 +			cs_8409_headcapture_setup(codec);
