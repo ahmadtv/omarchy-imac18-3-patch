@@ -111,6 +111,10 @@ repin_orphans() {
 		[[ -f $efi ]] || continue
 		name="$(basename "$efi" .efi)"; name="${name#omarchy_linux-}"
 		[[ $name == 5ktest ]] && continue      # imac-test-entry's slot, not ours
+		# Hand-added entries that carry their OWN cmdline must not be re-pinned
+		# here: add_entry below uses the DEFAULT cmdline, which would silently
+		# drop the extra parameter that is the whole point of the entry.
+		[[ $name == blnative ]] && continue     # /Test - native backlight
 		grep -qF "$(marker "$name")" "$CONF" && continue
 		say "re-pinning '$(marker "$name")' after the config regeneration"
 		add_entry "$name" "$efi" "$cmdline" "(re-pinned)"
