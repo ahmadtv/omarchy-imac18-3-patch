@@ -328,19 +328,112 @@ masks out VCE entirely — no hardware encode, hang impossible.
 session, so a GPU reset costs nothing. Capture the devcoredump at
 `/sys/class/drm/card*/device/devcoredump/data` on the first controlled repro.
 
-## Hardware not yet covered
+## Hardware: functional test results (2026-09-07, cable + SD card + headset supplied)
 
 | Item | State |
 |---|---|
-| Wi-Fi `clm_blob` | Confirmed missing (`no clm_blob available`) → limited channels |
-| Backlight | `acpi_video0` exists, pinned at max — needs a functional test |
-| Ambient light sensor | Exposed by applesmc (`light`) — unused; could drive auto-brightness |
-| SD card reader | `sdhci-pci` bound — untested (needs a card) |
-| HDMI audio | 7 devices present — untested |
-| Built-in Ethernet | Driver up, `NO-CARRIER` — untested (needs a cable) |
-| Bluetooth | Controller powered — pairing untested |
+| Built-in Ethernet | **WORKS** — link 1000 Mb/s full duplex, `ping -I enp4s0f0` to the gateway 0 % loss, 0.25 ms |
+| Bluetooth | **WORKS** — controller powered and pairable, an 8 s scan found 11 devices. Pairing itself still unexercised |
+| Headphone output | **WORKS** — see the audio section below |
+| Microphone (any) | **BROKEN** — see below. This corrects an earlier note that called the internal mic working |
+| SD card reader | **BROKEN** — see below |
+| Backlight | Root-caused, fix staged in a test entry — see below |
+| Wi-Fi `clm_blob` | **Not locally fixable.** `linux-firmware` ships no `brcmfmac43602-pcie.clm_blob` at all (it has them for 43012/43430/43455/4354/4356/43570/4373/54591). Regulatory domain is applied anyway (`country KW: DFS-ETSI`), so the loss is the firmware's internal channel table, not the regdb. The only known source is Apple's own driver blob — a real lead, but it means reading the macOS volume |
+| HDMI audio | **Cannot be tested on this machine.** The GPU exposes 7 HDMI PCMs but `/sys/class/drm/card1-HDMI*` is empty — there is no HDMI connector. The iMac's external video is Thunderbolt/DP. Remove this row unless a DP display is attached |
+| Ambient light sensor | Works, reads ~500 lux (`iio:device0`, `acpi-als`). Still drives nothing — blocked on backlight |
 | VA-API decode | Unverified — `vainfo`/`libva-utils` not installed |
-| Headphone jack | Jack-detect untested |
+
+## Backlight: root cause found
+
+`amdgpu ... [drm] Skipping amdgpu DM backlight registration` at boot. In
+`amdgpu_dm_register_backlight_device()` the driver returns early when
+`acpi_video_backlight_use_native()` is false, handing backlight to ACPI. But
+ACPI's is the broken one — the firmware bug is logged in the same boot:
+`ACPI: video: [Firmware Bug]: ACPI(GFX0) defines _DOD but not _DOS`. So
+`acpi_video0` accepts writes (0–79, values stick) while nothing owns the actual
+panel. The panel also has **no eDP backlight over AUX** — DPCD 0x701 `GENERAL_CAP_1`
+reads 0x00, so `backlight_adj` is not supported and the control must be the GPU's
+PWM.
+
+**Fix staged, not promoted:** boot entry `/Test - native backlight (brightness fix)`
+— the same kernel image as the default, hash-pinned identically, with
+`acpi_backlight=native` appended to the cmdline. Secure Boot is disabled, so the
+loader's cmdline reaches the stub. Expected result: `amdgpu_bl0` appears under
+`/sys/class/backlight/` and actually dims the panel. Default entry untouched.
+If it works, the change belongs in `/etc/default/limine` `KERNEL_CMDLINE[default]`
+and unlocks auto-brightness from the ALS.
+
+## Audio: headphones work, no microphone does
+
+Tested with Apple earbuds (3.5 mm headset with mic and inline buttons).
+
+**Headphone output works.** Jack detect fires (`Headphone Jack` = on), the driver
+logs `cs_8409_interrupt_action - headset detected` and
+`cs_8409_headset_type_detect_event headset has mike!!`, and during playback pin
+node 0x2c goes `Pin-ctls: 0x00` → `0x40: OUT` while PipeWire switches to
+`Active Port: analog-output-headphones`. Verified by playing a tone and watching
+the pin.
+
+**No microphone works — headset or internal.** Recording 3–4 s through both ALSA
+(`arecord -D hw:0,0 -f S32_LE`) and PipeWire (`parecord`) yields **peak 0.00000 of
+full scale**, exact digital silence. Both capture switches read `Capture [off]`
+and refuse to latch on: `amixer sset 'Mic' cap` does not stick, and `Internal Mic`
+sits at `0 [0%] [-51.00dB] [off]`. `Mic` and `Internal Mic` share
+`Capture exclusive group: 0`. PipeWire exposes exactly one input port,
+`analog-input-internal-mic`, marked *not available*, and no headset-mic port.
+
+**Why**, from the DKMS source (`/usr/src/snd_hda_macbookpro-0.2/patch_cirrus/`):
+the iMac input path is unfinished. `cirrus_apple.h` recognises our subsystem id
+(0x106b1000) well enough to set `fixup_found = 1`, but the iMac-specific verb
+handler is **commented out**:
+
+```c
+/*
+if (codec->core.subsystem_id == 0x106b1000 || ... 0x106b0f00 || ... 0x106b0e00)
+{
+        codec->core.exec_verb = cs8409_cs42l83_imac_exec_verb;
+}
+*/
+```
+
+so iMacs run the MacBook path. The quirk table entries for iMac 18,2/18,3/19,1 are
+commented out too, and a half-finished `CS8409_CS42L83_IMAC_LINEIN_ADC_PIN_NID` is
+defined but unused. Mainline's `patch_cs8409.c` has no `0x106b` quirks at all.
+
+**Inline volume buttons do nothing** — no input device is registered for jack
+buttons (`/proc/bus/input/devices` has no cs8409/headset entry), and the driver's
+own `// if headphone has buttons or not` comment marks it as unimplemented.
+
+Leads, in order: check whether a newer upstream `snd_hda_macbookpro` release
+finishes the iMac input path; otherwise the work is to implement
+`cs8409_cs42l83_imac_exec_verb` and the ADC/pin setup. This is real driver work,
+not configuration.
+
+## SD card reader: broken, and not for the reason it first looks
+
+With a card inserted the controller *does* see it and starts initialising, then
+fails: `mmc0: Skipping voltage switch` → `Timeout waiting for hardware interrupt`
+→ `ADMA Err: 0x00000001` → `mmc0: error -110 whilst initialising SD card`.
+
+The ADMA error is a red herring. Reloading `sdhci` with
+`debug_quirks=0x40` (`SDHCI_QUIRK_BROKEN_ADMA`) drops the controller to PIO —
+`mmc0: SDHCI controller on PCI [0000:04:00.1] using PIO` — and the card still
+fails identically. So it is **not a DMA problem**. The failing command is
+`Cmd: 0x0000333a`, i.e. CMD51 `SEND_SCR`, the first command that moves data over
+the DATA lines; the card answers commands (`Resp[0]: 0x00000920`) but the data
+phase times out. Combined with `Skipping voltage switch`, this looks like bus
+signalling/timing, not DMA.
+
+The kernel has **no quirk for this reader at all** — `grep -rn 57765` over
+`sdhci-pci*.c` returns nothing, and the device is
+`14e4:16bc BCM57765/57785 SDXC/MMC` on `sdhci-pci`.
+
+Next things to try (each a module reload, all reversible): `debug_quirks2` bits to
+disable UHS/1.8 V signalling, and forcing a lower bus speed or 1-bit width.
+Everything was restored to stock (`debug_quirks=0`) afterwards. **Caution:**
+unbinding `sdhci-pci` via sysfs while a card is failing wedges the writing process
+in `D` state until the module is removed; use `modprobe -r` rather than
+bind/unbind.
 
 Cleared 2026-09-07: the webcam needs no work — this model ships a standard USB
 UVC camera (`05ac:8511`, `/dev/video0`), not the Broadcom PCIe part that needs
