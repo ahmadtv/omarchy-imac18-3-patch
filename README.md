@@ -21,7 +21,7 @@ The patcher shows you what's applied, what isn't, and lets you pick. Nothing is 
 | | Problem on stock Linux | Status |
 |---|---|---|
 | 🖥️ **Display** | Panel is two 2560×2880 tiles; stock `amdgpu` drives one and stretches it. No native 5K. | ✅ Native 5120×2880, genlocked |
-| 🔊 **Speakers / mic** | CS8409 codec: kernel finds no speaker output at all. Silent machine. | ✅ Hardware-gated DKMS driver |
+| 🔊 **Speakers / mic** | CS8409 codec: kernel finds no speaker output at all. Silent machine. | ✅ DKMS driver + headset mic, auto in/out switching, inline buttons |
 | 🎚️ **Speaker tone** | Codec does zero DSP; macOS's warmth is all software EQ that Linux lacks. | ✅ PipeWire EQ profile |
 | 🎨 **Colour** | Wide-gamut (P3) panel rendered as sRGB — everything oversaturated. | ✅ Correct gamut mapping |
 | 😴 **Suspend** | Hard-hangs the machine every time (Apple firmware ACPI issue). | ⚠️ Masked off — see below |
@@ -68,6 +68,8 @@ git clone https://github.com/jackdanyell/imac18-3-cs8409-linux-audio
 cd imac18-3-cs8409-linux-audio && sudo ./install-imac18-3.sh && sudo reboot
 ```
 
+That gets you speakers. [`patches/cs8409-headset-capture.patch`](patches/cs8409-headset-capture.patch) adds the rest, all confirmed on hardware: the internal mic, the headset mic, automatic switching between them on plug/unplug (sound and mic follow the jack, like macOS), a usable capture level for both, and the three inline earbud buttons (play/pause, volume up, volume down). Apply it to the driver source before building.
+
 Then, optionally, the tone fix. The codec and amplifier do no processing whatsoever — macOS's fuller sound is entirely software EQ, which Linux has no equivalent of. [`configs/eq6.conf`](configs/eq6.conf) is a PipeWire filter-chain (bass shelf, corrective bands, and a clipping clamp) → copy to `~/.config/pipewire/filter-chain.conf.d/`.
 
 ---
@@ -96,10 +98,12 @@ sudo systemctl mask suspend.target hibernate.target hybrid-sleep.target suspend-
 
 ## 🚧 Known rough edges
 
-- 🌗 **Skewed Apple logo on *warm* reboots** with 5K active — root-caused: the display was never turned off at reboot, so Apple's firmware inherited a live dual-tile panel. **Fixed and shipped** (`patches/5k-latch-clear.patch`): the display is shut down properly at reboot, every register the stitch wrote into the second tile is undone, and the panel is powered off before the handoff. Confirmed on hardware with a captured teardown. A follow-up (`patches/5k-latch-clear-going-down-only.patch`) limits that teardown to the reboot path — as first shipped it also ran on every ordinary stream-off and caused repeated black flashes on the second tile (see below). What remains: the warm-reboot logo is straight but slightly soft, because the firmware draws it on one tile after the handoff; a cold boot is crisp. Cosmetic.
-- 🪞 **Sheared seam after login** — two causes, both **fixed and shipped**: the driver's master pick left the slave tile out of the hardware sync group (`patches/5k-genlock-deterministic.patch`), and on a full modeset the one-shot alignment ran before the re-trained tile was up (`patches/5k-genlock-settle-resync.patch`, a re-sync 250 ms after each tiled commit). The black flashes on the second tile after the disk password, and the brief skew as the session exits before a reboot, were a regression from the first logo fix (its latch clear ran on every stream-off and each write toggled the tile's hotplug line, forcing a full re-detect and re-train on the next commit — 30–40 re-detects per boot instead of 4). Fixed and shipped: `patches/5k-latch-clear-going-down-only.patch`.
+- 🌗 **Warm-reboot Apple logo is slightly soft** with 5K active. The skew and black flashes that used to appear here are fixed and shipped (clean firmware handoff at reboot, gated to the reboot path only). What remains is cosmetic: the firmware draws the logo on one tile after the handoff, so it's straight but soft; a cold boot is crisp.
 - 🎬 **Video encode (VCE)** hangs the GPU on certain transcodes, taking the session down. Under investigation.
 - 📺 **YouTube 4K is CPU-decoded** — Polaris has no VP9/AV1 silicon. Hardware limit, not fixable.
+- 🎧 **Faint high-pitched artefact on headset plug-in** — brief, at the moment of insertion. Not yet diagnosed.
+
+Details, root causes and rejected approaches for all of these are in [`TODO.md`](TODO.md).
 
 ---
 

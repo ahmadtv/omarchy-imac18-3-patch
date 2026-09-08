@@ -1,104 +1,74 @@
-# iMac 5K patch — how to use, and the rules that keep you safe
+# iMac 5K patch — how it works, and the rules that keep you safe
 
-`imac5k-amdgpu-7.2.2.patch` is the complete native-5K stack for the iMac18,3's
-internal tiled panel, as one diff against **kernel 7.2.2** source:
+The native-5K stack for the iMac18,3's internal tiled panel. Three layers, all
+inside the `amdgpu` module:
 
-1. **Second-tile wake** — DPCD `0x4F1` root-latch pulse that powers up the
+1. **Second-tile wake** — a DPCD `0x4F1` root-latch pulse that powers up the
    hidden right-tile DP link (community work from
    [drm/amd#4455](https://gitlab.freedesktop.org/drm/amd/-/issues/4455) /
-   [mcirsta/linux-imac-5k](https://github.com/mcirsta/linux-imac-5k), rebased
-   to 7.2.2 by taprobane99)
-2. **Single-display stitch** — presents both 2560×2880 tiles to userspace as
-   ONE 5120×2880 output, so Hyprland (or any compositor) works unmodified
-   (erik2's commits, hand-ported to 7.2.2)
-3. **Genlock fix** — enables the per-frame CRTC reset for the Apple tile pair
-   so both halves scan in lockstep (`sync_enabled=1`) and the panel is
-   seamless under motion (mr_projects; fills a standing mainline TODO)
+   [mcirsta/linux-imac-5k](https://github.com/mcirsta/linux-imac-5k), rebased to
+   7.2.x by taprobane99).
+2. **Single-display stitch** — presents both 2560×2880 tiles to userspace as ONE
+   5120×2880 output, so a compositor without tile support (Hyprland) works
+   unmodified (erik2's commits, hand-ported).
+3. **Genlock** — enables the per-frame CRTC reset for the Apple tile pair so both
+   halves scan in lockstep (`sync_enabled=1`) and the panel is seamless under
+   motion. This fills a standing mainline TODO and is this project's own
+   contribution.
+
+Plus a clean firmware handoff at reboot (atomic shutdown, slave registers
+cleared, panel powered off before the handoff) so Apple's firmware doesn't draw
+a skewed logo on a warm reboot.
 
 Boot parameter once installed: `amdgpu.tiled_stitch=1`
 
-## Installing without a second kernel
+## Install without a second kernel
 
 ```bash
-sudo ../scripts/patch-imac5k-amdgpu.sh          # build + swap the amdgpu module
+sudo ../scripts/patch-imac5k-amdgpu.sh            # build + swap the amdgpu module
 sudo ../scripts/patch-imac5k-amdgpu.sh --restore  # undo everything
 ```
 
 The script rebuilds **only the amdgpu module** for your *running* kernel and
-swaps it in (stock module backed up first). Re-run it after a kernel update.
+swaps it in, backing up the stock module first. It downloads the matching kernel
+source from kernel.org itself — you supply nothing. Re-run it after a kernel
+update (a new kernel reverts you to stock).
 
-**Verified 2026-09-07:** run in `--build-only` mode from a pristine 7.1.9
-tarball in an empty directory, the installer produced a module with the same
-srcversion (`860A27A1C9C98B896C072A3`) as the one this machine boots — i.e. a
-fresh install reproduces the tested build exactly. The installer also resets a
-leftover source tree whose stamped patch set is not the current one, instead
-of failing to apply over it.
+The build is reproducible: run in `--build-only` mode from a pristine tarball in
+an empty directory, it produces a module with the same srcversion as a normal
+install.
 
-Since 2026-09-07 the installer builds the **lean pair** (`imac5k-lean-core-7.2.x.patch`
-+ `imac5k-stitch-layer-7.x.patch`). The verbose stack (full-stack patch + the
-five `5k-*.patch` increments) is still available: `IMAC5K_STACK=verbose sudo
-../scripts/patch-imac5k-amdgpu.sh`.
+## The patch files
 
-## Lean mainline candidate: `imac5k-lean-core-7.2.x.patch`
+Two forms of the same fix ship here; the installer builds the **lean pair** by
+default.
 
-The upstream candidate: taprobane99's mechanism, reworked. **+355 code / +89
-comment lines, 13 files** (his 7.2.3 base: +1631 / 12; the first lean pass was
-+616 / +166). Same feature set as the machine runs:
+- **`imac5k-lean-core-7.2.x.patch`** — the mainline candidate: taprobane99's
+  mechanism reworked down to the panel-ID quirk, tile-peer wiring, `0x4F1` latch
+  pulse, slave AUX pre-detect, source-table revision, stream-enable latch, root
+  EDID re-read, deterministic genlock, the reboot handoff, and a fix so the
+  driver's own latch write is not mistaken for a hotplug (no self-inflicted
+  re-detects). Compiles clean and applies with zero rejects to pristine 7.1.9 and
+  7.2.2. Posted upstream in drm/amd#4455. With this alone the kernel exposes two
+  proper tiles and a tile-aware compositor (Mutter, KWin) stitches them.
 
-- the panel-ID quirk, tile-peer wiring, `0x4F1` latch pulse, slave AUX
-  pre-detect, source-table revision, stream-enable latch, root EDID re-read;
-- **deterministic genlock** (both tile streams flagged before the master pick);
-- **clean firmware handoff at reboot** (atomic shutdown with the going-down
-  gate, slave registers cleared, root panel off for T12) — without it Apple's
-  firmware draws a skewed boot logo on every warm reboot;
-- **no self-inflicted re-detects**: HPD on a slave that already has its sink
-  is the pulse our own latch write causes, not a plug event.
-
-What the rework changed (lean4, 2026-09-07): the six per-role quirk flags are
-two (`apple_tiled_root` / `apple_tiled_slave`) and the nine `dc_link_*` inline
-helpers three; the two near-identical AUX-ready polls are one helper
-(`link_apple_5k_slave_aux_ready`); `dpcd_set_link_settings()` is back to its
-mainline shape with a per-write retry for the second tile instead of a
-rewritten function; the panel-latch/DPCD constants live in one header; the
-leftover `dmi.h`/`utsrelease.h`/`grph_object_id.h` includes from the logging
-era are gone; comments say why, once. Behaviour is unchanged except the
-link-config retry, which now retries each failed write rather than the whole
-block.
-
-Compiles clean; applies with zero rejects to pristine 7.1.9 and 7.2.2. Kernel
-exposes two proper tiles; the compositor stitches (Mutter today, KWin in
-progress). Posted upstream in drm/amd#4455.
-
-## Stitch layer on top of it: `imac5k-stitch-layer-7.x.patch`
-
-erik2's single-display stitch (`amdgpu.tiled_stitch`, slave tile non-desktop)
-as a layer that applies **on top of** the lean core, plus the two
-stitch-specific boot fixes: the early modeset before Plymouth (full-width
-disk-password prompt) and the settle-and-resync after tiled commits.
-**+1038 code / +276 comment lines, 10 files.** Needed only for compositors without tile
-support — Hyprland. Upstream will not take this layer.
+- **`imac5k-stitch-layer-7.x.patch`** — erik2's single-display stitch
+  (`amdgpu.tiled_stitch`, slave tile marked non-desktop) as a layer **on top of**
+  the lean core, plus the two stitch-specific boot fixes (an early modeset before
+  Plymouth for a full-width disk-password prompt, and a settle-and-resync after
+  tiled commits). Needed only for compositors without tile support, i.e.
+  Hyprland. Upstream will not take this layer.
 
 ```bash
 patch -p1 < patches/imac5k-lean-core-7.2.x.patch     # core (+ genlock + reboot handoff)
 patch -p1 < patches/imac5k-stitch-layer-7.x.patch    # Hyprland stitch (+ early modeset, resync)
 ```
 
-Applies cleanly on pristine 7.1.9 and 7.2.2 after the core. One fix over
-erik2's original: the saved tile-group id buffer is 9 bytes like DRM's
-(`drm_tile_group.group_data[9]`); it was 8. erik2's own logging is still in
-this layer; leaning it is a later pass.
+The older monolithic **`imac5k-amdgpu-7.2.2.patch`** plus the five `5k-*.patch`
+increments are the same feature set with the core-side debug logging left in.
+Select it with `IMAC5K_STACK=verbose sudo ../scripts/patch-imac5k-amdgpu.sh`.
 
-**Equivalence:** core + layer is the same feature set as the verbose stack
-(`imac5k-amdgpu-7.2.2.patch` + the five `5k-*.patch` increments), minus the
-core-side logging.
-
-**Status: lean4 is the default since 2026-09-07** (boot-tested from its own
-entry first: 3 modesets before the LUKS prompt, 0 re-detect rounds, no link
-failures, straight logo on warm reboot). The verbose module is kept as the
-`/Test - 5K-verbose-fallback` entry and as `amdgpu.ko.zst.prev-promote`
-beside the installed module; drop both once lean4 has run for a few days.
-
-## Booting any build from its own entry: `scripts/imac-alt-entry`
+## Booting a build from its own entry: `scripts/imac-alt-entry`
 
 ```bash
 sudo scripts/imac-alt-entry add  5K-lean path/to/amdgpu.ko   # new UKI + Limine entry
@@ -106,41 +76,37 @@ sudo scripts/imac-alt-entry list
 sudo scripts/imac-alt-entry drop 5K-lean
 ```
 
-Builds a separate UKI from a private copy of the running kernel's module tree
-(`mkinitcpio --moduleroot`), so `/usr/lib/modules`, the default UKI and any
-other test entry are untouched. Refuses a module whose vermagic is not the
-running kernel, and verifies the module inside the built UKI is the one given.
-The entry is hash-pinned like the others.
+Builds a separate UKI from a private copy of the running kernel's module tree, so
+`/usr/lib/modules`, the default UKI and any other entry are untouched. Refuses a
+module whose vermagic is not the running kernel, and verifies the module inside
+the built UKI is the one given. Test a new build here first — the default entry
+stays known-good.
 
 ## The rules
 
-- **RULE 1 — version gate.** The patch is verified against kernel **7.1.x and 7.2.x source** (same diff applies to both).
-  The script refuses to run on any other series, because the amdgpu display
-  code changes between kernel versions and a mis-applied patch means a broken
-  GPU module. When Arch/Omarchy moves to 7.3+, the patch must be **re-ported
-  by a human first** — re-running the script is not enough. (Check
-  `uname -r` starts with 7.1 or 7.2 before expecting anything.)
+- **Version gate.** The patch is verified against kernel **7.1.x and 7.2.x
+  source** (the same diff applies to both). The script refuses any other series,
+  because the amdgpu display code changes between versions and a mis-applied
+  patch means a broken GPU module. Moving to 7.3+ needs a human re-port first —
+  re-running the script is not enough.
 
-- **RULE 2 — test on the USB clone first.** Never run this for the first time
-  on your only install. The project keeps a full bootable clone on a USB
-  stick for exactly this. If a build ever produces a bad module you get
-  software rendering until `--restore` — recoverable, but not fun to discover
-  on your daily machine.
+- **Try a new build safely.** A new amdgpu build never has to replace the working
+  one to be tested: boot it from its own `imac-alt-entry`, or keep a spare
+  bootable install to try it on first. A bad module means software rendering
+  until `--restore` — recoverable, but not what you want to discover on your only
+  machine.
 
-- **RULE 3 — the vermagic must match.** The script verifies the built
-  kernelrelease equals `uname -r` and refuses otherwise. If it ever refuses,
-  that's it working as designed — don't force it.
+- **The vermagic must match.** The script verifies the built kernelrelease equals
+  `uname -r` and refuses otherwise. If it refuses, that is it working as designed.
 
-- **RULE 4 — this is a bridge, not the destination.** The endgame is
-  upstreaming (tracked in drm/amd#4455, where the iMac18,3 result and the
-  genlock fix have been posted). Once merged into mainline, stock kernels
-  will do all of this and these patches retire.
+- **This is a bridge, not the destination.** The endgame is upstreaming (tracked
+  in drm/amd#4455). Once merged, stock kernels do all of this and these patches
+  retire.
 
-## Known good configuration (verified 2026-09-02, iMac18,3)
+## Known-good configuration
 
-- Kernel 7.2.2 + this patch, `amdgpu.tiled_stitch=1`, Omarchy/Hyprland
-- Result: genuine 5120×2880, both tiles HBR2×4, 10-bpc, `sync_enabled=1`,
-  seamless under motion, zero GPU faults
-- Expected quirks: GNOME-keyring popup on a cloned system (benign), YouTube
-  4K is CPU-decoded (Polaris has no VP9/AV1 hardware — a silicon limit,
-  unrelated to this patch)
+- Kernel 7.2.2 + this patch, `amdgpu.tiled_stitch=1`, Omarchy/Hyprland.
+- Result: genuine 5120×2880, both tiles HBR2×4, 10-bpc, `sync_enabled=1`, seamless
+  under motion, zero GPU faults.
+- Silicon limit, unrelated to this patch: YouTube 4K is CPU-decoded (Polaris has
+  no VP9/AV1 hardware).

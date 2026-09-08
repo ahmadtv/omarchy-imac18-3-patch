@@ -79,8 +79,8 @@ stream setup, and the headset remote buttons. All confirmed on hardware.
    never touching 0x1d01. Its loudness comes from CoreAudio applying gain in
    software, which has no register equivalent. Going beyond what OSX writes is
    therefore correct here, not a workaround.
-   Defaults: boost on plus the full +12 dB trim. With the owner speaking that
-   put his voice at -21.7 dBFS with peaks at -8.9 dBFS and no clipped samples.
+   Defaults: boost on plus the full +12 dB trim. In testing a normal speaking
+   voice sat at -21.7 dBFS with peaks at -8.9 dBFS and no clipped samples.
    Both stages are applied after the ADC, so this is pure digital gain -- it
    lifts the noise floor with the signal and does not improve SNR (measured
    28 dB either way, which belongs to the earbud mike and Apple's analogue
@@ -1110,8 +1110,8 @@ index 101f27c..56dae01 100644
 + * Measured 28 dB SNR either way -- that figure belongs to the earbud mike and
 + * Apple's analogue path, not to these settings.
 + *
-+ * Defaults are boost on plus the full +12 dB trim. With the owner speaking that
-+ * put his voice at -21.7 dBFS with peaks at -8.9 dBFS and no clipped samples.
++ * Defaults are boost on plus the full +12 dB trim. In testing a normal speaking
++ * voice sat at -21.7 dBFS with peaks at -8.9 dBFS and no clipped samples.
 + * Do not raise the trim further: at +32 dB a plosive close to the mike reaches
 + * 0 dBFS and hard-clips.
 + */
