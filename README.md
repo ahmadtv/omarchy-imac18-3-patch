@@ -21,11 +21,11 @@ The patcher shows you what's applied, what isn't, and lets you pick. Nothing is 
 | | Problem on stock Linux | Status |
 |---|---|---|
 | 🖥️ **Display** | Panel is two 2560×2880 tiles; stock `amdgpu` drives one and stretches it. No native 5K. | ✅ Native 5120×2880, genlocked |
-| 🔊 **Speakers / mic** | CS8409 codec: kernel finds no speaker output at all. Silent machine. | ✅ DKMS driver + headset mic, auto in/out switching, inline buttons |
+| 🔊 **Speakers / mic** | CS8409 codec: kernel finds no speaker output at all. Silent machine. | ✅ DKMS driver + headset mic, auto in/out switching, inline buttons — incl. **Apple EarPods** |
 | 🎚️ **Speaker tone** | Codec does zero DSP; macOS's warmth is all software EQ that Linux lacks. | ✅ PipeWire EQ profile |
 | 🎨 **Colour** | Wide-gamut (P3) panel rendered as sRGB — everything oversaturated. | ✅ Correct gamut mapping |
 | 😴 **Suspend** | Hard-hangs the machine every time (Apple firmware ACPI issue). | ⚠️ Masked off — see below |
-| ⚡ **Thunderbolt / 10GbE** | Adapter detected but never authorised. | ✅ Persistent enrolment |
+| ⚡ **Thunderbolt / 10GbE** | Adapter detected but never authorised. | ✅ Persistent enrolment (tested with an **OWC Thunderbolt 3** dock + 10GbE) |
 
 ---
 
@@ -69,7 +69,7 @@ The CS8409 codec needs an out-of-tree driver — the in-kernel one doesn't recog
 
 It clones the upstream driver ([jackdanyell](https://github.com/jackdanyell/imac18-3-cs8409-linux-audio)) at the pinned, verified commit, applies [`patches/cs8409-headset-capture.patch`](patches/cs8409-headset-capture.patch) on top, and DKMS-builds it — the same "pristine upstream + our diff" model as the 5K side. Reboot after.
 
-That gets you: speakers, the internal mic, the headset mic, automatic switching between them on plug/unplug (sound and mic follow the jack, like macOS), a usable capture level for both, and the three inline earbud buttons (play/pause, volume up, volume down) — all confirmed on hardware.
+That gets you: speakers, the internal mic, the headset mic, automatic switching between them on plug/unplug (sound and mic follow the jack, like macOS), a usable capture level for both, and the three inline earbud buttons (play/pause, volume up, volume down) — all confirmed on hardware with **Apple EarPods** (the 3.5 mm TRRS remote+mic set).
 
 Then, optionally, the tone fix. The codec and amplifier do no processing whatsoever — macOS's fuller sound is entirely software EQ, which Linux has no equivalent of. [`configs/eq6.conf`](configs/eq6.conf) is a PipeWire filter-chain (bass shelf, corrective bands, and a clipping clamp) → copy to `~/.config/pipewire/filter-chain.conf.d/`.
 
@@ -103,6 +103,19 @@ sudo systemctl mask suspend.target hibernate.target hybrid-sleep.target suspend-
 - 📺 **YouTube 4K is CPU-decoded** — Polaris has no VP9/AV1 silicon. Hardware limit, not fixable.
 
 The Apple boot logo (skew and black flashes) and the headset plug-in artefact were both open here previously and are now reported clean — the logo looks stock on cold boot and warm reboot alike, and jack plug/unplug is quiet. Details, root causes and rejected approaches for everything are in [`TODO.md`](TODO.md).
+
+---
+
+## 🚫 What's still missing (hardware)
+
+Honest list of what this machine's hardware does **not** do under Linux yet:
+
+- 💳 **SD / memory-card reader** — does not work, and it's a **hardware fault in the reader**, not a driver gap. The card is identified correctly (CID/CSD read fine), then every data read fails the moment the DAT lines must carry data; two different cards, same result. Not fixable in software — closed.
+- 🔆 **Automatic brightness (ambient light sensor)** — the iMac's light sensor is present but not wired to the backlight, so brightness doesn't adapt to the room. Manual brightness is a separate, still-imperfect story (the panel's backlight sits behind Apple's firmware; a native-PWM path is staged but not shipped by default).
+- 😴 **Suspend / sleep** — hard-hangs the machine (Apple firmware ACPI); masked off, see above.
+- 🎬 **Video encode (VCE)** — hangs the GPU on some transcodes; under investigation.
+
+Everything else on the machine — display, audio (speakers, both mics, EarPods, buttons), colour, Ethernet, Wi-Fi, Bluetooth, Thunderbolt/10GbE (OWC), webcam — works.
 
 ---
 
