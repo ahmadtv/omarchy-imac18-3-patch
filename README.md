@@ -41,7 +41,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/ahmadtv/omarchy-imac5k/main/
 
 The patcher on a fully set-up iMac18,3 — everything applied:
 
-![imac-patcher menu, every patch applied](docs/patcher.png)
+![imac-patcher menu, every patch applied](docs/patcher-menu.png)
 
 …and what that gets you — `fastfetch` on the running 5K desktop:
 
