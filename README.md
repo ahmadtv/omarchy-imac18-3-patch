@@ -61,14 +61,15 @@ Re-run it after any kernel update — the patched module is built for one specif
 
 ## 🔊 Audio
 
-The CS8409 codec needs an out-of-tree driver — the in-kernel one doesn't recognise a speaker output on this board at all:
+The CS8409 codec needs an out-of-tree driver — the in-kernel one doesn't recognise a speaker output on this board at all. The patcher handles it:
 
 ```bash
-git clone https://github.com/jackdanyell/imac18-3-cs8409-linux-audio
-cd imac18-3-cs8409-linux-audio && sudo ./install-imac18-3.sh && sudo reboot
+./scripts/imac-patcher --apply audio   # or pick it from the menu
 ```
 
-That gets you speakers. [`patches/cs8409-headset-capture.patch`](patches/cs8409-headset-capture.patch) adds the rest, all confirmed on hardware: the internal mic, the headset mic, automatic switching between them on plug/unplug (sound and mic follow the jack, like macOS), a usable capture level for both, and the three inline earbud buttons (play/pause, volume up, volume down). Apply it to the driver source before building.
+It clones the upstream driver ([jackdanyell](https://github.com/jackdanyell/imac18-3-cs8409-linux-audio)) at the pinned, verified commit, applies [`patches/cs8409-headset-capture.patch`](patches/cs8409-headset-capture.patch) on top, and DKMS-builds it — the same "pristine upstream + our diff" model as the 5K side. Reboot after.
+
+That gets you: speakers, the internal mic, the headset mic, automatic switching between them on plug/unplug (sound and mic follow the jack, like macOS), a usable capture level for both, and the three inline earbud buttons (play/pause, volume up, volume down) — all confirmed on hardware.
 
 Then, optionally, the tone fix. The codec and amplifier do no processing whatsoever — macOS's fuller sound is entirely software EQ, which Linux has no equivalent of. [`configs/eq6.conf`](configs/eq6.conf) is a PipeWire filter-chain (bass shelf, corrective bands, and a clipping clamp) → copy to `~/.config/pipewire/filter-chain.conf.d/`.
 

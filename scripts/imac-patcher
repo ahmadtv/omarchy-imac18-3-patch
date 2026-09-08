@@ -53,36 +53,61 @@ fi
 # ═══════════════════════ module: audio ═════════════════════════════════════
 AUDIO_REPO=https://github.com/jackdanyell/imac18-3-cs8409-linux-audio
 AUDIO_SRC="${CACHE}/imac18-3-cs8409-linux-audio"
+# jackdanyell commit our patch is verified against. Same model as the 5K side:
+# pristine upstream + our diff, so we track upstream without maintaining a fork.
+# When jackdanyell moves and the patch stops applying, re-verify and re-pin here.
+AUDIO_PIN=be90113
+AUDIO_PATCH="${REPO_DIR}/patches/cs8409-headset-capture.patch"
 mod_audio_title() { echo "Speakers & microphone (CS8409)"; }
 mod_audio_tier()  { echo safe; }
-mod_audio_desc()  { echo "The in-kernel driver finds no speaker output on this board. Installs the hardware-gated DKMS driver so it also survives kernel updates."; }
+mod_audio_desc()  { echo "The in-kernel driver finds no speaker output on this board. Installs the DKMS driver (survives kernel updates) with the headset-capture patch: internal + headset mic, automatic in/out switching on plug/unplug, and the inline remote buttons."; }
 mod_audio_detect() {
     # NB: capture then match. "cmd | grep -q" is unsafe under `set -o pipefail`:
     # grep -q exits on first match, the producer takes SIGPIPE, and pipefail
     # then reports the pipeline as failed despite the match succeeding.
-    local dkms_ok=0 loaded=0 dkms_out mods
+    local dkms_ok=0 loaded=0 patched=0 dkms_out mods mi
     dkms_out="$(dkms status 2>/dev/null)"
     mods="$(lsmod 2>/dev/null)"
+    mi="$(modinfo snd_hda_codec_cs8409 2>/dev/null)"
     [[ $dkms_out == *"snd_hda_macbookpro"*"${KREL}"*"installed"* ]] && dkms_ok=1
     [[ $'\n'$mods == *$'\n'snd_hda_codec_cs8409* ]] && loaded=1
-    if (( dkms_ok && loaded )); then echo applied
-    elif (( loaded )); then echo partial       # working now, but DKMS can't rebuild it
+    # headset_buttons is a module parameter only our patch adds - its presence
+    # is how we tell the patched driver from a plain upstream build.
+    [[ $mi == *headset_buttons* ]] && patched=1
+    if (( dkms_ok && loaded && patched )); then echo applied
+    elif (( loaded )); then echo partial       # driver up, but unpatched and/or DKMS can't rebuild it
     else echo not-applied; fi
 }
 mod_audio_apply() {
     command -v dkms >/dev/null || { warn "dkms not installed: sudo pacman -S dkms linux-headers"; return 1; }
+    command -v patch >/dev/null || { warn "patch not installed: sudo pacman -S patch"; return 1; }
+    [[ -f "$AUDIO_PATCH" ]] || { warn "audio patch missing: $AUDIO_PATCH"; return 1; }
     # A prior install may be registered but broken (source dir vanished, e.g. it
     # lived in /tmp). Clear that first so the installer can re-register cleanly.
     if dkms status 2>/dev/null | grep -q "snd_hda_macbookpro.*broken"; then
         say "removing broken DKMS registration"
         sudo dkms remove snd_hda_macbookpro/0.2 --all 2>/dev/null || true
     fi
+    # Upstream driver source at the exact commit the patch is verified against.
     if [[ -d "$AUDIO_SRC/.git" ]]; then
-        say "updating driver source"; git -C "$AUDIO_SRC" pull --ff-only 2>&1 | tail -2
+        say "refreshing driver source"
+        git -C "$AUDIO_SRC" fetch --quiet origin 2>&1 | tail -2 || { warn "git fetch failed"; return 1; }
     else
         say "cloning driver source into $AUDIO_SRC"
-        git clone --depth 1 "$AUDIO_REPO" "$AUDIO_SRC" 2>&1 | tail -2 || return 1
+        git clone --quiet "$AUDIO_REPO" "$AUDIO_SRC" 2>&1 | tail -2 || return 1
     fi
+    say "checking out pinned upstream commit $AUDIO_PIN"
+    git -C "$AUDIO_SRC" checkout -f --quiet "$AUDIO_PIN" 2>/dev/null \
+        || { warn "upstream commit $AUDIO_PIN not found — jackdanyell history changed; re-pin AUDIO_PIN in this script"; return 1; }
+    git -C "$AUDIO_SRC" clean -fdq
+    # Apply our patch on top. Fail loudly if it no longer applies rather than
+    # building a half-patched driver — same discipline as the 5K version gate.
+    say "applying $(basename "$AUDIO_PATCH")"
+    if ! patch -d "$AUDIO_SRC" -p1 --dry-run --force < "$AUDIO_PATCH" >/dev/null 2>&1; then
+        warn "the audio patch does not apply to $AUDIO_PIN — it needs re-porting (see patches/)"
+        return 1
+    fi
+    patch -d "$AUDIO_SRC" -p1 --force < "$AUDIO_PATCH" >/dev/null || return 1
     ( cd "$AUDIO_SRC" && sudo ./install-imac18-3.sh ) || return 1
     say "installed — a reboot is needed for the new module to load"
 }
