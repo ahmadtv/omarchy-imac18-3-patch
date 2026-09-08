@@ -110,7 +110,7 @@ Every patch backs up what it replaces and can be reversed. Boot-related changes 
 
 ## 🤝 Contributing
 
-Got another 5K iMac model booting, hit a bug, or made something better? [Open an issue](../../issues) — that's how the iMac Pro 1,1 lead surfaced and the multi-distro fork got started.
+This targets the **iMac18,3** specifically — I'm not taking on other models. If you're on an 18,3 and hit a bug, or you've made part of this better, [open an issue or PR](../../issues) and I'll pull in what's solid.
 
 ## 🙏 Credits
 
