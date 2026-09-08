@@ -38,6 +38,16 @@ bash <(curl -fsSL https://raw.githubusercontent.com/ahmadtv/omarchy-imac5k/main/
 | 🎨 **True colour** | The wide-gamut **Display P3** panel mapped correctly, instead of the oversaturated mess of stock sRGB. |
 | ⚡ **Thunderbolt + 10GbE** | Adapters authorised and remembered across reboots. Tested with an **OWC Thunderbolt 3** dock + 10GbE. |
 
+## 🖥️ On the machine
+
+The patcher on a fully set-up iMac18,3 — everything applied:
+
+![imac-patcher menu, every patch applied](docs/patcher.png)
+
+…and what that gets you — `fastfetch` on the running 5K desktop:
+
+![fastfetch on the 5K desktop: 5120×2880 genlocked, patched amdgpu, CS8409 audio](docs/fastfetch.png)
+
 ## ✅ Already fine out of the box
 
 No patch needed — these just work on Omarchy / Linux:
