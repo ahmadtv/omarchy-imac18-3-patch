@@ -45,7 +45,7 @@ The patcher on a fully set-up iMac18,3 — everything applied:
 
 …and what that gets you — `fastfetch` on the running 5K desktop:
 
-![fastfetch on the 5K desktop: 5120×2880 genlocked, patched amdgpu, CS8409 audio](docs/fastfetch.png)
+![fastfetch on the 5K desktop: 5120×2880 genlocked, patched amdgpu, CS8409 audio](docs/system-info.png)
 
 ## ✅ Already fine out of the box
 
