@@ -1,10 +1,21 @@
+<div align="center">
+
 # 🖥️ iMac 5K on Linux
+
+**The 2017 27″ 5K iMac, running Linux the way it should.**
+
+![hardware](https://img.shields.io/badge/hardware-iMac18,3-111?logo=apple&logoColor=white)
+![display](https://img.shields.io/badge/display-5120×2880-e91e63)
+![kernel](https://img.shields.io/badge/kernel-7.1–7.2-1f6feb?logo=linux&logoColor=white)
+![tested on Omarchy](https://img.shields.io/badge/tested_on-Omarchy-7c3aed)
+![reversible](https://img.shields.io/badge/every_change-reversible-2ea043)
+![license](https://img.shields.io/badge/license-MIT-555)
 
 ![iMac18,3 Patch — native 5120×2880, working speakers and mic, true wide-gamut colour](.github/social-preview.png)
 
-### A 2017 27″ 5K iMac, running Linux the way it should.
+</div>
 
-Native **5120×2880**, real **speakers and mic**, true **wide-gamut colour** — the hardware Apple leaves half-asleep for everyone but macOS, woken up. One command, every change reversible, nothing touched without asking.
+Native **5120×2880**, real **speakers and mic**, true **wide-gamut colour** — the hardware Apple leaves half-asleep for everyone but macOS, woken up. **One command. Every change reversible. Nothing touched without asking.**
 
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/ahmadtv/omarchy-imac18-3-patch/main/install)
@@ -38,8 +49,6 @@ Straight about the gaps:
 - 🔆 **Auto-brightness** — the ambient-light sensor is present but not wired to the backlight.
 - 😴 **Suspend / sleep** — hard-hangs the machine (Apple firmware); masked off so nothing triggers it by accident.
 - 🎬 **Video encode (VCE)** — hangs the GPU on some transcodes; under investigation.
-
-*(4K YouTube is CPU-decoded — a Polaris silicon limit, not something a patch can change.)*
 
 ---
 
