@@ -1,6 +1,6 @@
 <div align="center">
 
-# 🖥️ iMac 5K on Omarchy Linux
+# 🖥️ iMac 5K (18,3) on Omarchy Linux
 
 **The 2017 27″ iMac (18,3) — running Omarchy Linux the way it should.**
 
