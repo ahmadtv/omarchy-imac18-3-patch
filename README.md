@@ -36,7 +36,6 @@ bash <(curl -fsSL https://raw.githubusercontent.com/ahmadtv/omarchy-imac5k/main/
 | 🎧 **Apple EarPods** | Fully supported. Plug them in and audio + mic follow the jack; unplug and it's back to internal — automatically. All three **inline buttons** work too: play/pause, volume up, volume down. |
 | 🎚️ **macOS-style sound** | The codec does zero DSP; macOS's warmth is pure software EQ. A PipeWire profile brings it back. |
 | 🎨 **True colour** | The wide-gamut **Display P3** panel mapped correctly, instead of the oversaturated mess of stock sRGB. |
-| ⚡ **Thunderbolt + 10GbE** | Adapters authorised and remembered across reboots. Tested with an **OWC Thunderbolt 3** dock + 10GbE. |
 
 ## 🖥️ On the machine
 
@@ -52,7 +51,9 @@ The patcher on a fully set-up iMac18,3 — everything applied:
 
 No patch needed — these just work on Omarchy / Linux:
 
-🌐 Ethernet · 📶 Wi-Fi · 🔷 Bluetooth · 📷 Webcam · ⌨️ Keyboard & trackpad · 🔌 USB
+🌐 Ethernet · 📶 Wi-Fi · 🔷 Bluetooth · 📷 Webcam · ⌨️ Keyboard & trackpad · 🔌 USB · ⚡ Thunderbolt / 10GbE
+
+Thunderbolt is on the in-tree `atlantic`/`thunderbolt` drivers — tested with an **OWC Thunderbolt 3 10GbE** adapter. Like on any Linux box, a Thunderbolt device needs a one-time authorization the first time you plug it in (`boltctl enroll`, or your desktop's prompt); after that it's remembered. Nothing this patch does — just how Thunderbolt security works.
 
 ## 🚫 Not working (yet)
 
