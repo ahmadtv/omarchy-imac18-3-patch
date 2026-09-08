@@ -172,10 +172,12 @@ measured-resync build was dropped as inert. Lesson: `journalctl -k` for older
 boots is the cheapest regression test — compare the same counters across
 builds before theorising.
 
-Leftover, cosmetic: the warm-reboot Apple logo is straight but slightly soft.
-After the teardown the firmware sees a single-tile panel (second tile asleep,
-its registers reset) and draws the logo on one tile stretched across the
-glass; a cold boot draws it crisp. Making the firmware draw at 5K would mean
+Cosmetic, and reported looking stock as of 2026-09-08 (cold boot and warm
+reboot indistinguishable). The mechanism, for the record: after the teardown
+the firmware sees a single-tile panel (second tile asleep, its registers reset)
+and draws the logo on one tile stretched across the glass; whether that reads
+as "soft" versus a crisp cold boot is marginal and not something the driver can
+control after the handoff. Making the firmware draw at 5K would mean
 handing it a panel with both tiles awake, which is exactly the state that
 produced the skew — so any attempt has to find a state the firmware treats as
 "fresh dual-tile" rather than "already running". Untested; not worth a
@@ -539,9 +541,12 @@ killed repeatedly — the browser then talks to a dead one and reports no
 microphone even though the system is healthy. Kill *all* of them and let it
 respawn exactly one. Check `pgrep -cf 'utility-sub-type=audio'`.
 
-**Known remaining issue:** a loud high-pitched artefact on the headset output at
-the moment of plug-in, reported repeatedly by the user. Not diagnosed. Most
-likely HSBIAS asserted abruptly or the output SRC failing to lock cleanly.
+**Plug-in artefact (was: loud high-pitched artefact on headset plug-in).**
+Reported clean as of 2026-09-08 — no static on plug or unplug after the
+jack-event serialisation and the removal of the button HSBIAS-poking path.
+Not instrumented (the per-call logging is compiled out of the shipped
+build), so this rests on listening, not measurement; left here to re-open
+if it ever recurs.
 
 ### Separate pre-existing driver bug: WirePlumber drops the card
 
