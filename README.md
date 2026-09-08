@@ -7,7 +7,7 @@
 ![hardware](https://img.shields.io/badge/hardware-iMac18,3-111?logo=apple&logoColor=white)
 ![display](https://img.shields.io/badge/display-5120×2880-e91e63)
 ![kernel](https://img.shields.io/badge/kernel-7.1–7.2-1f6feb?logo=linux&logoColor=white)
-![tested on Omarchy](https://img.shields.io/badge/tested_on-Omarchy-7c3aed)
+[![built for Omarchy](https://img.shields.io/badge/built_for-Omarchy-7c3aed?logo=archlinux&logoColor=white)](https://omarchy.org)
 ![reversible](https://img.shields.io/badge/every_change-reversible-2ea043)
 ![license](https://img.shields.io/badge/license-MIT-555)
 
@@ -17,11 +17,13 @@
 
 Native **5120×2880**, real **speakers and mic**, true **wide-gamut colour** — the hardware Apple leaves half-asleep for everyone but macOS, woken up. **One command. Every change reversible. Nothing touched without asking.**
 
+[Omarchy](https://omarchy.org)'s whole promise is *“we can fix everything.”* This points that at a 2017 iMac.
+
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/ahmadtv/omarchy-imac5k/main/install)
 ```
 
-> For the **2017 27-inch iMac (iMac18,3)**. Built and tested on [Omarchy](https://omarchy.org) (Arch + Hyprland); the audio, colour and EQ pieces are largely distro-agnostic.
+> For the **2017 27-inch iMac (iMac18,3)**. Built and tested on Omarchy (Arch + Hyprland); the audio, colour and EQ pieces are largely distro-agnostic.
 
 ---
 
@@ -62,7 +64,7 @@ git clone https://github.com/ahmadtv/omarchy-imac5k
 cd omarchy-imac5k && ./scripts/imac-patcher
 ```
 
-The patcher shows what's applied, what isn't, and lets you pick — **nothing is applied without asking**. Each piece is a separate, reversible step:
+The patcher shows what's applied, what isn't, and lets you pick — **nothing is applied without asking**. Omakase in spirit: sensible defaults, and you can send any of it back. Each piece is a separate, reversible step:
 
 ```bash
 ./scripts/imac-patcher --apply 5k      # native 5K (rebuilds only the amdgpu module)
@@ -94,6 +96,10 @@ Every patch backs up what it replaces and can be reversed. Boot-related changes 
 
 - **Native 5K, the three layers (wake · stitch · genlock)** and the install rules → [`patches/README.md`](patches/README.md)
 - **Open items, root causes and rejected approaches** → [`TODO.md`](TODO.md)
+
+## 🤝 Contributing
+
+Got another 5K iMac model booting, hit a bug, or made something better? [Open an issue](../../issues) — that's how the iMac Pro 1,1 lead surfaced and the multi-distro fork got started.
 
 ## 🙏 Credits
 
