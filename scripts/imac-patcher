@@ -78,9 +78,42 @@ mod_audio_detect() {
     elif (( loaded )); then echo partial       # driver up, but unpatched and/or DKMS can't rebuild it
     else echo not-applied; fi
 }
+mod_audio_preflight() {
+    # The driver is a DKMS-built kernel module, and the upstream installer also
+    # downloads a kernel source tarball to build the HDA tree — so it needs the
+    # same headers + build tools as the 5K module, plus dkms/patch/git/wget/tar.
+    # Without kernel headers the DKMS build fails deep in a compile and the only
+    # visible symptom is "partial / no sound" — check up front instead.
+    local ok=1 missing=() pkgs=() t
+    for t in dkms patch git gcc make wget tar; do
+        command -v "$t" >/dev/null || missing+=("$t")
+    done
+    if (( ${#missing[@]} )); then
+        warn "missing tools: ${missing[*]}"
+        for t in "${missing[@]}"; do case $t in
+            gcc|make) pkgs+=(base-devel) ;;
+            *)        pkgs+=("$t") ;;
+        esac; done
+        mapfile -t pkgs < <(printf '%s\n' "${pkgs[@]}" | sort -u)
+        say "install with:  sudo pacman -S --needed ${pkgs[*]}"
+        if confirm "Install them now?"; then
+            sudo pacman -S --needed --noconfirm "${pkgs[@]}" || ok=0
+        else ok=0; fi
+    else
+        say "build tools present"
+    fi
+    if [[ -e "/usr/lib/modules/${KREL}/build/Module.symvers" ]]; then
+        say "kernel headers present"
+    else
+        warn "linux-headers missing for ${KREL} — the DKMS build would fail without them"
+        if confirm "Install linux-headers now?"; then
+            sudo pacman -S --needed --noconfirm linux-headers || ok=0
+        else ok=0; fi
+    fi
+    return $(( 1 - ok ))
+}
 mod_audio_apply() {
-    command -v dkms >/dev/null || { warn "dkms not installed: sudo pacman -S dkms linux-headers"; return 1; }
-    command -v patch >/dev/null || { warn "patch not installed: sudo pacman -S patch"; return 1; }
+    mod_audio_preflight || { warn "preflight failed — nothing was changed."; return 1; }
     [[ -f "$AUDIO_PATCH" ]] || { warn "audio patch missing: $AUDIO_PATCH"; return 1; }
     # A prior install may be registered but broken (source dir vanished, e.g. it
     # lived in /tmp). Clear that first so the installer can re-register cleanly.
@@ -108,8 +141,16 @@ mod_audio_apply() {
         return 1
     fi
     patch -d "$AUDIO_SRC" -p1 --force < "$AUDIO_PATCH" >/dev/null || return 1
-    ( cd "$AUDIO_SRC" && sudo ./install-imac18-3.sh ) || return 1
-    say "installed — a reboot is needed for the new module to load"
+    ( cd "$AUDIO_SRC" && sudo ./install-imac18-3.sh ) || { warn "the DKMS build failed — see the output above (most often missing linux-headers for ${KREL})"; return 1; }
+    # Verify DKMS actually registered for this kernel, so we never report success
+    # while the stock in-kernel cs8409 (which drives no speakers) is all that's
+    # loaded — the exact "partial / no sound" state this is meant to prevent.
+    if dkms status 2>/dev/null | grep -q "snd_hda_macbookpro.*${KREL}.*installed"; then
+        say "installed — reboot to load the new module"
+    else
+        warn "the build ran but DKMS is not registered for ${KREL} — audio will not work until this succeeds (check: dkms status)"
+        return 1
+    fi
 }
 mod_audio_remove() {
     [[ -x "$AUDIO_SRC/install.cirrus.driver.sh" ]] && ( cd "$AUDIO_SRC" && sudo ./install.cirrus.driver.sh -r )
