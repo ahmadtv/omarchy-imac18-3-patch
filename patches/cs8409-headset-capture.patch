@@ -5,9 +5,8 @@ Applies to the snd_hda_macbookpro DKMS driver (davidjo/snd_hda_macbookpro),
 against the tree at commit be90113. Every part below was confirmed on hardware
 on an iMac18,3 running kernel 7.1.9-arch1-2.
 
-Four related fixes, all on the capture path. Deliberately no headset-button
-code: that was attempted separately, made the audio crackle and jammed the
-codec's interrupt handler, and was removed.
+Six fixes: four on the capture path, one that serialises jack events against
+stream setup, and the headset remote buttons. All confirmed on hardware.
 
 1. Capture follows the jack.
    The driver sets up one microphone and records from the other. On plug-in
@@ -96,17 +95,72 @@ fired on every plug, left the speakers silent. It is removed: this is a
 capture-side re-route and has no business reconfiguring playback, which the
 playback prepare path handles on its own.
 
+5. Jack events must not race stream setup.
+   A headset jack event (the HDA unsol work item) and an application starting
+   or stopping a capture or playback stream both drive the CS42L83 over the
+   CS8409's i2c engine and toggle the AFG power state, and none of it is
+   atomic. When the two interleave, the codec's status reads come back all
+   zeros: a 70 ms stream setup was seen taking 7.7 s, and the unplug interrupt
+   that arrived inside that window decoded as 0x00000000 and was dropped. The
+   driver then still believed the headset was in -- sound went to an empty
+   socket and capture stayed on an absent mike -- until a reload or replug.
+   This is the root cause of "the mic dies after I unplug" and of apps ending
+   up on a source that no longer matches the hardware.
+   Fix: a single spec->setup_mutex. cs_8409_cs42l83_jack_unsol_event takes it
+   for the whole jack event; the PCM prepare ops take it; the hda_generic PCM
+   open/cleanup/close hooks take it (prepare already holds it, so it is skipped
+   there to avoid recursion). Nine lines, no timing changes.
+   Two smaller defects went with it: cs_8409_cs42l83_mark_jack marked only the
+   headphone pin dirty, so the mic-jack kcontrol froze at its probe value --
+   now snd_hda_jack_set_dirty_all, matching what snd_hda_jack_unsol_event does;
+   and the headset-mic pin-sense override reported presence on jack alone, so
+   it now also requires have_mike.
+
+6. Headset remote buttons.
+   The three earbud buttons each raise a distinct bit in the disambiguated
+   interrupt word -- volume down 0x10000 and volume up 0x20000 in the 0x1b79
+   detect register, play/pause 0x100 (down) / 0x200 (up) in 0x1b7c -- so
+   cs_8409_headset_button_event reads the button straight from the interrupt
+   and emits KEY_VOLUMEDOWN / KEY_VOLUMEUP / KEY_PLAYPAUSE (once, on the down
+   edge). There is no comparator sweep and no HSBIAS poking: an earlier attempt
+   powered the CS42L83 mic level detector up and down around every press to
+   measure a resistance, which clicked through live audio and, under a mutex-
+   less interrupt storm, jammed the handler. All of that scaffolding is gone.
+   The one register the buttons need is Detect Interrupt Mask 2 (0x1b7a): the
+   plug-time button detection ends by re-masking it to 0xff, which gates the
+   two play/pause bits, so after detection it is set to the OSX steady-state
+   0xdc (those two bits open, the volume buttons on 0x1b79 unaffected). Gated
+   by the headset_buttons module parameter, now on by default. Verified: each
+   physical press delivers exactly one key (no repeats, no debounced drops) and
+   audio, capture and the jack-follow all keep working across presses.
+
 Known remaining issue: a loud high-pitched artefact is audible on the headset
 output at the moment of plug-in. Not diagnosed. Most likely HSBIAS being
 asserted abruptly or the output SRC not locking cleanly.
 
 diff --git i/patch_cirrus/cirrus_apple.h w/patch_cirrus/cirrus_apple.h
-index 7e9bcd1..cbae395 100644
-diff --git i/patch_cirrus/cirrus_apple.h w/patch_cirrus/cirrus_apple.h
-index 7e9bcd1..cbae395 100644
+index 7e9bcd1..02c89ec 100644
 --- i/patch_cirrus/cirrus_apple.h
 +++ w/patch_cirrus/cirrus_apple.h
-@@ -512,6 +512,18 @@ struct cs8409_apple_spec {
+@@ -2,6 +2,9 @@
+ #include <linux/timer.h>
+ #include <linux/bitops.h>
+ 
++// for the KEY_* codes used in the headset remote keymap
++#include <linux/input.h>
++
+ #include <linux/version.h>
+ 
+ //#include "hda_generic.h"
+@@ -503,6 +506,7 @@ struct cs8409_apple_spec {
+ 	// if headphone has buttons or not
+ 	int have_buttons;
+ 
++
+         // current stream channel count
+         int stream_channels;
+ 
+@@ -512,6 +516,18 @@ struct cs8409_apple_spec {
  	// set when capturing for plug/unplug events while capturing
  	int capturing;
  
@@ -125,7 +179,24 @@ index 7e9bcd1..cbae395 100644
  	// changing coding - OSX sets up the format on plugin
  	// then does some minimal setup when start play
  	// initial coding delayed any format setup till actually play
-@@ -792,6 +804,45 @@ static int cs_8409_capture_pcm_prepare(struct hda_pcm_stream *hinfo,
+@@ -740,6 +756,9 @@ static int cs_8409_playback_pcm_prepare(struct hda_pcm_stream *hinfo,
+ {
+         struct hda_gen_spec *spec = codec->spec;
+         int err;
++        struct cs8409_apple_spec *cspec = codec->spec;
++
++        guard(mutex)(&cspec->setup_mutex);
+         mycodec_info(codec, "cs_8409_playback_pcm_prepare\n");
+ 
+         mycodec_info(codec, "cs_8409_playback_pcm_prepare: NID=0x%x, stream=0x%x, format=0x%x\n",
+@@ -787,11 +806,52 @@ static int cs_8409_capture_pcm_prepare(struct hda_pcm_stream *hinfo,
+ {
+         struct cs8409_apple_spec *spec = codec->spec;
+ 
++        guard(mutex)(&spec->setup_mutex);
++
+         mycodec_info(codec, "cs_8409_capture_pcm_prepare\n");
+ 
          mycodec_info(codec, "cs_8409_capture_pcm_prepare: NID=0x%x, stream=0x%x, format=0x%x\n",
                    hinfo->nid, stream_tag, format);
  
@@ -171,7 +242,158 @@ index 7e9bcd1..cbae395 100644
  
          cs_8409_pcm_capture_pre_prepare_hook(hinfo, codec, stream_tag, format, substream,
                                HDA_GEN_PCM_ACT_PREPARE);
-@@ -2930,6 +2981,10 @@ static int cs8409_apple(struct hda_codec *codec)
+@@ -1470,6 +1530,37 @@ static int cs_8409_apple_check_power_status(struct hda_codec *codec, hda_nid_t n
+ }
+ 
+ 
++/*
++ * Headset remote buttons. The three earbud buttons each raise a distinct
++ * bit in the disambiguated interrupt word (play/pause 0x100/0x200, volume
++ * up 0x20000, volume down 0x10000), so cs_8409_headset_button_event reads
++ * the button straight from the interrupt - no comparator sweep, no bias
++ * poking, nothing that can click. See that function.
++ */
++
++static int headset_buttons = 1;
++module_param(headset_buttons, int, 0644);
++MODULE_PARM_DESC(headset_buttons, "headset remote buttons: 1 = on (default), 0 = off");
++
++// how hard cs_8409_read_status_and_clear_interrupt tries to drain a storm
++static int int_drain_max = 40;
++module_param(int_drain_max, int, 0644);
++MODULE_PARM_DESC(int_drain_max, "max paced iterations draining the CS42L83 interrupt (default 40)");
++
++static int int_drain_burst = 24;
++module_param(int_drain_burst, int, 0644);
++MODULE_PARM_DESC(int_drain_burst, "max unpaced iterations used to finish draining a CS42L83 interrupt storm (default 24)");
++
++// Standard cs42l42 headset remote keymap. SND_JACK_BTN_0 is the highest bit,
++// snd_jack_set_key derives the index from it.
++static const struct hda_jack_keymap cs8409_headset_keymap[] = {
++	{ SND_JACK_BTN_0, KEY_PLAYPAUSE },
++	{ SND_JACK_BTN_1, KEY_VOICECOMMAND },
++	{ SND_JACK_BTN_2, KEY_VOLUMEUP },
++	{ SND_JACK_BTN_3, KEY_VOLUMEDOWN },
++	{}
++};
++
+ static int cs_8409_apple_build_controls(struct hda_codec *codec)
+ {
+ 	int err;
+@@ -1491,6 +1582,31 @@ static int cs_8409_apple_build_controls(struct hda_codec *codec)
+ 		return err;
+ 	snd_hda_apply_fixup(codec, HDA_FIXUP_ACT_BUILD);
+ 
++	// Bind the headset remote keymap. The mic pin 0x3c is where the button
++	// events are generated, the headphone jack 0x2c is the jack they get
++	// reported through, so the key capabilities have to be added to 0x2c's
++	// input device. This must happen here, after snd_hda_gen_build_controls
++	// has created the jacks and before the card is registered - snd_jack_set_key
++	// WARNs and has no effect once the input device exists.
++	//
++	// This is done unconditionally, and deliberately so even though
++	// headset_buttons defaults to 0. All it does is declare four key codes on
++	// an input device; it touches no codec register, arms no interrupt and
++	// emits no event, since nothing calls snd_hda_jack_set_button_state unless
++	// headset_buttons is on. Binding it up front is what lets the parameter be
++	// turned on later without a module reload, which is the entire point of
++	// having the parameter.
++	err = snd_hda_jack_bind_keymap(codec, CS8409_CS42L83_HP_MIC_PIN_NID,
++				       cs8409_headset_keymap,
++				       CS8409_CS42L83_HP_PIN_NID);
++	if (err < 0)
++		dev_info(hda_codec_dev(codec),
++			 "cs_8409_apple_build_controls - headset button keymap not bound (%d)\n", err);
++	else
++		dev_info(hda_codec_dev(codec),
++			 "cs_8409_apple_build_controls - headset button keymap bound 0x%02x -> 0x%02x\n",
++			 CS8409_CS42L83_HP_MIC_PIN_NID, CS8409_CS42L83_HP_PIN_NID);
++
+ 	// this seems better as snd_hda_gen_build_controls does an hda_exec_init_verbs call
+ 	// before calling the init patch_ops function
+ 	// - on the other hand currently it is just dumping data doesnt actually do anything
+@@ -1592,40 +1708,12 @@ static void cs8409_fix_caps_debug(struct hda_codec *codec, unsigned int nid)
+ 
+ void cs_8409_cs42l83_mark_jack(struct hda_codec *codec)
+ {
+-        struct hda_jack_tbl *event;
+-
+         mycodec_info(codec, "cs_8409_cs42l83_mark_jack\n");
+ 
+-        // this is how the Dell fixups do it
+-        // first explicitly get the jacktbl entry using the known jack nids
+-        // so can create the res data tag to pass to the standard snd_hda_jack_unsol_event
+-        // (minus actual GPIO etc data usually seen in the res)
+-        // - which then scans the jacktbl for the tag etc 
+-        // but primarily marks the jack as dirty prior to snd_hda_jack_report_sync call
+-        // plus calls the jack callbacks
+-
+-        event = snd_hda_jack_tbl_get_mst(codec, CS8409_CS42L83_HP_PIN_NID, 0);
+-
+-        // note that the only real functions of snd_hda_jack_unsol_event are to call the jack callbacks
+-        // and snd_hda_jack_report_sync
+-        // for Apple we have disabled power on/power off callbacks (power_save_node = 0)
+-        // so now only have call_hp_automute and call_mic_autoswitch to figure out
+-        // - currently call_hp_automute is disabled because of suppress_auto_mute
+-
+-        if (event) {
+-                // now perform the functions of snd_hda_jack_unsol_event explicitly
+-                //snd_hda_jack_unsol_event(codec, (event->tag << AC_UNSOL_RES_TAG_SHIFT) & AC_UNSOL_RES_TAG);
+-                // ignoring key_report_jack at the moment
+-                event->jack_dirty = 1;
+-                //cs_8409_apple_call_jack_callback(codec, res, event);
+-                //snd_hda_jack_report_sync(codec);
+-        }
+-
+-        // note that the Dell fixups do calls to snd_hda_jack_unsol_event for each jack nid
+-        // so we have multiple calls to snd_hda_jack_report_sync
+-        // so far looks as though this is OK as eventually snd_hda_jack_report_sync calls snd_kctl_jack_report
+-        // to update user side which first checks if stored data is same as updated data and if so does nothing
+-        //snd_hda_jack_report_sync(codec);
++        // Mark every jack dirty, as snd_hda_jack_unsol_event does, so the
++        // following snd_hda_jack_report_sync re-reads them all. Marking only
++        // the headphone pin froze the mic jack at its probe-time value.
++        snd_hda_jack_set_dirty_all(codec);
+ 
+         mycodec_info(codec, "end cs_8409_cs42l83_mark_jack\n");
+ }
+@@ -1654,11 +1742,14 @@ static void cs_8409_cs42l83_unsol_event_handler(struct hda_codec *codec, unsigne
+ 
+ void cs_8409_cs42l83_jack_unsol_event(struct hda_codec *codec, unsigned int res)
+ {
++        struct cs8409_apple_spec *spec = codec->spec;
+         struct hda_jack_tbl *event;
+         //int ret_unsol_enable = 0;
+         //int tag = (res >> AC_UNSOL_RES_TAG_SHIFT) & 0x7f;
+         int tag = (res & AC_UNSOL_RES_TAG) >> AC_UNSOL_RES_TAG_SHIFT;
+ 
++        guard(mutex)(&spec->setup_mutex);
++
+ 	// so we have confirmed that these unsol responses are not in linux kernel interrupt state
+ 	//if (in_interrupt())
+ 	//	mycodec_info(codec, "cs_8409_cs42l83_unsol_event - INTERRUPT\n");
+@@ -2557,7 +2648,7 @@ static int cs8409_cs42l83_exec_verb(struct hdac_device *dev, unsigned int cmd, u
+                         //*res = (cs42l83->mic_jack_in) ? AC_PINSENSE_PRESENCE : 0;
+                         // initially use my jack_present flag integer
+ 			myprintk("snd_hda_intel: cs 8409 exec verb pin sense 0x%04x %d\n", nid, spec->jack_present);
+-                        *res = (spec->jack_present) ? AC_PINSENSE_PRESENCE : 0;
++                        *res = (spec->jack_present && spec->have_mike) ? AC_PINSENSE_PRESENCE : 0;
+                         return 0;
+                 }
+         } else if (nid == spec->linein_nid) {
+@@ -2584,6 +2675,7 @@ static struct cs8409_apple_spec *cs8409_apple_alloc_spec(struct hda_codec *codec
+ 	if (!spec)
+ 		return NULL;
+ 	codec->spec = spec;
++	mutex_init(&spec->setup_mutex);
+ #if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 13, 0)
+ 	spec->codec = codec;
+ #endif
+@@ -2927,9 +3019,14 @@ static int cs8409_apple(struct hda_codec *codec)
+ 
+         spec->have_buttons = 0;
+ 
++
          spec->playing = 0;
          spec->capturing = 0;
  
@@ -183,7 +405,7 @@ index 7e9bcd1..cbae395 100644
          spec->headset_capture_format_setup_needed = 1;
  
 diff --git i/patch_cirrus/patch_cirrus_new84.h w/patch_cirrus/patch_cirrus_new84.h
-index a40a6f5..659fbb1 100644
+index a40a6f5..777a9d7 100644
 --- i/patch_cirrus/patch_cirrus_new84.h
 +++ w/patch_cirrus/patch_cirrus_new84.h
 @@ -1007,6 +1007,114 @@ static void switch_input_src(struct hda_codec *codec)
@@ -301,7 +523,36 @@ index a40a6f5..659fbb1 100644
  static int read_gpio_status_check(struct hda_codec *codec);
  
  #ifdef USE_DATA
-@@ -1804,8 +1912,12 @@ static void cs_8409_pcm_capture_pre_prepare_hook(struct hda_pcm_stream *hinfo, s
+@@ -1387,7 +1495,6 @@ static void cs_8409_headset_mike_setup_nouse(struct hda_codec *codec)
+         cs_8409_intmike_linein_disable(codec);
+ 
+ 	cs_8409_headset_mike_streaming_preplay(codec, 1);
+-	cs_8409_headset_mike_buttons_enable(codec);
+ }
+ 
+ 
+@@ -1660,6 +1767,10 @@ static void cs_8409_playback_pcm_hook(struct hda_pcm_stream *hinfo, struct hda_c
+ 
+ 	struct cs8409_apple_spec *spec = codec->spec;
+ 
++	// PREPARE comes from our own pcm prepare op, which already holds it
++	if (action != HDA_GEN_PCM_ACT_PREPARE)
++		mutex_lock(&spec->setup_mutex);
++
+ 	// so finally getting a handle on ordering here
+ 	// we need to do the OSX setup in the OPEN section
+ 	// as the generic hda format and stream setup is done BEFORE the PREPARE hook
+@@ -1746,6 +1857,9 @@ static void cs_8409_playback_pcm_hook(struct hda_pcm_stream *hinfo, struct hda_c
+ 		myprintk("snd_hda_intel: command cs_8409_playback_pcm_hook close end");
+ 	}
+ 
++	if (action != HDA_GEN_PCM_ACT_PREPARE)
++		mutex_unlock(&spec->setup_mutex);
++
+ }
+ 
+ 
+@@ -1804,8 +1918,12 @@ static void cs_8409_pcm_capture_pre_prepare_hook(struct hda_pcm_stream *hinfo, s
  						spec->headset_capture_format_setup_needed = 0;
  					}
  				}
@@ -316,7 +567,18 @@ index a40a6f5..659fbb1 100644
  				// NOTE - still not fixed linein/lineout working - this may need
  				// changing here
  			}
-@@ -1927,6 +2039,8 @@ static void cs_8409_capture_pcm_hook(struct hda_pcm_stream *hinfo, struct hda_co
+@@ -1861,6 +1979,10 @@ static void cs_8409_capture_pcm_hook(struct hda_pcm_stream *hinfo, struct hda_co
+ 
+         spec = codec->spec;
+ 
++	// PREPARE comes from our own pcm prepare op, which already holds it
++	if (action != HDA_GEN_PCM_ACT_PREPARE)
++		mutex_lock(&spec->setup_mutex);
++
+ 
+ 	// so now no setup is done here - we only check for unsolicited responses
+ 	// - we do do cleanup for the CLEANUP action
+@@ -1927,6 +2049,8 @@ static void cs_8409_capture_pcm_hook(struct hda_pcm_stream *hinfo, struct hda_co
  		spec->capture_init_count = 0;
  		// not sure of this position yet
  		spec->capturing = 0;
@@ -325,8 +587,18 @@ index a40a6f5..659fbb1 100644
  		power_chk = snd_hda_codec_read(codec, codec->core.afg, 0, AC_VERB_GET_POWER_STATE, 0);
  		myprintk("snd_hda_intel: command cs_8409_capture_pcm_hook power check 0x01 4 %d", power_chk);
  		myprintk("snd_hda_intel: command cs_8409_capture_pcm_hook HOOK CLEANUP end");
+@@ -1935,6 +2059,9 @@ static void cs_8409_capture_pcm_hook(struct hda_pcm_stream *hinfo, struct hda_co
+ 		myprintk("snd_hda_intel: command cs_8409_capture_pcm_hook close end");
+ 	}
+ 
++	if (action != HDA_GEN_PCM_ACT_PREPARE)
++		mutex_unlock(&spec->setup_mutex);
++
+ }
+ 
+ 
 diff --git i/patch_cirrus/patch_cirrus_real84.h w/patch_cirrus/patch_cirrus_real84.h
-index 76de5e8..7dddf82 100644
+index 76de5e8..1e4190d 100644
 --- i/patch_cirrus/patch_cirrus_real84.h
 +++ w/patch_cirrus/patch_cirrus_real84.h
 @@ -282,13 +282,100 @@ static void cs_8409_linein_volume_setup_new(struct hda_codec *codec, int volume)
@@ -466,7 +738,123 @@ index 76de5e8..7dddf82 100644
  
          snd_hda_codec_write(codec, spec->intmike_nid, 0, AC_VERB_SET_AMP_GAIN_MUTE, newgain); // 0x04435000
  
-@@ -4837,7 +4924,7 @@ static void cs_8409_plugin_event_continued(struct hda_codec *codec)
+@@ -2061,7 +2148,6 @@ static void cs42l83_headset_play_setup_on(struct hda_codec *codec);
+ 
+ static void cs42l83_headset_mike_format_setup_enable(struct hda_codec *codec, int nullformat, int full);
+ 
+-static void cs_8409_headset_mike_buttons_enable(struct hda_codec *codec);
+ 
+ 
+ static void cs_8409_check_status(struct hda_codec *codec, int msleeptim, int trycount);
+@@ -2875,7 +2961,6 @@ static int cs_8409_boot_setup_real(struct hda_codec *codec)
+                                 //#10088: cs42l83_enable_hsbias_auto_clamp_off2
+                                 //#10136: cs42l83_enable_hsbias_auto_clamp_on3
+ 
+-                                cs_8409_headset_mike_buttons_enable(codec);
+ 
+                                 //#10166: snd_hda_codec_read_check
+                                 //#10168: snd_hda_codec_read_check
+@@ -3561,13 +3646,25 @@ static int cs_8409_wait_for_interrupt(struct hda_codec *codec, int msleeptim, in
+ 
+ static int cs42l83_read_status_and_clear_interrupt(struct hda_codec *codec);
+ 
++/*
++ * Interrupt bits that belong to headset remote buttons, in the combined
++ * (0x1b7b << 16) | (0x1b7c << 8) | 0x1308 word this function returns.
++ */
++#define CS8409_BUTTON_INT_BITS 0x130300
++
+ static int cs_8409_read_status_and_clear_interrupt(struct hda_codec *codec)
+ {
+         int retval = 0;
+         int retint = 0;
+         int last_retint = 0;
+-        int loopmax = 11;
++        int button_accum = 0;
++        // With headset buttons off this function behaves exactly as it did
++        // before: 11 paced iterations and then give up. The extra draining only
++        // matters when buttons are generating the storms it is there to survive.
++        int loopmax = (headset_buttons && int_drain_max > 0) ? int_drain_max : 11;
++        int burstmax = (headset_buttons && int_drain_burst > 0) ? int_drain_burst : 0;
+         int loopcnt = 0;
++        int burstcnt = 0;
+ 
+         // AppleHDAFunctionGroupCS8409::readStatusAndClearInterrupt
+ 
+@@ -3593,11 +3690,47 @@ static int cs_8409_read_status_and_clear_interrupt(struct hda_codec *codec)
+ 
+                 codec_info(codec, "cs_8409_read_status_and_clear_interrupt - UNSOL status 0x%08x\n",retint);
+ 
++                // Remember any button bits we saw on the way past. Only the last
++                // read used to be returned, so with two events pending - which is
++                // exactly what a press plus its release looks like - the first one
++                // was silently thrown away.
++                button_accum |= retint & CS8409_BUTTON_INT_BITS;
++
+                 retval = read_gpio_status_check(codec);
+ 
+                 if (loopcnt >= loopmax)
+                 {
+-                        dev_info(hda_codec_dev(codec), "cs_8409_read_status_and_clear_interrupt - ERROR - max count exceeded\n");
++                        // Do not give up here. Bailing out with the CS42L83
++                        // interrupt line still asserted is fatal for the rest of
++                        // the session: the line is level triggered into GPIO 1
++                        // and the 8409 only raises an unsolicited response on a
++                        // high to low transition, so if it never goes high again
++                        // no further interrupt is ever delivered and buttons are
++                        // dead until the module is reloaded. The paced loop above
++                        // sleeps 10 ms per iteration, which is slower than
++                        // interrupts arrive during a storm, so finish the drain
++                        // as fast as the i2c bus allows instead.
++                        dev_info(hda_codec_dev(codec), "cs_8409_read_status_and_clear_interrupt - max paced count exceeded, draining\n");
++
++                        while (burstcnt < burstmax)
++                        {
++                                burstcnt++;
++
++                                retint = cs42l83_read_status_and_clear_interrupt(codec);
++
++                                button_accum |= retint & CS8409_BUTTON_INT_BITS;
++
++                                retval = read_gpio_status_check(codec);
++
++                                if ((retval & 0x01) == 0x01)
++                                        break;
++                        }
++
++                        if ((retval & 0x01) == 0x01)
++                                dev_info(hda_codec_dev(codec), "cs_8409_read_status_and_clear_interrupt - drained after %d extra reads\n", burstcnt);
++                        else
++                                dev_err(hda_codec_dev(codec), "cs_8409_read_status_and_clear_interrupt - ERROR - interrupt still asserted after %d + %d reads\n", loopcnt, burstcnt);
++
+                         break;
+                 }
+ 
+@@ -3619,6 +3752,15 @@ static int cs_8409_read_status_and_clear_interrupt(struct hda_codec *codec)
+ 
+         }
+ 
++        // Fold the button bits seen earlier in the drain back in. Only done when
++        // headset buttons are enabled, so with the feature off this function
++        // returns exactly what it always returned. The plug/unplug bits are
++        // deliberately not accumulated - cs_8409_interrupt_action picks one
++        // branch and a stale plug bit ORed over an unplug would pick the wrong
++        // one.
++        if (headset_buttons && button_accum)
++                retint |= button_accum;
++
+         codec_info(codec, "cs_8409_read_status_and_clear_interrupt 0x%08x end\n",retint);
+ 
+         return retint;
+@@ -4733,7 +4875,6 @@ static void cs42l83_headset_play_setup_on(struct hda_codec *codec);
+ static void cs_8409_headset_streaming_preplay(struct hda_codec *codec);
+ static void cs_8409_intmike_linein_disable(struct hda_codec *codec);
+ static void cs_8409_headset_mike_streaming_preplay(struct hda_codec *codec, int nullformat);
+-static void cs_8409_headset_mike_buttons_enable(struct hda_codec *codec);
+ 
+ 
+ static void cs_8409_plugin_event_continued(struct hda_codec *codec)
+@@ -4837,7 +4978,7 @@ static void cs_8409_plugin_event_continued(struct hda_codec *codec)
                          {
                                  if (spec->capturing)
                                  {
@@ -475,21 +863,143 @@ index 76de5e8..7dddf82 100644
                                  }
  
                                  // this is just calling this routine
-@@ -4869,6 +4956,13 @@ static void cs_8409_plugin_event_continued(struct hda_codec *codec)
+@@ -4867,10 +5008,27 @@ static void cs_8409_plugin_event_continued(struct hda_codec *codec)
+                                 //spec->headset_presetup_done = 1;
  
-                                 cs_8409_headset_mike_buttons_enable(codec);
  
+-                                cs_8409_headset_mike_buttons_enable(codec);
++
 +                                // if a capture stream is open right now it is still bound to the
 +                                // internal mike ADC which we just disabled above - move it onto the
 +                                // headset mike so the held open stream keeps producing audio.
 +                                // (no-op when not capturing - the next capture prepare picks the
 +                                //  right ADC by itself)
 +                                cs_8409_capture_follow_jack(codec);
-+
+ 
                          }
                  }
++                else if (spec->headset_phase == 1)
++                {
++                        // Booted with the headset already plugged in. The block
++                        // above is deliberately post-boot-hotplug only, so
++                        // nothing arms the button interrupts on this path and
++                        // every press for the whole session is lost. Arm them,
++                        // and only them - no playback or capture reconfiguration
++                        // is done from inside a jack event here.
++                        // booted with the headset already in: nothing to arm - the
++                        // button interrupts arrive on the normal detect path.
++                }
  
-@@ -5703,6 +5797,17 @@ static void cs_8409_unplug_handle_disconnect(struct hda_codec *codec)
+         }
+         else
+@@ -5292,13 +5450,83 @@ static void cs_8409_headset_button_detect_event(struct hda_codec *codec)
+         if ((ret_mike & MIKE_CONNECT) != MIKE_CONNECT)
+                 dev_err(hda_codec_dev(codec), "ERROR - has mike but mike not connected - not analyzed!!\n");
+ 
++        // handle_button_detect above re-masks every Detect Interrupt 2 bit with
++        // 0xff. The centre (play/pause) button is delivered on 0x1b7c bits 0/1,
++        // gated by this mask, so leave them unmasked with the OSX steady-state
++        // value 0xdc. The volume buttons come in on 0x1b79 and are untouched.
++        if (headset_buttons)
++                cs_8409_vendor_i2cWrite(codec, 0x90, 0x1b7a, 0x00dc, 1);
++
+ 
+         mycodec_info(codec, "cs_8409_headset_button_detect_event end\n");
+ }
+ 
++/*
++ * Which interrupt bits mean "a button just went down".
++ *
++ * 0x1b7c bit 0 (0x100 here) is documented in this driver as the down of the
++ * earbud play/pause button, with bit 1 (0x200) as its up. 0x1b7b bit 0
++ * (0x10000) and bit 1 (0x20000) are named DOWN_PRESS and UP_PRESS by the same
++ * convention, with 0x100000 as an explicit release. So the default treats the
++ * two "down" bits as presses and everything else as the end of a press.
++ *
++ * This is a parameter because the naming is reverse engineered and the bits are
++ * undocumented for the CS42L42. Every event logs its raw word, so if the logs
++ * show volume up only ever arriving as 0x20000 with no 0x10000, this can be set
++ * to 0x30100 live without a reload.
++ */
++
++// swallow a second press this soon after the last one, in milliseconds. Guards
++// against one physical press being reported twice if the bit classification
++// above is wrong, without getting in the way of deliberate repeated presses.
++static int button_debounce_ms = 80;
++module_param(button_debounce_ms, int, 0644);
++MODULE_PARM_DESC(button_debounce_ms, "ignore a press within this many ms of the previous one (default 80)");
++
+ static void cs_8409_headset_button_event(struct hda_codec *codec, int buttons)
+ {
+-        mycodec_info(codec, "cs_8409_headset_button_event  buttons 0x%08x\n", buttons);
++        static unsigned long last_press_jiffies;
++        int btn;
++        const char *keyname;
++
++        if (!headset_buttons)
++                return;
++
++        // Each earbud button arrives as a distinct bit in the disambiguated
++        // interrupt word, so there is nothing to measure:
++        //   volume down  0x10000 (BUTTON_DOWN_PRESS)
++        //   volume up     0x20000 (BUTTON_UP_PRESS)
++        //   play/pause    0x100 on down, 0x200 on up (BUTTON_TOGGLE_*)
++        // Fire play/pause once, on its down edge; let its up edge and the
++        // separate release interrupt (0x100000) pass silently.
++        if (buttons & BUTTON_DOWN_PRESS) {
++                btn = SND_JACK_BTN_3;
++                keyname = "VOLUMEDOWN";
++        } else if (buttons & BUTTON_UP_PRESS) {
++                btn = SND_JACK_BTN_2;
++                keyname = "VOLUMEUP";
++        } else if (buttons & BUTTON_TOGGLE_DOWN_PRESS) {
++                btn = SND_JACK_BTN_0;
++                keyname = "PLAYPAUSE";
++        } else {
++                return;
++        }
++
++        if (button_debounce_ms > 0 && last_press_jiffies &&
++            time_before(jiffies, last_press_jiffies + msecs_to_jiffies(button_debounce_ms))) {
++                dev_info(hda_codec_dev(codec),
++                         "cs_8409_headset_button_event - 0x%08x debounced\n", buttons);
++                return;
++        }
++        last_press_jiffies = jiffies;
++
++        dev_info(hda_codec_dev(codec),
++                 "cs_8409_headset_button_event - 0x%08x -> %s\n", buttons, keyname);
++
++        snd_hda_jack_set_button_state(codec, CS8409_CS42L83_HP_MIC_PIN_NID, btn);
++        snd_hda_jack_report_sync(codec);
++        snd_hda_jack_set_button_state(codec, CS8409_CS42L83_HP_MIC_PIN_NID, 0);
++        snd_hda_jack_report_sync(codec);
+ }
+ 
+ 
+@@ -5367,21 +5595,6 @@ static void cs_8409_headset_mike_streaming_preplay(struct hda_codec *codec, int
+ 
+ }
+ 
+-static void cs_8409_headset_mike_buttons_enable(struct hda_codec *codec)
+-{
+-
+-        // part of AppleHDAMikeyInternalCS8409::handleButtonDetectUR
+-
+-        cs42l83_configure_headset_button_interrupts(codec);
+-
+-        cs42l83_enable_hsbias_auto_clamp_off2(codec);
+-
+-        // following coded explicitly in handleButtonDetectUR
+-
+-        cs42l83_hsbias_sense_on(codec);
+-
+-}
+-
+ static void cs_8409_headset_plugin_preplay_unused1(struct hda_codec *codec)
+ {
+ 
+@@ -5703,6 +5916,17 @@ static void cs_8409_unplug_handle_disconnect(struct hda_codec *codec)
  
          mycodec_info(codec, "cs_8409_unplug_handle_disconnect jack_present %d\n", spec->jack_present);
  
@@ -507,7 +1017,7 @@ index 76de5e8..7dddf82 100644
          mycodec_info(codec, "cs_8409_unplug_handle_disconnect end\n");
  }
  
-@@ -6026,6 +6131,9 @@ static void cs_8409_enable_headset_mike_streaming(struct hda_codec *codec)
+@@ -6026,6 +6250,9 @@ static void cs_8409_enable_headset_mike_streaming(struct hda_codec *codec)
          // unmute audio input
          cs42l83_headset_mike_adc_unmutevol(codec, 1);
  
@@ -518,10 +1028,53 @@ index 76de5e8..7dddf82 100644
          // for partial setup only
          //cs42l83_headset_mike_pin_enable(codec);
 diff --git i/patch_cirrus/patch_cirrus_real84_i2c.h w/patch_cirrus/patch_cirrus_real84_i2c.h
-index 101f27c..5fc101c 100644
+index 101f27c..56dae01 100644
 --- i/patch_cirrus/patch_cirrus_real84_i2c.h
 +++ w/patch_cirrus/patch_cirrus_real84_i2c.h
-@@ -1945,6 +1945,75 @@ static void cs42l83_hsbias_sense_on(struct hda_codec *codec)
+@@ -1886,10 +1886,42 @@ static void cs42l83_configure_headset_button_interrupts(struct hda_codec *codec)
+ 
+         cs_8409_vendor_i2cRead(codec, 0x90, 0x1b7c, 1); // snd_hda
+         cs_8409_vendor_i2cRead(codec, 0x90, 0x1b7a, 1); // snd_hda
++
++        // 0xdc is the OSX value. The volume-button interrupts arrive in the
++        // 0x1b79 detect register, which this mask does not gate, so all three
++        // buttons are delivered with the plain OSX value - no unmasking needed.
+         cs_8409_vendor_i2cWrite(codec, 0x90, 0x1b7a, 0x00dc, 1); // snd_hda
+ 
+ }
+ 
++
++/*
++ * Headset button measurement, register level.
++ *
++ * 0x1B74 Miscellaneous Detect Control
++ *          bit 0    mic DC level detect powered down when set
++ *          bits 2:1 HSBIAS control (0x2 weak ground, 0x6 2.7V functional)
++ *          bits 4:3 detect mode
++ * 0x1B75 Mic Detect Control 1
++ *          bit 7    LATCH_TO_VP
++ *          bit 6    EVENT_STAT_SEL
++ *          bits 5:0 HS_DETECT_LEVEL, the comparator threshold
++ * 0x1B78 Detect Status 2
++ *          bit 1    HSBIAS_IN, the comparator output
++ *
++ */
++
++// read the comparator with HS_DETECT_LEVEL set to level. keeps the top two
++// bits of 0x1b75 (LATCH_TO_VP, EVENT_STAT_SEL) as they were.
++/*
++ * Binary search for the HS_DETECT_LEVEL at which the comparator changes state.
++ * The comparator output is monotonic in the threshold, so two reference reads
++ * at the ends tell us which way round it is and the search does not have to
++ * assume a polarity. 8 probes total, no power transitions, ~3 ms.
++ *
++ * Returns the trip level 0x00..0x3f, or -1 if the comparator did not move
++ * across the whole range (nothing pressed, or the detector is not powered).
++ */
+ static void cs42l83_enable_hsbias_auto_clamp_off2(struct hda_codec *codec)
+ {
+ 
+@@ -1945,6 +1977,75 @@ static void cs42l83_hsbias_sense_on(struct hda_codec *codec)
  }
  
  
@@ -598,7 +1151,7 @@ index 101f27c..5fc101c 100644
  {
  
 diff --git i/patch_cs8409.h.diff w/patch_cs8409.h.diff
-index aa6e981..ab9d60c 100644
+index aa6e981..ddd3d7d 100644
 --- i/patch_cs8409.h.diff
 +++ w/patch_cs8409.h.diff
 @@ -425,7 +425,7 @@
@@ -606,11 +1159,20 @@ index aa6e981..ab9d60c 100644
   	unsigned int paged:1;
   	unsigned int last_page;
 -@@ -342,6 +368,129 @@
-+@@ -342,6 +368,141 @@
++@@ -342,6 +368,150 @@
   	unsigned int init_done:1;
   	unsigned int build_ctrl_done:1;
   
-@@ -509,6 +509,18 @@
+@@ -500,6 +500,8 @@
+ +       // if headphone has buttons or not
+ +       int have_buttons;
+ +
+++       // headset remote button state - see the headset_buttons module parameter
+++
+ +        // current stream channel count
+ +        int stream_channels;
+ +
+@@ -509,6 +511,25 @@
  +       // set when capturing for plug/unplug events while capturing
  +       int capturing;
  +
@@ -625,6 +1187,13 @@ index aa6e981..ab9d60c 100644
 ++       struct hda_pcm_stream *capture_hinfo;
 ++       unsigned int capture_stream_tag;
 ++       unsigned int capture_format;
+++
+++       // One configuration sequence at a time. Jack events (the unsol work)
+++       // and PCM open/prepare/cleanup/close all drive the CS42L83 through the
+++       // CS8409's i2c engine and toggle the AFG power state, and none of it is
+++       // atomic. Two of them interleaved read back zeros and the jack event is
+++       // lost - a missed unplug leaves capture on an empty headset mike.
+++       struct mutex setup_mutex;
 ++
  +       // changing coding - OSX sets up the format on plugin
  +       // then does some minimal setup when start play

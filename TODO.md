@@ -398,7 +398,7 @@ Accurate state of this hardware:
 | Internal mic, headset plugged in | **No — silence** |
 | Headset mic | **No — no route exists** |
 | Headphone output | Pin path enables correctly; not yet confirmed audible |
-| Inline headset buttons | Unimplemented in the driver |
+| Inline headset buttons | **Working** — play/pause, volume up, volume down |
 
 ### Root cause, proven
 
@@ -467,13 +467,19 @@ headset mic gets the +32 dB the CS42L83 has available but nobody was applying
 (it was 35× quieter than the internal mic). Full reasoning is in the patch
 header.
 
-**Deliberately excluded: headset buttons.** All three were made to work
-(84 play/pause, 65 volume down, 5 volume up delivered to userspace), but the
-level-detect sweep made the audio audibly crackle and the interrupt handler
-jammed with `read_status_and_clear_interrupt - ERROR - max count exceeded` when
-buttons were used during playback, killing detection for the session. Removed
-rather than shipped. The work is recoverable from this session's history if
-anyone wants to revisit it.
+**Headset buttons: shipped and working (2026-09-08).** The earlier attempt was
+excluded because a level-detect sweep clicked through live audio and jammed the
+interrupt handler. That whole approach was unnecessary: each button raises a
+distinct bit in the disambiguated interrupt word (volume down 0x10000, volume
+up 0x20000 on the 0x1b79 detect register; play/pause 0x100/0x200 on 0x1b7c), so
+`cs_8409_headset_button_event` now reads the button straight from the interrupt
+and emits KEY_VOLUMEDOWN/KEY_VOLUMEUP/KEY_PLAYPAUSE — no sweep, no HSBIAS poking,
+nothing that clicks. The one register needed is Detect Interrupt Mask 2 (0x1b7a):
+plug-time detection re-masks it to 0xff, gating the play/pause bits, so after
+detection it is set to the OSX steady-state 0xdc. On by default (`headset_buttons`).
+Verified: each physical press delivers exactly one key, no repeats, and audio +
+capture + jack-follow keep working across presses. ~200 lines of sweep/arming
+scaffolding removed.
 
 **Correction, after the first commit of this patch:** the re-route also called
 `cs_8409_headplay_setup()`, mirroring the normal capture-start sequence, which
@@ -491,27 +497,40 @@ Restarting quickshell fixed it. **Before chasing a hardware output fault, check
 whether a second application also has no sound** — and note that every driver
 reload silently disconnects OBS, Chromium and the shell plugins from audio.
 
-### Open bugs on the jack path (found 2026-09-07/08, not yet fixed)
+### FIXED 2026-09-08: the jack path raced stream setup
 
-**1. A jack change strips the ports off the capture device.** After an unplug and
-replug, `pactl list sources` shows the microphone with an empty `Ports:` list,
-while the *card* still lists both `analog-input-internal-mic` and
-`analog-input-mic` correctly. A source with no ports is malformed, and Chromium
-then reports "no microphone found" — which is what the owner hit in WhatsApp
-repeatedly. Recovery: `pactl set-card-profile alsa_card.pci-0000_00_1f.3 off`
-then back to `output:analog-stereo+input:analog-stereo`, which restores the
-ports. **This is the bug that makes the machine feel unusable** — on working
-hardware a jack change swaps the active port on a device that persists, and
-applications never notice. Fix this before anything else on the audio path.
+**Root cause (was listed as three separate bugs): a jack event and audio stream
+setup were not serialised.** A headset unsol event and an app starting/stopping a
+stream both drive the CS42L83 over i2c and toggle AFG power, non-atomically. When
+they interleaved, status reads returned all zeros (a 70 ms stream setup was seen
+taking 7.7 s) and the *unplug* interrupt in that window decoded as 0x00000000 and
+was dropped. The driver then still believed the headset was in — sound to an empty
+socket, capture on an absent mike — until a reload or replug. The "device with an
+empty Ports list" and apps reporting "no microphone" were downstream of that; and
+the `set-card-profile off/on` recovery previously suggested was itself destroying
+and recreating the source object, breaking every connected app (that was the index
+climb 58 -> 6000+ in one session — self-inflicted, not the jack).
+Fix: one `spec->setup_mutex`, taken by the jack unsol handler for the whole event
+and by the PCM prepare ops and open/cleanup/close hooks (prepare already holds it).
+Also `cs_8409_cs42l83_mark_jack` now marks *all* jacks dirty (was headphone-only,
+so the mic-jack kcontrol froze at its probe value), and the headset-mic pin-sense
+override now requires `have_mike` as well as `jack_present`.
+Verified on hardware: plug and unplug in both directions, with and without a
+recording held open, switch sound and mic automatically with no dead window and
+no missed unplug; internal mic −10 dBFS, headset mic −20 dBFS.
 
-**2. The headset mic level drops ~30 dB after a replug.** Fresh driver load gives
+**2. (Likely resolved by the serialisation fix — watch.)** Headset mic level
+dropped ~30 dB after a replug. Fresh driver load gives
 −16 dBFS; after an unplug/replug the same setup measures −45 to −51 dBFS. The
 boost *is* applied — `adc_level: boost 1 gain 12 dB (0x1d01 0x01 0x1d03 0x0c)`
 is logged at the replug with the right values, and the module parameters are
 intact. So gain reaches the codec but the signal arriving is weak: something
 else in the CS42L83 front end comes back only partially configured on a replug.
 Forcing a fresh capture stream recovers only a couple of dB, so it is not the
-stream. Seen at least three times.
+stream. Seen at least three times *before* the serialisation fix. The half-configured
+front end is consistent with the unplug/re-detect racing stream setup, i.e. the
+same root cause. After the fix, replugs measure −20 dBFS (healthy) across a full
+session; left here so the owner can flag it if it ever recurs.
 
 **3. Operational trap, cost hours:** every driver reload silently disconnects
 OBS, Chromium and the shell plugins from audio, and **Chromium can be left with
