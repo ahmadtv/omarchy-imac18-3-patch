@@ -99,12 +99,10 @@ sudo systemctl mask suspend.target hibernate.target hybrid-sleep.target suspend-
 
 ## 🚧 Known rough edges
 
-- 🌗 **Warm-reboot Apple logo is slightly soft** with 5K active. The skew and black flashes that used to appear here are fixed and shipped (clean firmware handoff at reboot, gated to the reboot path only). What remains is cosmetic: the firmware draws the logo on one tile after the handoff, so it's straight but soft; a cold boot is crisp.
 - 🎬 **Video encode (VCE)** hangs the GPU on certain transcodes, taking the session down. Under investigation.
 - 📺 **YouTube 4K is CPU-decoded** — Polaris has no VP9/AV1 silicon. Hardware limit, not fixable.
-- 🎧 **Faint high-pitched artefact on headset plug-in** — brief, at the moment of insertion. Not yet diagnosed.
 
-Details, root causes and rejected approaches for all of these are in [`TODO.md`](TODO.md).
+The Apple boot logo (skew and black flashes) and the headset plug-in artefact were both open here previously and are now reported clean — the logo looks stock on cold boot and warm reboot alike, and jack plug/unplug is quiet. Details, root causes and rejected approaches for everything are in [`TODO.md`](TODO.md).
 
 ---
 
