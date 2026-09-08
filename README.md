@@ -110,8 +110,12 @@ Every patch backs up what it replaces and can be reversed. Boot-related changes 
 
 ## 🤝 Contributing
 
-This targets the **iMac18,3** specifically — I'm not taking on other models. If you're on an 18,3 and hit a bug, or you've made part of this better, [open an issue or PR](../../issues) and I'll pull in what's solid.
+On an **iMac18,3** and hit a bug, or made part of this better? [Open an issue or PR](../../issues) — I'll pull in what's solid.
 
 ## 🙏 Credits
 
 Native 5K builds on community work from [drm/amd#4455](https://gitlab.freedesktop.org/drm/amd/-/issues/4455) — mforce2 (tile wake), erik2 (stitch), taprobane99 (7.2.x port), with guidance from AMD's Alex Deucher. The genlock fix and the first verified iMac18,3 result came from this project. Audio driver by [jackdanyell](https://github.com/jackdanyell/imac18-3-cs8409-linux-audio). Multi-distro fork by [Mark Pronkin](https://github.com/MarkPronkin/imac5k-universal-linux-patcher).
+
+---
+
+_Omarchy’s promise is “we can fix everything.” This is one more thing, fixed._
