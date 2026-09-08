@@ -660,7 +660,11 @@ the ChromeOS register fixup is a proven no-op on this silicon, every relevant
 sdhci quirk combination has been tested, and disabling ASPM restored interrupt
 delivery without restoring data.
 
-**Status: closed as not fixable in software.** If anyone revisits it, the one
+**Status: still under investigation.** The Linux-side evidence points to a
+hardware fault (identify OK, every data read fails), but that is being
+cross-checked against macOS on the same machine before it is called dead — if
+the same card reads under macOS, the reader silicon is fine and this reopens as
+a Linux `sdhci` quirk problem. If anyone revisits it, the one
 untried angle is whether macOS can read a card in this slot on this specific
 machine — if macOS also cannot, the reader is simply dead and the row should be
 removed from the hardware table rather than tracked as a gap.
