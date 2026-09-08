@@ -79,7 +79,7 @@ Limine's cmdline.
 
 **Capture attempt 2026-09-06, lost:** the boot after the warm reboot landed on
 `Omarchy → linux` (no `memmap` reservation, ramoops never loaded), so the
-reserved region was reused and the teardown log with it. The owner also
+reserved region was reused and the teardown log with it. The user also
 reported the capture boot as "numbers on black" — that was `ignore_loglevel`
 spraying the kernel log over the console — and a sheared desktop after login
 (the intermittent genlock loss, not specific to that build). On request the
@@ -138,13 +138,13 @@ aiming for and never reached. Cost: ~1.7 s of futile AUX polling at shutdown,
 trimmable by also gating the pre-detect poll once the logo result is in.
 
 **Captured 21:16 (`evidence/shutdown-kmsg-2026-09-06-f.log`), corrected test
-build — and the owner saw a straight Apple logo.** Teardown in order:
+build — and the user saw a straight Apple logo.** Teardown in order:
 `atomic-disable` (116.31 s) → `going-down slave reset 0x310=00 00 00, 0x10A=00`
 (116.38, both OK) → `stream-disable latch 0x4F1=0` (116.38, OK on both links)
 → `going-down root eDP power off, holding T12` (116.45) → S5 at 117.16 →
 reboot. No re-detect, no wake: the `link_detect()` gate held. One sample so
 far; the fix is in the test entry (`patches/5k-latch-clear.patch`), default
-untouched, pending the owner's decision to promote.
+untouched, pending the user's decision to promote.
 
 Two earlier attempts on the same day failed for reasons that had nothing to do
 with the panel: capture -d showed the pre-detect poll skip made the shutdown
@@ -167,7 +167,7 @@ re-trains it — and writes the latch again. Per boot: 30–40 slave re-detects,
 Fix: the whole disable-latch write is now gated on `apple_5k_going_down`
 (`patches/5k-latch-clear-going-down-only.patch`). Verified boot: 4 re-detects,
 11 trainings, 0 stream-offs, root link never re-trained, native 5K at 10-bit;
-the owner reports the flashes and the pre-reboot skew are gone. The
+the user reports the flashes and the pre-reboot skew are gone. The
 measured-resync build was dropped as inert. Lesson: `journalctl -k` for older
 boots is the cheapest regression test — compare the same counters across
 builds before theorising.
@@ -530,7 +530,7 @@ Forcing a fresh capture stream recovers only a couple of dB, so it is not the
 stream. Seen at least three times *before* the serialisation fix. The half-configured
 front end is consistent with the unplug/re-detect racing stream setup, i.e. the
 same root cause. After the fix, replugs measure −20 dBFS (healthy) across a full
-session; left here so the owner can flag it if it ever recurs.
+session; left here so the user can flag it if it ever recurs.
 
 **3. Operational trap, cost hours:** every driver reload silently disconnects
 OBS, Chromium and the shell plugins from audio, and **Chromium can be left with
@@ -540,44 +540,8 @@ microphone even though the system is healthy. Kill *all* of them and let it
 respawn exactly one. Check `pgrep -cf 'utility-sub-type=audio'`.
 
 **Known remaining issue:** a loud high-pitched artefact on the headset output at
-the moment of plug-in, reported repeatedly by the owner. Not diagnosed. Most
+the moment of plug-in, reported repeatedly by the user. Not diagnosed. Most
 likely HSBIAS asserted abruptly or the output SRC failing to lock cleanly.
-
-### Superseded: capture follows the jack
-
-`patches/cs8409-capture-follows-jack.patch` (applied and running; module
-srcversion `F265460E88F25059306A73A`). **Measured with a headset plugged in:
-capture peak 0.0253, was 0.00000.** Verified at hardware level mid-capture, not
-just by amplitude: the DMA runs on ADC **0x1a** while 0x23 sits idle, headset pin
-`0x3c` reads `Pin-ctls: 0x20: IN` while internal pin `0x45` reads `0x00`, and the
-driver logs `capture nid 0x23 -> 0x1a (jack 1 mike 1)`.
-
-The fix: in `cs_8409_capture_pcm_prepare`, choose the ADC the pre-prepare hook is
-about to configure — `0x1a` when a mic-equipped headset is present, otherwise
-`intmike_adc_nid` — and move `hinfo->nid` there. Two details make it work.
-It must happen **before** the hook, because `cs_8409_store_stream_format` caches
-the DMA stream tag against `hinfo->nid` and the headset setup's
-`cs_8409_really_update_stream_format(0x1a, ...)` would otherwise find an empty
-cache. And it must switch **both ways**: `hinfo` is persistent for the life of
-the codec, so switching only on plug-in would strand the PCM on `0x1a` and break
-the internal mic for every recording after the first unplug.
-
-**Output switching already worked** and still does: `Active Port:
-analog-output-headphones` with the headset in, speakers marked *not available*.
-
-**Still to confirm physically:** the unplug direction. The headset was plugged in
-throughout the work, so "unplugged → internal mic" is inferred, not measured —
-though `jack_present` is cleared at `patch_cirrus_real84.h:5496` and `have_mike`
-at `:5695`, so the reverse switch is guaranteed to fire.
-
-**Two published patches were considered and rejected.** ExternPointer's (davidjo
-issue #29) makes the internal mic run unconditionally, which is the *opposite* of
-jack-following behaviour, and it deletes `cs_8409_intmike_linein_resetup()` from
-the unplug path — the very call that restores the internal mic when the headset
-comes out. PR #197 has the right idea but switches one way only, stranding the
-PCM on `0x1a` after the first unplug; its Makefile hunk also enables
-`MYSOUNDDEBUG`, and its `patch_cirrus_apple.h` hunk targets the wrong build
-variant (this kernel compiles `cirrus_apple.h`).
 
 ### Separate pre-existing driver bug: WirePlumber drops the card
 
@@ -588,28 +552,6 @@ during this work (triggered by unplugging during module probe, which also logs
 `headphone REMOVED 6 - UNIMPLEMENTED!!`). Clamping the control to 2 recovers it.
 **This will recur** after any internal-mic capture if WirePlumber restarts. Not
 fixed — needs a one-line clamp in the driver's control setup.
-
-### Fixes previously surveyed (superseded by the above)
-
-1. **ExternPointer's patch**, davidjo issue #29, 5 Sep 2026, tested on
-   MacBookPro14,3 on this same kernel 7.1.9. Deletes the `have_mike` branch so
-   `cs_8409_capture_setup()` runs unconditionally, always calls
-   `cs_8409_capture_cleanup`, drops `cs_8409_intmike_linein_disable()` and
-   `switch_input_src()` from three call sites, and guards every
-   `cs_8409_inputs_power_nids_off()` with `!spec->capturing`. Author reports the
-   internal mic then records with a mic-equipped headset plugged in, surviving
-   mid-capture plug and unplug. **Exactly our failure mode.**
-2. **`petershevchenko/imac-sound`** (pushed 2026-06-30) — a complete
-   iMac18,3-specific DKMS driver built on the **in-kernel**
-   `sound/hda/codecs/cirrus/` driver rather than the davidjo fork. Carries a real
-   `SND_PCI_QUIRK(0x106b, 0x1000, "iMac18,3", ...)`, an iMac pin table, a
-   CS42L83 init sequence with iMac tip-sense inversion, and keeps the internal
-   mic's DMIC clock on permanently with the comment that gating it per-capture
-   "relied on the capture hook, which PipeWire does not reliably invoke" — the
-   same diagnosis reached independently. Claims both mics work.
-
-`davidjo` `ef27884`, the reverted commit, **does not help us**: its gate is
-`jack_present && !have_mike`, and ours is `have_mike == 1`.
 
 ### Not a defect, but worth tuning
 
@@ -771,7 +713,7 @@ and the RAM run. The ceiling is not mis-set — the SMC's
 own control target *is* ~95 °C, so the plan's limit sits exactly where the
 firmware deliberately holds the chip. **Consequence: a CPU endurance run cannot
 be performed inside that safety envelope.** Raising it (TJmax is 100 °C and the
-chip throttles itself) is a policy call for the owner, not a silent change.
+chip throttles itself) is a policy call for the user, not a silent change.
 
 **The GPU is clean.** 25 minutes of 3D load total (5 min glmark2 @ 2560×1440,
 score 7979; 20 min @ 1920×1080 endurance): zero GPU resets, zero ring timeouts,
@@ -846,7 +788,7 @@ picker uses when you select the EFI volume) shows *no menu at all* — a UKI has
 none — and boots straight into whatever that copy holds. That is why a chosen
 boot entry can appear to be ignored.
 
-Confirmed by the owner from the two observed routes:
+Confirmed by the user from the two observed routes:
 
 | Route | Lands on | Menu? |
 |---|---|---|
@@ -930,7 +872,7 @@ boots to see whether the shear ever shows there. Workaround unchanged:
 The artifact that actually bites in daily use, distinct from the boot-time ones.
 The mode is a correct 5120x2880 throughout; what is lost is sync — the slave
 stream's `sync_enabled` flips to 0 on some modeset and the two tiles scan out
-of phase, which reads as a skewed/sheared seam. Calibrated against the owner's
+of phase, which reads as a skewed/sheared seam. Calibrated against the user's
 eyes on 2026-09-05: `sync_enabled=0` in the `commit-after-dc` log line is the
 skew.
 

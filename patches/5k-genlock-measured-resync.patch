@@ -5,7 +5,7 @@ genlock-settle-resync, latch-clear). Refinement of the settle-and-resync.
 
 The hardware alignment (dc_trigger_sync -> enable_timing_synchronization)
 resets the slave tile's scan position, which is a visible one-frame jump.
-Running it unconditionally 250 ms after every tiled commit is what the owner
+Running it unconditionally 250 ms after every tiled commit is what a viewer
 sees as a jump at the boot-splash handoff after the disk password, and again
 for a moment before a reboot when the session hands the display to the
 shutdown splash.
@@ -95,7 +95,7 @@ journal shows what each pass measured and did.
 + * Re-sync the tiled pair -- but only when they are measurably out of step.
 + * The hardware alignment resets the slave tile's scan position, which is a
 + * visible one-frame jump; running it on an already-aligned pair is the jump
-+ * the owner sees at the boot-splash handoff and again at session exit. Both
++ * is visible at the boot-splash handoff and again at session exit. Both
 + * deltas are logged so the journal shows what each pass found and did.
 + * Caller holds dm->dc_lock.
 + */
