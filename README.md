@@ -1,8 +1,8 @@
 <div align="center">
 
-# 🖥️ iMac 5K on Linux
+# 🖥️ iMac 5K on Omarchy Linux
 
-**The 2017 27″ 5K iMac, running Linux the way it should.**
+**The 2017 27″ iMac (18,3) — running Omarchy Linux the way it should.**
 
 ![hardware](https://img.shields.io/badge/hardware-iMac18,3-111?logo=apple&logoColor=white)
 ![display](https://img.shields.io/badge/display-5120×2880-e91e63)
