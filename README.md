@@ -7,12 +7,17 @@
 Apple's 2017 iMac hardware has several things stock Linux gets wrong or doesn't support at all. This repo is a patcher that fixes them, one command at a time, with every change reversible.
 
 ```bash
-git clone https://github.com/ahmadtv/omarchy-imac18-3-patch
-cd omarchy-imac18-3-patch
-./scripts/imac-patcher
+bash <(curl -fsSL https://raw.githubusercontent.com/ahmadtv/omarchy-imac18-3-patch/main/install)
 ```
 
-The patcher shows you what's applied, what isn't, and lets you pick. Nothing is applied without asking.
+That clones the patcher and opens its menu. Or clone it yourself:
+
+```bash
+git clone https://github.com/ahmadtv/omarchy-imac18-3-patch
+cd omarchy-imac18-3-patch && ./scripts/imac-patcher
+```
+
+Either way the patcher shows you what's applied, what isn't, and lets you pick. **Nothing is applied without asking** — the one-liner only clones and opens the menu, it changes nothing on its own.
 
 ---
 

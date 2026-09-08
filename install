@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+# One-line bootstrap for the iMac18,3 patcher.
+#
+#   bash <(curl -fsSL https://raw.githubusercontent.com/ahmadtv/omarchy-imac18-3-patch/main/install)
+#
+# Clones (or updates) this repo to a stable location and launches the patcher's
+# menu. It applies nothing on its own — the menu still shows what's applied and
+# asks before every change. Run it as your normal user; the patcher escalates
+# with sudo only for the individual steps that need it.
+#
+# Pass arguments straight through, e.g. to skip the menu:
+#   bash <(curl -fsSL .../install) --apply 5k
+set -euo pipefail
+
+REPO_URL="https://github.com/ahmadtv/omarchy-imac18-3-patch"
+DEST="${IMAC_PATCH_DIR:-$HOME/.local/share/omarchy-imac18-3-patch}"
+
+command -v git >/dev/null || { echo "git is required — install it first (e.g. sudo pacman -S git)"; exit 1; }
+
+if [ -d "$DEST/.git" ]; then
+    echo "==> Updating $DEST"
+    git -C "$DEST" pull --ff-only
+else
+    echo "==> Cloning into $DEST"
+    mkdir -p "$(dirname "$DEST")"
+    git clone "$REPO_URL" "$DEST"
+fi
+
+echo "==> Launching the patcher"
+exec "$DEST/scripts/imac-patcher" "$@"
