@@ -18,7 +18,7 @@
 Native **5120×2880**, real **speakers and mic**, true **wide-gamut colour** — the hardware Apple leaves half-asleep for everyone but macOS, woken up. **One command. Every change reversible. Nothing touched without asking.**
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/ahmadtv/omarchy-imac18-3-patch/main/install)
+bash <(curl -fsSL https://raw.githubusercontent.com/ahmadtv/omarchy-imac5k/main/install)
 ```
 
 > For the **2017 27-inch iMac (iMac18,3)**. Built and tested on [Omarchy](https://omarchy.org) (Arch + Hyprland); the audio, colour and EQ pieces are largely distro-agnostic.
@@ -58,8 +58,8 @@ Straight about the gaps:
 The one-liner above clones the patcher and opens its menu. Or do it by hand:
 
 ```bash
-git clone https://github.com/ahmadtv/omarchy-imac18-3-patch
-cd omarchy-imac18-3-patch && ./scripts/imac-patcher
+git clone https://github.com/ahmadtv/omarchy-imac5k
+cd omarchy-imac5k && ./scripts/imac-patcher
 ```
 
 The patcher shows what's applied, what isn't, and lets you pick — **nothing is applied without asking**. Each piece is a separate, reversible step:

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # One-line bootstrap for the iMac18,3 patcher.
 #
-#   bash <(curl -fsSL https://raw.githubusercontent.com/ahmadtv/omarchy-imac18-3-patch/main/install)
+#   bash <(curl -fsSL https://raw.githubusercontent.com/ahmadtv/omarchy-imac5k/main/install)
 #
 # Clones (or updates) this repo to a stable location and launches the patcher's
 # menu. It applies nothing on its own — the menu still shows what's applied and
@@ -12,8 +12,8 @@
 #   bash <(curl -fsSL .../install) --apply 5k
 set -euo pipefail
 
-REPO_URL="https://github.com/ahmadtv/omarchy-imac18-3-patch"
-DEST="${IMAC_PATCH_DIR:-$HOME/.local/share/omarchy-imac18-3-patch}"
+REPO_URL="https://github.com/ahmadtv/omarchy-imac5k"
+DEST="${IMAC_PATCH_DIR:-$HOME/.local/share/omarchy-imac5k}"
 
 command -v git >/dev/null || { echo "git is required — install it first (e.g. sudo pacman -S git)"; exit 1; }
 
