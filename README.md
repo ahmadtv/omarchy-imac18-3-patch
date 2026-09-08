@@ -74,6 +74,8 @@ The patcher shows what's applied, what isn't, and lets you pick — **nothing is
 
 Audio uses the same model — it clones the upstream [jackdanyell](https://github.com/jackdanyell/imac18-3-cs8409-linux-audio) driver at the verified commit and applies [`patches/cs8409-headset-capture.patch`](patches/cs8409-headset-capture.patch) on top, then DKMS-builds it so it survives kernel updates.
 
+> **Not on Omarchy?** Mark Pronkin maintains a universal fork — [`imac5k-universal-linux-patcher`](https://github.com/MarkPronkin/imac5k-universal-linux-patcher) — with one-command install/update, automatic dependency install, and preliminary Fedora support (more distros in progress).
+
 ---
 
 ## ⚠️ Before you touch suspend
@@ -95,4 +97,4 @@ Every patch backs up what it replaces and can be reversed. Boot-related changes 
 
 ## 🙏 Credits
 
-Native 5K builds on community work from [drm/amd#4455](https://gitlab.freedesktop.org/drm/amd/-/issues/4455) — mforce2 (tile wake), erik2 (stitch), taprobane99 (7.2.x port), with guidance from AMD's Alex Deucher. The genlock fix and the first verified iMac18,3 result came from this project. Audio driver by [jackdanyell](https://github.com/jackdanyell/imac18-3-cs8409-linux-audio).
+Native 5K builds on community work from [drm/amd#4455](https://gitlab.freedesktop.org/drm/amd/-/issues/4455) — mforce2 (tile wake), erik2 (stitch), taprobane99 (7.2.x port), with guidance from AMD's Alex Deucher. The genlock fix and the first verified iMac18,3 result came from this project. Audio driver by [jackdanyell](https://github.com/jackdanyell/imac18-3-cs8409-linux-audio). Multi-distro fork by [Mark Pronkin](https://github.com/MarkPronkin/imac5k-universal-linux-patcher).
