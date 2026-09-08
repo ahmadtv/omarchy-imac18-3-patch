@@ -1,143 +1,88 @@
-# 🖥️ iMac18,3 Patch
+# 🖥️ iMac 5K on Linux
 
 ![iMac18,3 Patch — native 5120×2880, working speakers and mic, true wide-gamut colour](.github/social-preview.png)
 
-**Makes a 2017 27" 5K iMac work properly under Linux — native 5120×2880, working speakers, and correct colour.**
+### A 2017 27″ 5K iMac, running Linux the way it should.
 
-Apple's 2017 iMac hardware has several things stock Linux gets wrong or doesn't support at all. This repo is a patcher that fixes them, one command at a time, with every change reversible.
+Native **5120×2880**, real **speakers and mic**, true **wide-gamut colour** — the hardware Apple leaves half-asleep for everyone but macOS, woken up. One command, every change reversible, nothing touched without asking.
 
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/ahmadtv/omarchy-imac18-3-patch/main/install)
 ```
 
-That clones the patcher and opens its menu. Or clone it yourself:
+> For the **2017 27-inch iMac (iMac18,3)**. Built and tested on [Omarchy](https://omarchy.org) (Arch + Hyprland); the audio, colour and EQ pieces are largely distro-agnostic.
+
+---
+
+## ✨ What this patch makes work
+
+| | |
+|---|---|
+| 🖥️ **Native 5K** | Full **5120×2880**. The panel is two 2560×2880 tiles Apple leaves dormant; this wakes the second one, stitches both into one display, and genlocks them so they scan in lockstep — seamless under motion. |
+| 🔊 **Speakers & mic** | The CS8409 codec the kernel can't drive at all — now with speakers, internal **and** headset mic, and **automatic switching** on plug/unplug just like macOS. Tested with **Apple EarPods**, including the three **inline buttons** (play/pause, volume ±). |
+| 🎚️ **macOS-style sound** | The codec does zero DSP; macOS's warmth is pure software EQ. A PipeWire profile brings it back. |
+| 🎨 **True colour** | The wide-gamut **Display P3** panel mapped correctly, instead of the oversaturated mess of stock sRGB. |
+| ⚡ **Thunderbolt + 10GbE** | Adapters authorised and remembered across reboots. Tested with an **OWC Thunderbolt 3** dock + 10GbE. |
+
+## ✅ Already fine out of the box
+
+No patch needed — these just work on Omarchy / Linux:
+
+🌐 Ethernet · 📶 Wi-Fi · 🔷 Bluetooth · 📷 Webcam · ⌨️ Keyboard & trackpad · 🔌 USB
+
+## 🚫 Not working (yet)
+
+Straight about the gaps:
+
+- 💳 **SD / memory-card reader** — dead, and it's a **hardware fault in the reader** (the card is recognised, then every read fails), not a driver gap. Not fixable in software.
+- 🔆 **Auto-brightness** — the ambient-light sensor is present but not wired to the backlight.
+- 😴 **Suspend / sleep** — hard-hangs the machine (Apple firmware); masked off so nothing triggers it by accident.
+- 🎬 **Video encode (VCE)** — hangs the GPU on some transcodes; under investigation.
+
+*(4K YouTube is CPU-decoded — a Polaris silicon limit, not something a patch can change.)*
+
+---
+
+## 🧩 Install
+
+The one-liner above clones the patcher and opens its menu. Or do it by hand:
 
 ```bash
 git clone https://github.com/ahmadtv/omarchy-imac18-3-patch
 cd omarchy-imac18-3-patch && ./scripts/imac-patcher
 ```
 
-Either way the patcher shows you what's applied, what isn't, and lets you pick. **Nothing is applied without asking** — the one-liner only clones and opens the menu, it changes nothing on its own.
-
----
-
-## 🔧 What it fixes
-
-| | Problem on stock Linux | Status |
-|---|---|---|
-| 🖥️ **Display** | Panel is two 2560×2880 tiles; stock `amdgpu` drives one and stretches it. No native 5K. | ✅ Native 5120×2880, genlocked |
-| 🔊 **Speakers / mic** | CS8409 codec: kernel finds no speaker output at all. Silent machine. | ✅ DKMS driver + headset mic, auto in/out switching, inline buttons — incl. **Apple EarPods** |
-| 🎚️ **Speaker tone** | Codec does zero DSP; macOS's warmth is all software EQ that Linux lacks. | ✅ PipeWire EQ profile |
-| 🎨 **Colour** | Wide-gamut (P3) panel rendered as sRGB — everything oversaturated. | ✅ Correct gamut mapping |
-| 😴 **Suspend** | Hard-hangs the machine every time (Apple firmware ACPI issue). | ⚠️ Masked off — see below |
-| ⚡ **Thunderbolt / 10GbE** | Adapter detected but never authorised. | ✅ Persistent enrolment (tested with an **OWC Thunderbolt 3** dock + 10GbE) |
-
----
-
-## 🖥️ The headline: native 5K
-
-The internal panel is a genuine dual-tile display — two 2560×2880 halves on separate physical links, which Apple's firmware leaves half-asleep for non-Apple operating systems. Stock `amdgpu` only ever lights one tile and lets the panel stretch it.
-
-The patch stack fixes this in three layers, all inside the `amdgpu` module:
-
-1. ⚡ **Wake** — a vendor DPCD write (`0x4F1`) powers up the dormant second link
-2. 🧵 **Stitch** — both tiles are presented to userspace as one 5120×2880 output, so compositors work unmodified
-3. 🔒 **Genlock** — per-frame CRTC sync so the two halves scan in lockstep (mainline has this as a literal `TODO`; filling it is this project's own contribution, submitted upstream)
-
-Install it without a second kernel — only the `amdgpu` module is rebuilt for your running kernel, with the stock module backed up:
+The patcher shows what's applied, what isn't, and lets you pick — **nothing is applied without asking**. Each piece is a separate, reversible step:
 
 ```bash
-./scripts/imac-patcher            # menu-driven
-./scripts/imac-patcher --apply 5k  # or direct
-./scripts/imac-patcher --remove 5k # full undo, any time
+./scripts/imac-patcher --apply 5k      # native 5K (rebuilds only the amdgpu module)
+./scripts/imac-patcher --apply audio   # speakers, mics, EarPods + buttons
+./scripts/imac-patcher --remove 5k     # full undo, any time
 ```
 
-**Read [`patches/README.md`](patches/README.md) first.** The patch is verified against kernel **7.1.x and 7.2.x only** and the installer refuses anything else, because a mis-applied patch means a broken GPU module.
+**The 5K module needs kernel 7.1.x or 7.2.x** and the patcher refuses anything else — a mis-applied GPU patch means a broken display, so a newer kernel must be re-ported by hand first. You supply nothing else: the installer fetches the matching kernel source itself (≈8 GB, ~20–40 min the first build; re-runs are fast). Re-run after any kernel update.
 
-You don't need to supply any files — the patch ships in this repo, and the installer downloads the matching kernel source from kernel.org itself. What you do need:
-
-- 🛠️ **Build tools and kernel headers** — `base-devel bc pahole linux-headers`. The patcher checks for these up front and offers to install anything missing, rather than failing part-way through a compile.
-- 💾 **About 8 GB of disk** for the kernel source tree.
-- ⏱️ **20–40 minutes** for the first build. Re-runs (e.g. after a kernel update) reuse the tree and are much faster.
-
-Re-run it after any kernel update — the patched module is built for one specific kernel version and a new kernel reverts you to stock (which the patcher will report as `partial`).
+Audio uses the same model — it clones the upstream [jackdanyell](https://github.com/jackdanyell/imac18-3-cs8409-linux-audio) driver at the verified commit and applies [`patches/cs8409-headset-capture.patch`](patches/cs8409-headset-capture.patch) on top, then DKMS-builds it so it survives kernel updates.
 
 ---
 
-## 🔊 Audio
+## ⚠️ Before you touch suspend
 
-The CS8409 codec needs an out-of-tree driver — the in-kernel one doesn't recognise a speaker output on this board at all. The patcher handles it:
-
-```bash
-./scripts/imac-patcher --apply audio   # or pick it from the menu
-```
-
-It clones the upstream driver ([jackdanyell](https://github.com/jackdanyell/imac18-3-cs8409-linux-audio)) at the pinned, verified commit, applies [`patches/cs8409-headset-capture.patch`](patches/cs8409-headset-capture.patch) on top, and DKMS-builds it — the same "pristine upstream + our diff" model as the 5K side. Reboot after.
-
-That gets you: speakers, the internal mic, the headset mic, automatic switching between them on plug/unplug (sound and mic follow the jack, like macOS), a usable capture level for both, and the three inline earbud buttons (play/pause, volume up, volume down) — all confirmed on hardware with **Apple EarPods** (the 3.5 mm TRRS remote+mic set).
-
-Then, optionally, the tone fix. The codec and amplifier do no processing whatsoever — macOS's fuller sound is entirely software EQ, which Linux has no equivalent of. [`configs/eq6.conf`](configs/eq6.conf) is a PipeWire filter-chain (bass shelf, corrective bands, and a clipping clamp) → copy to `~/.config/pipewire/filter-chain.conf.d/`.
-
----
-
-## 🎨 Colour
-
-The panel is wide-gamut Display P3. Hyprland's default `srgb` mode doesn't gamut-map for it, so everything looks oversaturated. In `~/.config/hypr/monitors.lua`:
-
-```lua
-hl.monitor({ output = "", mode = "preferred", position = "auto", scale = 2, cm = "dp3" })
-```
-
----
-
-## 😴 Suspend — read this before you try it
-
-Suspend and hibernate **hard-hang this machine, every time**. This is an Apple firmware ACPI issue, not something a kernel parameter fixes; sleep mode, the display override, and GPU power states were each ruled out by testing. Recovery is a hard power-cycle.
-
-The patcher masks the sleep targets so nothing triggers them by accident:
+Suspend and hibernate **hard-hang this machine, every time** — an Apple firmware ACPI issue no kernel parameter fixes; recovery is a hard power-cycle. The patcher masks the sleep targets so nothing triggers them by accident:
 
 ```bash
 sudo systemctl mask suspend.target hibernate.target hybrid-sleep.target suspend-then-hibernate.target
 ```
 
----
-
-## 🚧 Known rough edges
-
-- 🎬 **Video encode (VCE)** hangs the GPU on certain transcodes, taking the session down. Under investigation.
-- 📺 **YouTube 4K is CPU-decoded** — Polaris has no VP9/AV1 silicon. Hardware limit, not fixable.
-
-The Apple boot logo (skew and black flashes) and the headset plug-in artefact were both open here previously and are now reported clean — the logo looks stock on cold boot and warm reboot alike, and jack plug/unplug is quiet. Details, root causes and rejected approaches for everything are in [`TODO.md`](TODO.md).
-
----
-
-## 🚫 What's still missing (hardware)
-
-Honest list of what this machine's hardware does **not** do under Linux yet:
-
-- 💳 **SD / memory-card reader** — does not work, and it's a **hardware fault in the reader**, not a driver gap. The card is identified correctly (CID/CSD read fine), then every data read fails the moment the DAT lines must carry data; two different cards, same result. Not fixable in software — closed.
-- 🔆 **Automatic brightness (ambient light sensor)** — the iMac's light sensor is present but not wired to the backlight, so brightness doesn't adapt to the room. Manual brightness is a separate, still-imperfect story (the panel's backlight sits behind Apple's firmware; a native-PWM path is staged but not shipped by default).
-- 😴 **Suspend / sleep** — hard-hangs the machine (Apple firmware ACPI); masked off, see above.
-- 🎬 **Video encode (VCE)** — hangs the GPU on some transcodes; under investigation.
-
-Everything else on the machine — display, audio (speakers, both mics, EarPods, buttons), colour, Ethernet, Wi-Fi, Bluetooth, Thunderbolt/10GbE (OWC), webcam — works.
-
----
-
-## 📋 Requirements
-
-- Apple iMac18,3 (2017 27" 5K). The patcher refuses to run on other hardware.
-- Kernel 7.1.x or 7.2.x for the 5K patch (everything else is version-independent)
-- Omarchy is what this is developed and tested against. The audio, EQ and colour pieces are largely distribution-agnostic; the boot-related pieces assume Limine.
-
 ## 🛟 Safety
 
-Every patch backs up what it replaces and can be reversed. Boot-related changes print their recovery steps *before* running. A new `amdgpu` build never has to replace the working one to be tried: `scripts/imac-alt-entry add <name> <module>` boots it from its own hash-pinned Limine entry with the default untouched (see [`patches/README.md`](patches/README.md)). If a boot change ever goes wrong: boot the Limine snapshot entry, restore `/etc/default/limine.backup`, re-run `limine-mkinitcpio`, reboot.
+Every patch backs up what it replaces and can be reversed. Boot-related changes print their recovery steps first. A new `amdgpu` build never has to replace the working one to be tried — `scripts/imac-alt-entry` boots it from its own hash-pinned Limine entry with the default untouched. See [`patches/README.md`](patches/README.md).
 
-## 🧭 How this was worked out
+## 🔬 Under the hood
 
-Open items, root causes and rejected approaches are tracked in [`TODO.md`](TODO.md).
+- **Native 5K, the three layers (wake · stitch · genlock)** and the install rules → [`patches/README.md`](patches/README.md)
+- **Open items, root causes and rejected approaches** → [`TODO.md`](TODO.md)
 
 ## 🙏 Credits
 
-Native 5K builds on community work from [drm/amd#4455](https://gitlab.freedesktop.org/drm/amd/-/issues/4455) — mforce2 (tile wake), erik2 (stitch), taprobane99 (7.2.2 port), with guidance from AMD's Alex Deucher. The genlock fix and the first verified iMac18,3 result came from this project. Audio driver by [jackdanyell](https://github.com/jackdanyell/imac18-3-cs8409-linux-audio).
+Native 5K builds on community work from [drm/amd#4455](https://gitlab.freedesktop.org/drm/amd/-/issues/4455) — mforce2 (tile wake), erik2 (stitch), taprobane99 (7.2.x port), with guidance from AMD's Alex Deucher. The genlock fix and the first verified iMac18,3 result came from this project. Audio driver by [jackdanyell](https://github.com/jackdanyell/imac18-3-cs8409-linux-audio).
