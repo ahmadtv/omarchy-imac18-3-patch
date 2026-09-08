@@ -491,6 +491,35 @@ Restarting quickshell fixed it. **Before chasing a hardware output fault, check
 whether a second application also has no sound** — and note that every driver
 reload silently disconnects OBS, Chromium and the shell plugins from audio.
 
+### Open bugs on the jack path (found 2026-09-07/08, not yet fixed)
+
+**1. A jack change strips the ports off the capture device.** After an unplug and
+replug, `pactl list sources` shows the microphone with an empty `Ports:` list,
+while the *card* still lists both `analog-input-internal-mic` and
+`analog-input-mic` correctly. A source with no ports is malformed, and Chromium
+then reports "no microphone found" — which is what the owner hit in WhatsApp
+repeatedly. Recovery: `pactl set-card-profile alsa_card.pci-0000_00_1f.3 off`
+then back to `output:analog-stereo+input:analog-stereo`, which restores the
+ports. **This is the bug that makes the machine feel unusable** — on working
+hardware a jack change swaps the active port on a device that persists, and
+applications never notice. Fix this before anything else on the audio path.
+
+**2. The headset mic level drops ~30 dB after a replug.** Fresh driver load gives
+−16 dBFS; after an unplug/replug the same setup measures −45 to −51 dBFS. The
+boost *is* applied — `adc_level: boost 1 gain 12 dB (0x1d01 0x01 0x1d03 0x0c)`
+is logged at the replug with the right values, and the module parameters are
+intact. So gain reaches the codec but the signal arriving is weak: something
+else in the CS42L83 front end comes back only partially configured on a replug.
+Forcing a fresh capture stream recovers only a couple of dB, so it is not the
+stream. Seen at least three times.
+
+**3. Operational trap, cost hours:** every driver reload silently disconnects
+OBS, Chromium and the shell plugins from audio, and **Chromium can be left with
+several orphaned audio services** (`utility-sub-type=audio`) if the service is
+killed repeatedly — the browser then talks to a dead one and reports no
+microphone even though the system is healthy. Kill *all* of them and let it
+respawn exactly one. Check `pgrep -cf 'utility-sub-type=audio'`.
+
 **Known remaining issue:** a loud high-pitched artefact on the headset output at
 the moment of plug-in, reported repeatedly by the owner. Not diagnosed. Most
 likely HSBIAS asserted abruptly or the output SRC failing to lock cleanly.
