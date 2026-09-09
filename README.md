@@ -76,12 +76,6 @@ git clone https://github.com/ahmadtv/omarchy-imac5k
 cd omarchy-imac5k && ./scripts/imac-patcher
 ```
 
-### 󰏫 Patches to apps live elsewhere
-
-This repo is the hardware of one machine, and it is a one-time run: apply it after a fresh install and you are done. Patches to *apps* — Omarchy plugins, third-party plugins — are a different job with a different life. They want switching and updating, they go stale when their app moves on, and they are the same on every machine you own. So they live in their own repo with their own tool and a bar widget, and travel with you.
-
-The one exception here is the jack-aware panel, which does patch an Omarchy plugin but exists because of this machine's headphone jack, so it belongs with the hardware and is on by default.
-
 The patcher shows what's applied, what isn't, and lets you pick — **nothing is applied without asking**. Omakase in spirit: sensible defaults, and you can send any of it back. Each piece is a separate, reversible step:
 
 ```bash
