@@ -76,6 +76,31 @@ git clone https://github.com/ahmadtv/omarchy-imac5k
 cd omarchy-imac5k && ./scripts/imac-patcher
 ```
 
+### 󰍹 In the Omarchy menu
+
+`--menu install` adds an **iMac** section to Omarchy's own menu, with a ✓ beside every patch that is on and one keystroke to toggle it. It is not a plugin: Omarchy reads `~/.config/omarchy/extensions/omarchy-menu.jsonc` itself and watches it for changes, so this writes rows into that file between markers, leaving anything else in it alone. The menu and the terminal tool are two faces of the same modules — there is one source of truth, and either can be used at any time.
+
+```bash
+./scripts/imac-patcher --menu install    # adds the rows, symlinks imac-patcher into ~/.local/bin
+./scripts/imac-patcher --menu remove     # takes the rows out again
+```
+
+### 󰏫 App patches
+
+Patches to *other people's* apps — an Omarchy plugin, a third-party one — are a separate tier, marked `[app]`, never included in `safe`, and always opt-in. They follow three rules that keep them from becoming a mess:
+
+- The target must be a git checkout, which is what makes removal exact: the patch is reverse-applied and the checkout must come back byte-for-byte identical to upstream, with nothing left behind.
+- Whether a patch is on is answered by asking the checkout, never a note we wrote. If an update replaced the file, or the plugin was reinstalled, the patch reads as off by itself.
+- Applying refuses unless the diff fits the checkout exactly as it stands, so a patch is never half-applied to a version it wasn't written for.
+
+A patched plugin would otherwise block its own update, since Omarchy fast-forwards and refuses on modified files. So update through the patcher and it handles both ends:
+
+```bash
+./scripts/imac-patcher --update-apps     # patches off, omarchy plugin update, then back
+```
+
+Anything that no longer applies afterwards stays off and says so — usually because upstream has fixed it, which is the point: every app patch here is also filed upstream.
+
 The patcher shows what's applied, what isn't, and lets you pick — **nothing is applied without asking**. Omakase in spirit: sensible defaults, and you can send any of it back. Each piece is a separate, reversible step:
 
 ```bash
