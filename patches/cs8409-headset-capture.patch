@@ -5,8 +5,9 @@ Applies to the snd_hda_macbookpro DKMS driver (davidjo/snd_hda_macbookpro),
 against the tree at commit be90113. Every part below was confirmed on hardware
 on an iMac18,3 running kernel 7.1.9-arch1-2.
 
-Six fixes: four on the capture path, one that serialises jack events against
-stream setup, and the headset remote buttons. All confirmed on hardware.
+Seven fixes: four on the capture path, one that serialises jack events against
+stream setup, the headset remote buttons, and an honest name for the jack mic.
+All confirmed on hardware (kernels 7.1.9 and 7.2.3).
 
 1. Capture follows the jack.
    The driver sets up one microphone and records from the other. On plug-in
@@ -137,6 +138,15 @@ playback prepare path handles on its own.
 Known remaining issue: a loud high-pitched artefact is audible on the headset
 output at the moment of plug-in. Not diagnosed. Most likely HSBIAS being
 asserted abruptly or the output SRC not locking cleanly.
+
+7. The jack mic is a headset mic, and says so.
+   The parser was called with no flags, so the mic on the 3.5 mm jack was
+   labelled a bare "Mic". Passing HDA_PINCFG_HEADSET_MIC makes the kernel label
+   it "Headset Mic" (the pin is an external jack mic, which is what the parser
+   looks for). PipeWire's card profiles then classify the port as a headset
+   microphone and the desktop shows "Headset Microphone" with a headset in,
+   instead of "Microphone". Nothing else changes: the driver's own jack
+   handling still decides when that mic is live.
 
 diff --git i/patch_cirrus/cirrus_apple.h w/patch_cirrus/cirrus_apple.h
 index 7e9bcd1..02c89ec 100644
@@ -403,6 +413,26 @@ index 7e9bcd1..02c89ec 100644
 +
          spec->headset_play_format_setup_needed = 1;
          spec->headset_capture_format_setup_needed = 1;
+ 
+diff --git i/patch_cirrus/patch_cirrus_apple.h w/patch_cirrus/patch_cirrus_apple.h
+index bb8f4f2..7822eec 100644
+--- i/patch_cirrus/patch_cirrus_apple.h
++++ w/patch_cirrus/patch_cirrus_apple.h
+@@ -1795,7 +1795,14 @@ static int cs_8409_apple_parse_auto_config(struct hda_codec *codec)
+ 
+         myprintk("snd_hda_intel: cs_8409_apple_parse_auto_config\n");
+ 
+-	err = snd_hda_parse_pin_defcfg(codec, &spec->gen.autocfg, NULL, 0);
++	/* The jack mic (0x3c) shares the 3.5 mm connector with the headphones.
++	 * Telling the parser so makes it label the input "Headset Mic" instead of
++	 * "Mic": PipeWire's card profiles then classify the port as a headset
++	 * microphone, and the desktop shows "Headset Microphone" when a headset
++	 * is plugged in rather than a bare "Microphone". Nothing else changes --
++	 * the driver's own jack handling still decides when the mic is live. */
++	err = snd_hda_parse_pin_defcfg(codec, &spec->gen.autocfg, NULL,
++				       HDA_PINCFG_HEADSET_MIC);
+ 	if (err < 0)
+ 		return err;
  
 diff --git i/patch_cirrus/patch_cirrus_new84.h w/patch_cirrus/patch_cirrus_new84.h
 index a40a6f5..777a9d7 100644
@@ -1028,7 +1058,7 @@ index 76de5e8..1e4190d 100644
          // for partial setup only
          //cs42l83_headset_mike_pin_enable(codec);
 diff --git i/patch_cirrus/patch_cirrus_real84_i2c.h w/patch_cirrus/patch_cirrus_real84_i2c.h
-index 101f27c..56dae01 100644
+index 101f27c..5e90172 100644
 --- i/patch_cirrus/patch_cirrus_real84_i2c.h
 +++ w/patch_cirrus/patch_cirrus_real84_i2c.h
 @@ -1886,10 +1886,42 @@ static void cs42l83_configure_headset_button_interrupts(struct hda_codec *codec)
