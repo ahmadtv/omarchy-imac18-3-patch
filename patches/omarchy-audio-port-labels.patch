@@ -1,0 +1,182 @@
+diff --git a/shell/plugins/panels/audio/Model.js b/shell/plugins/panels/audio/Model.js
+index 94b7cda3..34ae4ea6 100644
+--- a/shell/plugins/panels/audio/Model.js
++++ b/shell/plugins/panels/audio/Model.js
+@@ -47,6 +47,27 @@ function parseSinkAvailability(raw) {
+   return next
+ }
+ 
++// {node name: active port description}, from omarchy-audio-port-labels. Only
++// devices with more than one port are listed there.
++function parsePortLabels(raw) {
++  var next = {}
++  var lines = String(raw || "").split("\n")
++  for (var i = 0; i < lines.length; i++) {
++    var parts = lines[i].split("\t")
++    if (parts.length >= 2 && parts[0] && parts[1]) next[parts[0]] = parts[1].trim()
++  }
++  return next
++}
++
++function labelIsHeadphones(label) {
++  var blob = String(label || "").toLowerCase()
++  return blob.indexOf("headphone") !== -1
++    || blob.indexOf("headset") !== -1
++    || blob.indexOf("earbud") !== -1
++    || blob.indexOf("earphone") !== -1
++    || blob.indexOf("airpod") !== -1
++}
++
+ function friendlyDeviceLabel(text) {
+   var label = String(text || "").trim()
+   label = label.replace(/^sof-soundwire\s+/i, "")
+@@ -78,12 +99,8 @@ function isHeadphones(node) {
+     p["device.product.name"] || "",
+     p["node.description"] || "",
+     p["node.nick"] || ""
+-  ].join(" ")).toLowerCase()
+-  return blob.indexOf("headphone") !== -1
+-    || blob.indexOf("headset") !== -1
+-    || blob.indexOf("earbud") !== -1
+-    || blob.indexOf("earphone") !== -1
+-    || blob.indexOf("airpod") !== -1
++  ].join(" "))
++  return labelIsHeadphones(blob)
+ }
+ 
+ function sinkGlyph(node) {
+@@ -240,6 +257,8 @@ if (typeof module !== "undefined") {
+     listSnapshot: listSnapshot,
+     outputVolumeName: outputVolumeName,
+     parseSinkAvailability: parseSinkAvailability,
++    parsePortLabels: parsePortLabels,
++    labelIsHeadphones: labelIsHeadphones,
+     friendlyDeviceLabel: friendlyDeviceLabel,
+     nodeProps: nodeProps,
+     nodeLabel: nodeLabel,
+diff --git a/shell/plugins/panels/audio/Panel.qml b/shell/plugins/panels/audio/Panel.qml
+index 26d0c58d..6ee88330 100644
+--- a/shell/plugins/panels/audio/Panel.qml
++++ b/shell/plugins/panels/audio/Panel.qml
+@@ -58,6 +58,12 @@ Panel {
+   property var sinkAvailability: ({})
+   property bool sinkAvailabilityLoaded: false
+ 
++  // Active port per device that has more than one, e.g. {name: "Headphones"}.
++  // Speakers and a headphone jack are one device with two ports, so the device
++  // name never changes when something is plugged in; the port is what a person
++  // would call the output, and it is what the rows and the bar icon show.
++  property var portLabels: ({})
++
+   // Identify true playback streams without reading node.properties here:
+   // PwNode.properties is invalid until the node is bound, and reading it while
+   // capture streams are appearing (for example, when Voxtype starts recording)
+@@ -148,6 +154,13 @@ Panel {
+   readonly property real inputVolume: source && source.audio ? source.audio.volume : 0
+   readonly property bool inputMuted: source && source.audio ? source.audio.muted : false
+ 
++  // Each port keeps its own volume, so a jack event usually shows up here as a
++  // level change on the physical sink the moment the port switches. Using that
++  // as a nudge makes the bar icon follow a plug within a fraction of a second
++  // instead of waiting for the next poll; the poll remains the safety net.
++  onOutputVolumeChanged: portLabelsNudge.restart()
++  onInputVolumeChanged: portLabelsNudge.restart()
++
+   onRawAudioSinksChanged: if (rawAudioSinks.length > 0) cachedAudioSinks = rawAudioSinks
+   onRawAudioSourcesChanged: if (rawAudioSources.length > 0) cachedAudioSources = rawAudioSources
+ 
+@@ -495,12 +508,30 @@ Panel {
+     sinkAvailabilityLoaded = true
+   }
+ 
++  function updatePortLabels(raw) {
++    portLabels = Model.parsePortLabels(raw)
++  }
++
++  function refreshPortLabels() {
++    if (!portLabelsProc.running) portLabelsProc.running = true
++  }
++
++  // The port to show for a row, or "" to fall back to the device name. A tuning
++  // sink has no ports of its own; when it is the selected output, the port that
++  // matters is on the physical sink it feeds, which volumeSinkName resolves.
++  function portLabel(node) {
++    if (!node || !node.name) return ""
++    var label = portLabels[String(node.name)]
++    if (!label && node === sink && volumeSinkName) label = portLabels[volumeSinkName]
++    return label || ""
++  }
++
+   function friendlyDeviceLabel(text) {
+     return Model.friendlyDeviceLabel(text)
+   }
+ 
+   function nodeLabel(node) {
+-    return Model.nodeLabel(node)
++    return portLabel(node) || Model.nodeLabel(node)
+   }
+ 
+   function nodeProps(node) {
+@@ -508,14 +539,16 @@ Panel {
+   }
+ 
+   function isHeadphones(node) {
+-    return Model.isHeadphones(node)
++    return Model.labelIsHeadphones(portLabel(node)) || Model.isHeadphones(node)
+   }
+ 
+   function sinkGlyph(node) {
++    if (Model.labelIsHeadphones(portLabel(node))) return "󰋋"
+     return Model.sinkGlyph(node)
+   }
+ 
+   function sourceGlyph(node) {
++    if (Model.labelIsHeadphones(portLabel(node))) return "󰋋"
+     return Model.sourceGlyph(node)
+   }
+ 
+@@ -601,12 +634,24 @@ Panel {
+     }
+   }
+ 
++  Process {
++    id: portLabelsProc
++    command: ["omarchy-audio-port-labels"]
++    stdout: StdioCollector {
++      waitForEnd: true
++      onStreamFinished: root.updatePortLabels(text)
++    }
++  }
++
+   Timer {
+     interval: 5000
+     running: root.opened
+     repeat: true
+     triggeredOnStart: true
+-    onTriggered: if (!sinkAvailabilityProc.running) sinkAvailabilityProc.running = true
++    onTriggered: {
++      if (!sinkAvailabilityProc.running) sinkAvailabilityProc.running = true
++      root.refreshPortLabels()
++    }
+   }
+ 
+   // Runs whether or not the panel is open: the bar shows and scrolls the output
+@@ -617,7 +662,17 @@ Panel {
+     running: true
+     repeat: true
+     triggeredOnStart: true
+-    onTriggered: root.resolveVolumeSink()
++    onTriggered: {
++      root.resolveVolumeSink()
++      root.refreshPortLabels()
++    }
++  }
++
++  Timer {
++    id: portLabelsNudge
++    interval: 300
++    repeat: false
++    onTriggered: root.refreshPortLabels()
+   }
+ 
+   Timer {
