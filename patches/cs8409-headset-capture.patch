@@ -1,3 +1,143 @@
+iMac 18,3 CS8409/CS42L83: make headset capture work, follow the jack live, and
+give both microphones a usable level.
+
+Applies to the snd_hda_macbookpro DKMS driver (davidjo/snd_hda_macbookpro),
+against the tree at commit be90113. Every part below was confirmed on hardware
+on an iMac18,3 running kernels 7.1.9 and 7.2.3.
+
+Six fixes: four on the capture path, one that serialises jack events against
+stream setup, and the headset remote buttons. All confirmed on hardware.
+
+1. Capture follows the jack.
+   The driver sets up one microphone and records from the other. On plug-in
+   cs_8409_pcm_capture_pre_prepare_hook branches on have_mike and calls
+   cs_8409_headcapture_setup, routing the headset mike (pin 0x3c) to the
+   cs42l83 ADC 0x1a -- but the PCM stays bound to intmike_adc_nid (0x23 on
+   iMacs). Nothing feeds 0x23, so capture is digital silence: peak 0.00000
+   with a headset in, while the internal mike alone worked fine.
+   Proof: vendor coef 0x82 read back 0x0000 mid-capture (DMIC2_SCL_EN never
+   set) and pin 0x45 stayed Pin-ctls 0x00, while coef 0x09 showed the iMac
+   model config was correct -- the path was skipped, not misconfigured.
+   Fix: in cs_8409_capture_pcm_prepare pick the ADC the hook is about to
+   configure and move hinfo->nid there. It must happen BEFORE the hook, since
+   cs_8409_store_stream_format caches the DMA stream tag against hinfo->nid
+   and cs_8409_really_update_stream_format(0x1a,...) would otherwise find an
+   empty cache. It must also switch both ways: hinfo is persistent for the
+   life of the codec, so a one-way switch strands the PCM on 0x1a and breaks
+   the internal mike for every recording after the first unplug.
+
+2. Plugging or unplugging while capturing.
+   The driver's own comment said it: "NOTA BENE - no concept/implementation of
+   plugging in while capturing!!", and the handler logged
+   "PLUGIN WHILE CAPTURING UNIMPLEMENTED!!" and did nothing. Since the setup
+   above only runs at stream start, any application holding the microphone
+   open across a jack change kept the old routing forever. OBS does exactly
+   that, which made the microphone appear to work and then die permanently the
+   first time the jack was touched.
+   Fix: cs_8409_capture_follow_jack() re-runs the selection, the setup and
+   snd_hda_codec_setup_stream() for the new state, called from the have_mike
+   block in cs_8409_plugin_event_continued and from the end of
+   cs_8409_unplug_handle_disconnect. The capture hinfo, stream tag and format
+   are saved in the spec at prepare time so the handler can rebuild the stream.
+   These run from the HDA unsol work item, i.e. process context -- the
+   surrounding code already msleeps and does long i2c sequences -- so the call
+   is direct rather than deferred. spec->block_unsol is saved and restored
+   around it because cs_8409_capture_real clears it on exit and we are nested
+   inside an unsol response.
+   Verified: 90 s capture held open across a physical unplug and replug. The
+   driver logged "capture nid 0x1a -> 0x23 (jack 0 mike 0)" then
+   "0x23 -> 0x1a (jack 1 mike 1)", the converters swapped in
+   /proc/asound/card0/codec#0 to match, and not one 2-second window lost audio.
+
+3. Internal mike gain -- let the mixer own it.
+   cs_8409_intmike_volume_setup was called with a hardcoded 0x27 from four
+   sites. Node 0x23's amp caps are ofs=0x33, nsteps=0x3f, stepsize=0x03, so
+   0x33 is 0 dB and 0x27 is -12 dB -- while the ALSA control simultaneously
+   reported 63 [100%] [12.00dB]. A 24 dB lie, and the driver stamped its value
+   over the user's on every capture setup.
+   Fix: once the mixer exists, read the value ALSA holds and write that, so the
+   control genuinely drives the amp. Before the mixer is built (boot setup runs
+   during codec init) the new intmike_gain parameter seeds it, default 0x33.
+   Measured: -51.0 dBFS RMS before, -22.9 dBFS after, same room, same capture.
+   Note nid 0x45's amp range is only 0..2, so it keeps the original constant
+   through a clamp -- passing 0x27 there latches 3, which is out of range, and
+   WirePlumber then fails "Failed to set volume of 'Internal Mic Boost'" and
+   drops the whole analog device.
+
+4. Headset mike gain.
+   The HDA widget for the headset ADC has no Amp-In at all, so ALSA exposes no
+   control and the user cannot turn it up. At the codec's reset values the
+   earbud mike measured 35x quieter than the internal one: peak 0.0253 versus
+   0.905, a 31 dB shortfall.
+   All the gain lives in the cs42l83, per CS42L42 DS1083F8 sections 4.1 and
+   7.11.3 (same silicon family; mainline sound/soc/codecs/cs42l42.c agrees on
+   the register map): 0x1D01 bit 0 ADC_DIG_BOOST is +20 dB, reset 0; 0x1D03
+   ADC_VOL is two's complement in 1.0 dB steps, +12 dB (0x0C) down to -96 dB.
+   That is +32 dB total, almost exactly the measured deficit.
+   macOS does NOT do this -- davidjo's trace of
+   AppleHDATDM_CS42L83::enableExtMicrophone shows OSX writing 0x1d03 = 0x00 and
+   never touching 0x1d01. Its loudness comes from CoreAudio applying gain in
+   software, which has no register equivalent. Going beyond what OSX writes is
+   therefore correct here, not a workaround.
+   Defaults: boost on plus the full +12 dB trim. In testing a normal speaking
+   voice sat at -21.7 dBFS with peaks at -8.9 dBFS and no clipped samples.
+   Both stages are applied after the ADC, so this is pure digital gain -- it
+   lifts the noise floor with the signal and does not improve SNR (measured
+   28 dB either way, which belongs to the earbud mike and Apple's analogue
+   path). Do not raise the trim further: at +32 dB a plosive close to the mike
+   reaches 0 dBFS and clips.
+
+Correction, made after the first version of this patch was committed: the
+re-route originally also called cs_8409_headplay_setup(), mirroring the normal
+capture-start sequence which does reconfigure the playback/ASP path. Doing that
+from inside a jack event, with OBS holding the microphone open so the re-route
+fired on every plug, left the speakers silent. It is removed: this is a
+capture-side re-route and has no business reconfiguring playback, which the
+playback prepare path handles on its own.
+
+5. Jack events must not race stream setup.
+   A headset jack event (the HDA unsol work item) and an application starting
+   or stopping a capture or playback stream both drive the CS42L83 over the
+   CS8409's i2c engine and toggle the AFG power state, and none of it is
+   atomic. When the two interleave, the codec's status reads come back all
+   zeros: a 70 ms stream setup was seen taking 7.7 s, and the unplug interrupt
+   that arrived inside that window decoded as 0x00000000 and was dropped. The
+   driver then still believed the headset was in -- sound went to an empty
+   socket and capture stayed on an absent mike -- until a reload or replug.
+   This is the root cause of "the mic dies after I unplug" and of apps ending
+   up on a source that no longer matches the hardware.
+   Fix: a single spec->setup_mutex. cs_8409_cs42l83_jack_unsol_event takes it
+   for the whole jack event; the PCM prepare ops take it; the hda_generic PCM
+   open/cleanup/close hooks take it (prepare already holds it, so it is skipped
+   there to avoid recursion). Nine lines, no timing changes.
+   Two smaller defects went with it: cs_8409_cs42l83_mark_jack marked only the
+   headphone pin dirty, so the mic-jack kcontrol froze at its probe value --
+   now snd_hda_jack_set_dirty_all, matching what snd_hda_jack_unsol_event does;
+   and the headset-mic pin-sense override reported presence on jack alone, so
+   it now also requires have_mike.
+
+6. Headset remote buttons.
+   The three earbud buttons each raise a distinct bit in the disambiguated
+   interrupt word -- volume down 0x10000 and volume up 0x20000 in the 0x1b79
+   detect register, play/pause 0x100 (down) / 0x200 (up) in 0x1b7c -- so
+   cs_8409_headset_button_event reads the button straight from the interrupt
+   and emits KEY_VOLUMEDOWN / KEY_VOLUMEUP / KEY_PLAYPAUSE (once, on the down
+   edge). There is no comparator sweep and no HSBIAS poking: an earlier attempt
+   powered the CS42L83 mic level detector up and down around every press to
+   measure a resistance, which clicked through live audio and, under a mutex-
+   less interrupt storm, jammed the handler. All of that scaffolding is gone.
+   The one register the buttons need is Detect Interrupt Mask 2 (0x1b7a): the
+   plug-time button detection ends by re-masking it to 0xff, which gates the
+   two play/pause bits, so after detection it is set to the OSX steady-state
+   0xdc (those two bits open, the volume buttons on 0x1b79 unaffected). Gated
+   by the headset_buttons module parameter, now on by default. Verified: each
+   physical press delivers exactly one key (no repeats, no debounced drops) and
+   audio, capture and the jack-follow all keep working across presses.
+
+Known remaining issue: a loud high-pitched artefact is audible on the headset
+output at the moment of plug-in. Not diagnosed. Most likely HSBIAS being
+asserted abruptly or the output SRC not locking cleanly.
+
 diff --git i/patch_cirrus/cirrus_apple.h w/patch_cirrus/cirrus_apple.h
 index 7e9bcd1..02c89ec 100644
 --- i/patch_cirrus/cirrus_apple.h
