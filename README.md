@@ -76,50 +76,11 @@ git clone https://github.com/ahmadtv/omarchy-imac5k
 cd omarchy-imac5k && ./scripts/imac-patcher
 ```
 
-### 󰀵 On the bar
+### 󰏫 Patches to apps live elsewhere
 
-`--bar install` puts an Apple glyph at the right of the Omarchy bar. Click it and every patch is listed with a tick beside the ones that are on; click a row to toggle it, which opens a terminal because applying can want a password, rebuild a kernel module, and always has something to say.
+This repo is the hardware of one machine, and it is a one-time run: apply it after a fresh install and you are done. Patches to *apps* — Omarchy plugins, third-party plugins — are a different job with a different life. They want switching and updating, they go stale when their app moves on, and they are the same on every machine you own. So they live in their own repo with their own tool and a bar widget, and travel with you.
 
-```bash
-./scripts/imac-patcher --bar install     # adds the widget to the bar's right side
-./scripts/imac-patcher --bar remove      # takes it off again
-```
-
-This one is a plugin, because a bar widget has to be, but a thin one: it asks `imac-patcher --list` what exists and calls `--toggle`, so the patcher stays the only thing that knows what a patch is. Add a module and it appears in the widget with no QML to touch. It can also be opened from a keybind with `omarchy-shell ipc call ahmad.imac-patches toggle`.
-
-An alternative front end, if you would rather have rows in Omarchy's own menu than an icon on the bar:
-
-```bash
-./scripts/imac-patcher --menu install    # rows under "iMac" in the Omarchy menu
-```
-
-That one is not a plugin at all: Omarchy reads `~/.config/omarchy/extensions/omarchy-menu.jsonc` itself and watches it, so the patcher writes rows into that file between markers and leaves everything else in it alone. Either front end, or both, can be used at once; there is one source of truth.
-
-### 󰏫 Tweaks, and your own
-
-Patches to *other people's* apps — an Omarchy plugin, a third-party one — are a separate tier, marked `[tweak]`, never included in `safe`, and always opt-in. They follow three rules that keep them from becoming a mess:
-
-- The target must be a git checkout, which is what makes removal exact: the patch is reverse-applied and the checkout must come back byte-for-byte identical to upstream, with nothing left behind.
-- Whether a patch is on is answered by asking the checkout, never a note we wrote. If an update replaced the file, or the plugin was reinstalled, the patch reads as off by itself.
-- Applying refuses unless the diff fits the checkout exactly as it stands, so a patch is never half-applied to a version it wasn't written for.
-
-A patched plugin would otherwise block its own update, since Omarchy fast-forwards and refuses on modified files. So update through the patcher and it handles both ends:
-
-```bash
-./scripts/imac-patcher --update-apps     # patches off, omarchy plugin update, then back
-```
-
-A refresh symbol appears beside a tweak whose plugin has moved on, in the theme's urgent colour, and the bar glyph turns that colour too. That symbol is its own button: click it to update **only that plugin**, or use the widget's *Update all* row for every waiting one. From the terminal, name the modules you want: `--update-apps game`. The check needs the network, so it runs every six hours rather than each time you look; `--check-updates` forces it. Updating never happens behind your back: switching a tweak off means only that.
-
-A tweak that no longer applies afterwards stays off and says so — usually because upstream has fixed it, which is the point: every tweak here is also filed upstream.
-
-**Your own patches live in your own repo.** This one carries the hardware. Anything personal — your plugin fixes, your dotfiles — goes in a repo of yours that registers itself here, one path per line:
-
-```
-~/.config/imac-patcher/module-dirs
-```
-
-Every `modules/*.sh` under a registered path is loaded with `MODULE_ROOT` set to that repo, so a module finds its own patch files. A module file only defines `mod_<id>_title/_tier/_desc/_detect/_apply/_remove` (plus `_label`/`_icon` for the widget, and `_appid` if it patches a plugin). It then appears in the same status list, the same bar widget and the same `--update-apps` as everything shipped here — one patcher, not two.
+The one exception here is the jack-aware panel, which does patch an Omarchy plugin but exists because of this machine's headphone jack, so it belongs with the hardware and is on by default.
 
 The patcher shows what's applied, what isn't, and lets you pick — **nothing is applied without asking**. Omakase in spirit: sensible defaults, and you can send any of it back. Each piece is a separate, reversible step:
 
