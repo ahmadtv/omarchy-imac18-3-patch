@@ -1,0 +1,122 @@
+#!/usr/bin/env bash
+#
+# Follow the headphone jack and take the speaker EQ out of circuit while
+# something is plugged in, the way plugging headphones into a Mac just works.
+#
+# Why this is needed: Omarchy's speaker tuning pins its output to the speaker
+# sink, which is enough on machines whose UCM profile gives speakers and
+# headphones separate sinks. The CS8409/CS42L83 in the iMac18,3 does not -- both
+# are ports on ONE sink -- so the tuning keeps processing after you plug
+# headphones in, and a correction built for small sealed cabinets (+7 dB of low
+# shelf, a darkened top) is exactly wrong on earbuds.
+#
+# It flattens the filter's band gains in place rather than moving you to another
+# output. That matters:
+#
+#   * The output list keeps ONE entry. Switching the default sink would surface
+#     the bare device as a second entry whenever headphones were in.
+#   * Nothing fights over the default. WirePlumber keeps its own authoritative
+#     default, and an earlier version of this script that corrected the default
+#     sink ended up taking turns with it, dragging live streams between outputs
+#     every few seconds. Here the default never changes.
+#   * No stream is moved and no device is reopened, so switching is silent.
+#
+# The restore values are read from the installed tuning rather than duplicated
+# here, so editing the tuning cannot leave this script applying stale gains.
+set -uo pipefail
+
+TUNING_SINK=omarchy_speaker_tuning
+HW_PATTERN='^alsa_output.*analog-stereo$'
+FRAGMENT="${XDG_CONFIG_HOME:-$HOME/.config}/pipewire/omarchy-speaker-tuning.conf.d/90-tuning.conf"
+
+hw_sink() {
+	pactl list sinks short 2>/dev/null | awk -v p="$HW_PATTERN" '$2 ~ p {print $2; exit}'
+}
+
+active_port() {   # active_port <sink-name>
+	pactl list sinks 2>/dev/null | awk -v want="$1" '
+		/^Sink #/            { name = "" }
+		/^[[:space:]]*Name:/ { name = $2 }
+		/^[[:space:]]*Active Port:/ { if (name == want) { print $3; exit } }'
+}
+
+tuning_node() {
+	pw-dump 2>/dev/null | jq -r --arg n "$TUNING_SINK" \
+		'.[] | select(.info.props."node.name" == $n) | .id' 2>/dev/null | head -1
+}
+
+# "s0_l:Gain" 7.0 "s1_l:Gain" 2.0 ... straight out of the tuning's own graph.
+# <flat> = 1 zeroes every gain instead, which is the bypass.
+gain_params() {   # gain_params <flat 0|1>
+	awk -v flat="$1" '{
+		n = ""; g = ""
+		for (i = 1; i <= NF; i++) {
+			if ($i == "name"     && $(i+1) == "=") n = $(i+2)
+			if ($i == "\"Gain\"" && $(i+1) == "=") { g = $(i+2); gsub(/[}]/, "", g) }
+		}
+		if (n != "" && g != "") printf "\"%s:Gain\" %s ", n, (flat ? "0.0" : g)
+	}' "$FRAGMENT"
+}
+
+set_gains() {   # set_gains <flat 0|1>
+	local id params
+	id="$(tuning_node)";        [[ -n $id ]]     || return 1
+	params="$(gain_params "$1")"; [[ -n $params ]] || return 1
+	pw-cli set-param "$id" Props "{ params = [ $params ] }" >/dev/null 2>&1
+}
+
+# The filter only accepts a Props change while its node is ACTIVE. Plug
+# headphones in while nothing is playing and the write is silently dropped, and
+# the graph then comes back with the gains from its config. So this does not
+# just react to the jack moving: on every sink event it reads the gain back and
+# re-applies whenever it does not match what the current port calls for. That
+# self-heals across suspend, resume and a restart of the tuning host, and it
+# still writes nothing when the state is already correct.
+current_gain() {
+	pw-cli enum-params "$1" Props 2>/dev/null |
+		grep -A1 'String "s0_l:Gain"' | grep Float | head -1 | awk '{print $2}'
+}
+
+# What s0_l:Gain should read for the active port: zero when bypassed, otherwise
+# whatever the tuning itself specifies.
+wanted_gain() {   # wanted_gain <flat 0|1>
+	if [[ "$1" == 1 ]]; then printf '0'; return; fi
+	awk '{
+		for (i = 1; i <= NF; i++)
+			if ($i == "name" && $(i+1) == "=" && $(i+2) == "s0_l")
+				for (j = i; j <= NF; j++)
+					if ($j == "\"Gain\"" && $(j+1) == "=") { g = $(j+2); gsub(/[}]/, "", g); print g; exit }
+	}' "$FRAGMENT"
+}
+
+react() {
+	local hw port flat id now want
+	hw="$(hw_sink)";             [[ -n $hw ]]   || return 0
+	port="$(active_port "$hw")"; [[ -n $port ]] || return 0
+	id="$(tuning_node)";         [[ -n $id ]]   || return 0
+
+	case "$port" in
+	*headphone*|*headset*) flat=1 ;;
+	*)                     flat=0 ;;
+	esac
+
+	now="$(current_gain "$id")"
+	want="$(wanted_gain "$flat")"
+	[[ -n $now && -n $want ]] || return 0
+	# numeric compare: the graph reports 7.000000 where the config says 7.0
+	awk -v a="$now" -v b="$want" 'BEGIN { exit (a - b < 0.001 && b - a < 0.001) ? 0 : 1 }' && return 0
+
+	if set_gains "$flat"; then
+		(( flat )) && printf 'jack: %s -- speaker EQ bypassed\n' "$port" \
+		           || printf 'jack: %s -- speaker EQ active\n'   "$port"
+	fi
+}
+
+react
+# pactl subscribe emits many events per change; react() ignores everything that
+# is not an actual port change, so the extra wakeups cost nothing.
+pactl subscribe 2>/dev/null | while read -r line; do
+	case "$line" in
+	*"on sink"*|*"on card"*) react ;;
+	esac
+done
