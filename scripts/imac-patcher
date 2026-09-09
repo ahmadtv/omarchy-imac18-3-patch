@@ -48,7 +48,7 @@ mkdir -p "$LOGDIR" "$CACHE"
 # Hardware patches first, then patches to other people's apps (tier "app"):
 # those are opt-in per app, are never included in "safe", and go away by
 # themselves when the app moves on. See the app-patch helpers below.
-MODULES=(audio eq color vram wifi suspend boot 5k panel game news)
+MODULES=(audio eq color vram wifi suspend boot 5k panel)
 
 HAVE_GUM=0; command -v gum >/dev/null && HAVE_GUM=1
 say()  { printf '\033[1;33m==>\033[0m %s\n' "$*"; }
@@ -417,28 +417,6 @@ mod_panel_remove() {
     pkill -x quickshell || true
     say "back on Omarchy's built-in audio panel"
 }
-
-# ═══════════════════════ module: game ══════════════════════════════════════
-GAME_ID=io.github.ejuro.blow-off-some-steam
-GAME_PATCH="${APPS_DIR}/blow-off-some-steam-lazy-sounds.patch"
-mod_game_title() { echo "Blow off some steam: quiet until opened"; }
-mod_game_tier()  { echo app; }
-mod_game_desc()  { echo "The game loads its sound effects when the bar starts, so two idle \"quickshell\" rows sit in the volume mixer before it has ever been opened, and another pair appears on every audio change. Loads them when the game starts instead. Sent upstream as ejuro/blow-off-some-steam#6."; }
-mod_game_appid()  { echo "$GAME_ID"; }
-mod_game_detect() { app_patch_detect "$GAME_ID" "$GAME_PATCH"; }
-mod_game_apply()  { app_patch_apply  "$GAME_ID" "$GAME_PATCH" && restart_shell; }
-mod_game_remove() { app_patch_remove "$GAME_ID" "$GAME_PATCH" && restart_shell; }
-
-# ═══════════════════════ module: news ══════════════════════════════════════
-NEWS_ID=io.github.mtolhuys.news-radar
-NEWS_PATCH="${APPS_DIR}/news-radar-omarchy-403.patch"
-mod_news_title() { echo "News Radar: working again on Omarchy 4.0.3"; }
-mod_news_tier()  { echo app; }
-mod_news_desc()  { echo "Omarchy 4.0.3 stopped handing third-party plugins the path to their own helper binaries, which left this plugin's panel empty and its bar widget invisible; also saves the full story so bookmarks survive the feed dropping them. Filed upstream as mtolhuys/omarchy-news-radar issues 14 and 15."; }
-mod_news_appid()  { echo "$NEWS_ID"; }
-mod_news_detect() { app_patch_detect "$NEWS_ID" "$NEWS_PATCH"; }
-mod_news_apply()  { app_patch_apply  "$NEWS_ID" "$NEWS_PATCH" && restart_shell; }
-mod_news_remove() { app_patch_remove "$NEWS_ID" "$NEWS_PATCH" && restart_shell; }
 
 # ═══════════════════════ module: color ═════════════════════════════════════
 mod_color_title() { echo "Wide-gamut colour"; }
@@ -817,10 +795,17 @@ state_cache_write() {
     mkdir -p "$(dirname "$STATE_CACHE")" && printf '%s' "$out" > "$STATE_CACHE"
 }
 state_of() {   # <id>
-    local age=99999
+    local age=99999 out
     [[ -f $STATE_CACHE ]] && age=$(( $(date +%s) - $(stat -c %Y "$STATE_CACHE" 2>/dev/null || echo 0) ))
     (( age > 10 )) && state_cache_write
-    awk -v m="$1" '$1==m{print $2; found=1} END{if(!found) print "n/a"}' "$STATE_CACHE"
+    out="$(awk -v m="$1" '$1==m{print $2}' "$STATE_CACHE" 2>/dev/null)"
+    # A module the cache has never seen -- one that has just registered from
+    # another repo -- must not be reported as inapplicable; rebuild and re-ask.
+    if [[ -z $out ]]; then
+        state_cache_write
+        out="$(awk -v m="$1" '$1==m{print $2}' "$STATE_CACHE" 2>/dev/null)"
+    fi
+    printf '%s\n' "${out:-n/a}"
 }
 
 # ── the Omarchy menu ───────────────────────────────────────────────────────
@@ -837,6 +822,7 @@ MENU_END='  // <<< imac-patcher'
 # it, so each row gets a short name here and the module's full title becomes
 # its description, which the menu also searches.
 menu_label() {
+    declare -F "mod_${1}_label" >/dev/null && { "mod_${1}_label"; return; }
     case $1 in
     audio) echo 'Speakers & mic' ;; eq)      echo 'Speaker EQ' ;;
     panel) echo 'Jack-aware panel' ;; color) echo 'Colour (P3)' ;;
@@ -847,6 +833,7 @@ menu_label() {
     esac
 }
 menu_icon() {
+    declare -F "mod_${1}_icon" >/dev/null && { "mod_${1}_icon"; return; }
     case $1 in
     audio) echo '󰋋' ;; eq) echo '󰋎' ;; panel) echo '󰓃' ;; color) echo '󰸊' ;;
     vram)  echo '󰢮' ;; wifi) echo '󰖩' ;; suspend) echo '󰤄' ;; boot) echo '󰸈' ;;
@@ -949,6 +936,42 @@ menu_remove() {
     say "removed from the Omarchy menu"
 }
 
+# ── modules from elsewhere ─────────────────────────────────────────────────
+# This repo carries the hardware. Patches to apps -- your own plugin fixes,
+# anything you would rather keep to yourself -- live in their own repo and
+# register it here, one path per line:
+#
+#     ~/.config/imac-patcher/module-dirs
+#
+# Each registered path is a repo root; every modules/*.sh under it is sourced
+# with MODULE_ROOT set to that root, so a module can find its own patch files.
+# A file only has to define mod_<id>_title/_tier/_desc/_detect/_apply/_remove --
+# it is picked up by having a _detect, and joins the end of the list. Everything
+# downstream (status, the bar widget, --toggle, --update-apps) then treats it
+# exactly like a built-in, so there is one list and one patcher, not two.
+MODULE_DIRS_FILE="${XDG_CONFIG_HOME:-$HOME/.config}/imac-patcher/module-dirs"
+load_extra_modules() {
+    local root f fn id
+    if [[ -f $MODULE_DIRS_FILE ]]; then
+        while IFS= read -r root; do
+            root="${root%%#*}"; root="${root//[[:space:]]/}"
+            [[ -n $root ]] || continue
+            root="${root/#\~/$HOME}"
+            [[ -d $root/modules ]] || { warn "registered module dir has no modules/: $root"; continue; }
+            for f in "$root"/modules/*.sh; do
+                [[ -f $f ]] || continue
+                MODULE_ROOT="$root"
+                # shellcheck disable=SC1090
+                source "$f" || warn "could not load module $f"
+            done
+        done < "$MODULE_DIRS_FILE"
+    fi
+    while read -r fn; do
+        id="${fn#mod_}"; id="${id%_detect}"
+        [[ " ${MODULES[*]} " == *" $id "* ]] || MODULES+=("$id")
+    done < <(declare -F | awk '{print $3}' | grep -E '^mod_[A-Za-z0-9_]+_detect$')
+}
+
 run_module() {   # $1 = apply|remove, $2 = id
     local action=$1 id=$2 st
     st="$("mod_${id}_detect")"
@@ -962,6 +985,8 @@ run_module() {   # $1 = apply|remove, $2 = id
         warn "${id}: ${action} failed (see messages above)"; return 1
     fi
 }
+
+load_extra_modules
 
 case "${1:-}" in
     --status) show_status; exit 0 ;;
