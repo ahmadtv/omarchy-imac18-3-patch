@@ -76,14 +76,24 @@ git clone https://github.com/ahmadtv/omarchy-imac5k
 cd omarchy-imac5k && ./scripts/imac-patcher
 ```
 
-### 󰍹 In the Omarchy menu
+### 󰀵 On the bar
 
-`--menu install` adds an **iMac** section to Omarchy's own menu, with a ✓ beside every patch that is on and one keystroke to toggle it. It is not a plugin: Omarchy reads `~/.config/omarchy/extensions/omarchy-menu.jsonc` itself and watches it for changes, so this writes rows into that file between markers, leaving anything else in it alone. The menu and the terminal tool are two faces of the same modules — there is one source of truth, and either can be used at any time.
+`--bar install` puts an Apple glyph at the right of the Omarchy bar. Click it and every patch is listed with a tick beside the ones that are on; click a row to toggle it, which opens a terminal because applying can want a password, rebuild a kernel module, and always has something to say.
 
 ```bash
-./scripts/imac-patcher --menu install    # adds the rows, symlinks imac-patcher into ~/.local/bin
-./scripts/imac-patcher --menu remove     # takes the rows out again
+./scripts/imac-patcher --bar install     # adds the widget to the bar's right side
+./scripts/imac-patcher --bar remove      # takes it off again
 ```
+
+This one is a plugin, because a bar widget has to be, but a thin one: it asks `imac-patcher --list` what exists and calls `--toggle`, so the patcher stays the only thing that knows what a patch is. Add a module and it appears in the widget with no QML to touch. It can also be opened from a keybind with `omarchy-shell ipc call ahmad.imac-patches toggle`.
+
+An alternative front end, if you would rather have rows in Omarchy's own menu than an icon on the bar:
+
+```bash
+./scripts/imac-patcher --menu install    # rows under "iMac" in the Omarchy menu
+```
+
+That one is not a plugin at all: Omarchy reads `~/.config/omarchy/extensions/omarchy-menu.jsonc` itself and watches it, so the patcher writes rows into that file between markers and leaves everything else in it alone. Either front end, or both, can be used at once; there is one source of truth.
 
 ### 󰏫 App patches
 
