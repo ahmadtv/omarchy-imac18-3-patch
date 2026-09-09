@@ -602,6 +602,19 @@ Once the switches exist, PipeWire's `analog-output-speaker/headphones` paths
 panel's available-only rule can list both ports again, and the override is
 honest. Upstreamable on the same jackdanyell PR.
 
+**Why the internal-mic row cannot simply be hidden meanwhile (2026-09-09):**
+PipeWire marks `analog-input-internal-mic` "not available" only when a jack
+named *Mic* (or Dock/Front/Rear Mic) is plugged — `analog-input-internal-mic.conf`
+has no rule for a jack named *Headset Mic*. Labelling the jack mic a headset mic
+(needed for the "Headset Microphone" port and glyph) renamed the jack kcontrol
+from "Mic Jack" to "Headset Mic Jack", so the internal mic now reads "unknown"
+with a headset in, and the panel lists it. The driver cannot report anything
+that yields "not available": the internal mic has a *phantom* jack, and the path
+maps a phantom jack to "unknown" whether plugged or not. Upstream's omission is
+deliberate — on drivers that honour the selector the internal mic is a valid
+choice with a headset in. So the only clean end state is step 3 above; until
+then the row is harmless (selecting it does nothing, as before).
+
 **Risk:** the routing code is the touchy part of this driver — reconfiguring
 the playback/ASP path from inside a jack event once produced the continuous
 high-pitched tone on the headset output (see the comment in
