@@ -967,10 +967,12 @@ case "${1:-}" in
     --status) show_status; exit 0 ;;
 
     # One tab-separated row per module, for the bar widget: id, tier, state,
-    # title. Answered from the same cache the menu expressions use.
+    # short name, full title. A bar popup is narrow, so the row shows the short
+    # name and keeps the title for the tooltip. Same cache as the menu uses.
     --list)
         for m in "${MODULES[@]}"; do
-            printf '%s\t%s\t%s\t%s\n' "$m" "$("mod_${m}_tier")" "$(state_of "$m")" "$("mod_${m}_title")"
+            printf '%s\t%s\t%s\t%s\t%s\n' "$m" "$("mod_${m}_tier")" "$(state_of "$m")" \
+                "$(menu_label "$m")" "$("mod_${m}_title")"
         done
         exit 0 ;;
 

@@ -31,10 +31,10 @@ BarWidget {
     var lines = String(raw || "").split("\n")
     for (var i = 0; i < lines.length; i++) {
       var p = lines[i].split("\t")
-      // id, tier, state, title -- anything the patcher says is not applicable
-      // to this machine is left out rather than shown as a dead row.
-      if (p.length < 4 || p[2] === "n/a") continue
-      out.push({ id: p[0], tier: p[1], state: p[2], label: p[3] })
+      // id, tier, state, short name, full title -- anything the patcher says is
+      // not applicable to this machine is left out rather than shown dead.
+      if (p.length < 5 || p[2] === "n/a") continue
+      out.push({ id: p[0], tier: p[1], state: p[2], label: p[3], title: p[4] })
     }
     rows = out
     loaded = true
@@ -123,7 +123,13 @@ BarWidget {
           radius: Style.spacing.labelGap
           color: rowHover.hovered ? Style.hoverFillFor(root.bar.foreground, Color.accent) : "transparent"
 
-          HoverHandler { id: rowHover }
+          HoverHandler {
+            id: rowHover
+            onHoveredChanged: if (root.bar) {
+              if (hovered) root.bar.showTooltip(rowItem, rowItem.modelData.title)
+              else root.bar.hideTooltip(rowItem)
+            }
+          }
           TapHandler { onTapped: root.toggle(rowItem.modelData.id) }
 
           Row {
