@@ -95,9 +95,9 @@ An alternative front end, if you would rather have rows in Omarchy's own menu th
 
 That one is not a plugin at all: Omarchy reads `~/.config/omarchy/extensions/omarchy-menu.jsonc` itself and watches it, so the patcher writes rows into that file between markers and leaves everything else in it alone. Either front end, or both, can be used at once; there is one source of truth.
 
-### 󰏫 App patches, and your own
+### 󰏫 Tweaks, and your own
 
-Patches to *other people's* apps — an Omarchy plugin, a third-party one — are a separate tier, marked `[app]`, never included in `safe`, and always opt-in. They follow three rules that keep them from becoming a mess:
+Patches to *other people's* apps — an Omarchy plugin, a third-party one — are a separate tier, marked `[tweak]`, never included in `safe`, and always opt-in. They follow three rules that keep them from becoming a mess:
 
 - The target must be a git checkout, which is what makes removal exact: the patch is reverse-applied and the checkout must come back byte-for-byte identical to upstream, with nothing left behind.
 - Whether a patch is on is answered by asking the checkout, never a note we wrote. If an update replaced the file, or the plugin was reinstalled, the patch reads as off by itself.
@@ -109,7 +109,7 @@ A patched plugin would otherwise block its own update, since Omarchy fast-forwar
 ./scripts/imac-patcher --update-apps     # patches off, omarchy plugin update, then back
 ```
 
-Anything that no longer applies afterwards stays off and says so — usually because upstream has fixed it, which is the point: every app patch here is also filed upstream.
+A tweak that no longer applies afterwards stays off and says so — usually because upstream has fixed it, which is the point: every tweak here is also filed upstream.
 
 **Your own patches live in your own repo.** This one carries the hardware. Anything personal — your plugin fixes, your dotfiles — goes in a repo of yours that registers itself here, one path per line:
 

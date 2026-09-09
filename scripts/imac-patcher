@@ -45,9 +45,9 @@ EQ_DEST="${HOME}/.config/pipewire/filter-chain.conf.d/eq6.conf"
 SLEEP_TARGETS=(suspend.target hibernate.target hybrid-sleep.target suspend-then-hibernate.target)
 mkdir -p "$LOGDIR" "$CACHE"
 
-# Hardware patches first, then patches to other people's apps (tier "app"):
-# those are opt-in per app, are never included in "safe", and go away by
-# themselves when the app moves on. See the app-patch helpers below.
+# Hardware patches first, then tweaks -- patches to other people's apps, which
+# are opt-in, never included in "safe", and go away by themselves when the app
+# moves on. Tweaks usually come from your own repo; see "modules from elsewhere".
 MODULES=(audio eq color vram wifi suspend boot 5k panel)
 
 HAVE_GUM=0; command -v gum >/dev/null && HAVE_GUM=1
@@ -63,9 +63,9 @@ if [[ "$product" != "iMac18,3" && " $* " != *" --force "* ]]; then
     exit 1
 fi
 
-# ── patches to other people's apps ─────────────────────────────────────────
-# A patch to an Omarchy plugin or a third-party one. Three rules keep these
-# from becoming a mess:
+# ── tweaks: patches to other people's apps ─────────────────────────────────
+# A patch to an Omarchy plugin or a third-party one, tier "tweak". Three rules
+# keep these from becoming a mess:
 #
 #   * The target must be a git checkout. That is what makes removal exact and
 #     traceless -- reverse-applying our own diff and then finding the checkout
@@ -369,7 +369,12 @@ PANEL_PATCH="${REPO_DIR}/patches/omarchy-audio-ports.patch"
 PANEL_HELPERS=(omarchy-audio-ports omarchy-audio-set-port)   # shipped in scripts/, installed to ~/.local/bin
 panel_clone_manifest() { grep -l '"clonedFrom": *"omarchy.audio"' "${HOME}"/.config/omarchy/plugins/*/manifest.json 2>/dev/null | head -1; }
 mod_panel_title() { echo "Speakers / Headphones rows in the volume panel"; }
-mod_panel_tier()  { echo app; }
+# Not "app" despite patching an Omarchy plugin: this exists because of THIS
+# machine's combo jack, it is what makes the volume panel tell the truth here,
+# and a vanilla 18,3 should get it without asking. The app tier is for patches
+# you keep to yourself. (Upstream: basecamp/omarchy#10985 — when that lands,
+# this module removes the clone and the tier stops mattering.)
+mod_panel_tier()  { echo safe; }
 mod_panel_desc()  { echo "Speakers or Headphones (and Internal or Headset Microphone) as rows, the live one highlighted, the bar icon following the jack, the way macOS lists them. On this codec the driver routes on the jack itself, so the rows follow it rather than offering an override. Carried as a clone of Omarchy's audio panel until the upstream change lands."; }
 mod_panel_detect() {
     local m; m="$(panel_clone_manifest)"
@@ -780,7 +785,7 @@ show_status() {
     for m in "${MODULES[@]}"; do
         st="$("mod_${m}_detect")"; tier="$("mod_${m}_tier")"
         printf '  %-32s %-22b %s\n' "$("mod_${m}_title")" "$(state_label "$st")" \
-            "$(case $tier in boot) printf '\033[0;33m[boot]\033[0m';; app) printf '\033[0;36m[app]\033[0m';; esac)"
+            "$(case $tier in boot) printf '\033[0;33m[boot]\033[0m';; tweak) printf '\033[0;36m[tweak]\033[0m';; esac)"
     done
     echo
     printf '  ids: %s\n' "${MODULES[*]}"
@@ -846,17 +851,17 @@ menu_block() {
     printf '  "imac": {"icon":"","label":"iMac","aliases":["imac","patches"],"description":"Hardware and app patches for this iMac"},\n'
     for m in "${MODULES[@]}"; do
         tier="$("mod_${m}_tier")"
-        [[ $tier == app ]] && continue
+        [[ $tier == tweak ]] && continue
         printf '  "imac.%s": {"icon":"%s","label":"%s","description":"%s","checked":"imac-patcher --is-applied %s","when":"imac-patcher --is-applicable %s","action":"omarchy-launch-floating-terminal-with-presentation '"'"'imac-patcher --toggle %s'"'"'"},\n' \
             "$m" "$(menu_icon "$m")" "$(menu_label "$m")" "$("mod_${m}_title")" "$m" "$m" "$m"
     done
-    printf '  "imac.apps": {"icon":"","label":"App patches","description":"Patches to other people'"'"'s apps; each switches off by itself when the app moves on"},\n'
+    printf '  "imac.tweaks": {"icon":"","label":"Tweaks","description":"Patches to other people'"'"'s apps; each switches off by itself when the app moves on"},\n'
     for m in "${MODULES[@]}"; do
-        [[ "$("mod_${m}_tier")" == app ]] || continue
-        printf '  "imac.apps.%s": {"icon":"%s","label":"%s","description":"%s","checked":"imac-patcher --is-applied %s","when":"imac-patcher --is-applicable %s","action":"omarchy-launch-floating-terminal-with-presentation '"'"'imac-patcher --toggle %s'"'"'"},\n' \
+        [[ "$("mod_${m}_tier")" == tweak ]] || continue
+        printf '  "imac.tweaks.%s": {"icon":"%s","label":"%s","description":"%s","checked":"imac-patcher --is-applied %s","when":"imac-patcher --is-applicable %s","action":"omarchy-launch-floating-terminal-with-presentation '"'"'imac-patcher --toggle %s'"'"'"},\n' \
             "$m" "$(menu_icon "$m")" "$(menu_label "$m")" "$("mod_${m}_title")" "$m" "$m" "$m"
     done
-    printf '  "imac.apps.update": {"icon":"󰚰","label":"Update plugins","description":"Takes our patches off, updates, puts back the ones that still apply","action":"omarchy-launch-floating-terminal-with-presentation '"'"'imac-patcher --update-apps'"'"'"},\n'
+    printf '  "imac.tweaks.update": {"icon":"󰚰","label":"Update plugins","description":"Takes our patches off, updates, puts back the ones that still apply","action":"omarchy-launch-floating-terminal-with-presentation '"'"'imac-patcher --update-apps'"'"'"},\n'
     printf '  "imac.all": {"icon":"","label":"Open the patcher","action":"omarchy-launch-floating-terminal-with-presentation imac-patcher"},\n'
     printf '%s\n' "$MENU_END"
 }

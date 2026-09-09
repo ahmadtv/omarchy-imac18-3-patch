@@ -179,10 +179,10 @@ BarWidget {
             Text {
               id: tierTag
               textFormat: Text.PlainText
-              // "app" marks a patch to someone else's code, which switches
+              // "tweak" marks a patch to someone else's code, which switches
               // itself off when that app moves on. Worth saying in the list.
-              visible: rowItem.modelData.tier === "app"
-              text: "app"
+              visible: rowItem.modelData.tier === "tweak"
+              text: "tweak"
               color: root.bar ? root.bar.foreground : Color.foreground
               opacity: 0.4
               font.family: root.bar ? root.bar.fontFamily : Style.font.family
