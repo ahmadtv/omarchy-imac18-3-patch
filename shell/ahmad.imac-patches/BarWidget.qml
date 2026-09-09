@@ -16,6 +16,15 @@ BarWidget {
   property bool popupOpen: false
   property bool loaded: false
 
+  // Plugins we patch that have a newer version waiting. The check needs the
+  // network, so it runs on its own slow timer rather than on every open, and
+  // the rows read the answer the patcher cached.
+  readonly property int updateCount: {
+    var n = 0
+    for (var i = 0; i < rows.length; i++) if (rows[i].update) n++
+    return n
+  }
+
   readonly property int offCount: {
     var n = 0
     for (var i = 0; i < rows.length; i++)
@@ -31,10 +40,11 @@ BarWidget {
     var lines = String(raw || "").split("\n")
     for (var i = 0; i < lines.length; i++) {
       var p = lines[i].split("\t")
-      // id, tier, state, short name, full title, icon -- anything the patcher
-      // says is not applicable to this machine is left out rather than dead.
-      if (p.length < 6 || p[2] === "n/a") continue
-      out.push({ id: p[0], tier: p[1], state: p[2], label: p[3], title: p[4], icon: p[5] })
+      // id, tier, state, short name, full title, icon, update -- anything the
+      // patcher says is not applicable here is left out rather than dead.
+      if (p.length < 7 || p[2] === "n/a") continue
+      out.push({ id: p[0], tier: p[1], state: p[2], label: p[3], title: p[4],
+                 icon: p[5], update: p[6] === "update" })
     }
     rows = out
     loaded = true
@@ -63,6 +73,12 @@ BarWidget {
   }
 
   Process {
+    id: updateCheckProc
+    command: ["imac-patcher", "--check-updates"]
+    onExited: root.refresh()
+  }
+
+  Process {
     id: listProc
     command: ["imac-patcher", "--list"]
     stdout: StdioCollector {
@@ -75,6 +91,15 @@ BarWidget {
   // re-read a little later, and again on the next open.
   Timer { id: refreshLater; interval: 8000; repeat: false; onTriggered: root.refresh() }
   Timer { interval: 300000; running: true; repeat: true; triggeredOnStart: true; onTriggered: root.refresh() }
+  // Six hours, and once shortly after login. Same cadence as Omarchy's own
+  // update indicator; a tweak's upstream does not move faster than that.
+  Timer {
+    interval: 21600000
+    running: true
+    repeat: true
+    triggeredOnStart: true
+    onTriggered: if (!updateCheckProc.running) updateCheckProc.running = true
+  }
 
   BarIconButton {
     id: button
@@ -87,9 +112,9 @@ BarWidget {
       root.refresh()
       root.popupOpen = !root.popupOpen
     }
-    tooltipText: root.loaded
-      ? (root.offCount === 0 ? "iMac patches — all on" : "iMac patches — " + root.offCount + " off")
-      : "iMac patches"
+    tooltipText: !root.loaded ? "iMac patches"
+      : (root.offCount === 0 ? "iMac patches — all on" : "iMac patches — " + root.offCount + " off")
+        + (root.updateCount > 0 ? ", " + root.updateCount + " plugin update waiting" : "")
   }
 
   PopupCard {
@@ -177,6 +202,19 @@ BarWidget {
             }
 
             Text {
+              // A plugin we patch has moved on. Updating is its own action --
+              // the row still just toggles the patch.
+              textFormat: Text.PlainText
+              visible: rowItem.modelData.update
+              text: "󰚰"
+              color: root.bar ? root.bar.foreground : Color.foreground
+              opacity: 0.85
+              font.family: root.bar ? root.bar.fontFamily : Style.font.family
+              font.pixelSize: Style.font.caption
+              anchors.verticalCenter: parent.verticalCenter
+            }
+
+            Text {
               id: tierTag
               textFormat: Text.PlainText
               // "tweak" marks a patch to someone else's code, which switches
@@ -195,6 +233,32 @@ BarWidget {
 
       PanelSeparator {
         foreground: root.bar ? root.bar.foreground : Color.foreground
+      }
+
+      Rectangle {
+        visible: root.updateCount > 0
+        width: column.width
+        height: visible ? Style.space(28) : 0
+        radius: Style.spacing.labelGap
+        color: updHover.hovered ? Style.hoverFillFor(root.bar.foreground, Color.accent) : "transparent"
+        HoverHandler { id: updHover }
+        TapHandler {
+          onTapped: {
+            root.popupOpen = false
+            if (root.bar) root.bar.run("omarchy-launch-floating-terminal-with-presentation imac-patcher --update-apps")
+            refreshLater.restart()
+          }
+        }
+        Text {
+          anchors.left: parent.left
+          anchors.leftMargin: Style.space(30)
+          anchors.verticalCenter: parent.verticalCenter
+          textFormat: Text.PlainText
+          text: "󰚰  Update " + root.updateCount + " plugin" + (root.updateCount === 1 ? "" : "s")
+          color: root.bar ? root.bar.foreground : Color.foreground
+          font.family: root.bar ? root.bar.fontFamily : Style.font.family
+          font.pixelSize: Style.font.body
+        }
       }
 
       Rectangle {
