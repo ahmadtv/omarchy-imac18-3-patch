@@ -108,6 +108,9 @@ BarWidget {
     text: "\uf179"
     slotSize: Style.bar.statusSlot
     fontSize: Style.font.caption
+    // Red while a patched plugin has moved on, the way the bar marks anything
+    // else that wants attention: activeColor defaults to the theme's urgent.
+    active: root.updateCount > 0
     onPressed: {
       root.refresh()
       root.popupOpen = !root.popupOpen
@@ -146,16 +149,17 @@ BarWidget {
           width: column.width
           height: Style.space(30)
           radius: Style.spacing.labelGap
-          color: rowHover.hovered ? Style.hoverFillFor(root.bar.foreground, Color.accent) : "transparent"
+          color: rowHover.containsMouse ? Style.hoverFillFor(root.bar.foreground, Color.accent) : "transparent"
 
-          HoverHandler {
+          MouseArea {
             id: rowHover
-            onHoveredChanged: if (root.bar) {
-              if (hovered) root.bar.showTooltip(rowItem, rowItem.modelData.title)
-              else root.bar.hideTooltip(rowItem)
-            }
+            anchors.fill: parent
+            hoverEnabled: true
+            cursorShape: Qt.PointingHandCursor
+            onClicked: root.toggle(rowItem.modelData.id)
+            onEntered: if (root.bar) root.bar.showTooltip(rowItem, rowItem.modelData.title)
+            onExited: if (root.bar) root.bar.hideTooltip(rowItem)
           }
-          TapHandler { onTapped: root.toggle(rowItem.modelData.id) }
 
           Row {
             anchors.left: parent.left
@@ -240,10 +244,13 @@ BarWidget {
         width: column.width
         height: visible ? Style.space(28) : 0
         radius: Style.spacing.labelGap
-        color: updHover.hovered ? Style.hoverFillFor(root.bar.foreground, Color.accent) : "transparent"
-        HoverHandler { id: updHover }
-        TapHandler {
-          onTapped: {
+        color: updHover.containsMouse ? Style.hoverFillFor(root.bar.foreground, Color.accent) : "transparent"
+        MouseArea {
+          id: updHover
+          anchors.fill: parent
+          hoverEnabled: true
+          cursorShape: Qt.PointingHandCursor
+          onClicked: {
             root.popupOpen = false
             if (root.bar) root.bar.run("omarchy-launch-floating-terminal-with-presentation imac-patcher --update-apps")
             refreshLater.restart()
@@ -265,10 +272,13 @@ BarWidget {
         width: column.width
         height: Style.space(28)
         radius: Style.spacing.labelGap
-        color: allHover.hovered ? Style.hoverFillFor(root.bar.foreground, Color.accent) : "transparent"
-        HoverHandler { id: allHover }
-        TapHandler {
-          onTapped: {
+        color: allHover.containsMouse ? Style.hoverFillFor(root.bar.foreground, Color.accent) : "transparent"
+        MouseArea {
+          id: allHover
+          anchors.fill: parent
+          hoverEnabled: true
+          cursorShape: Qt.PointingHandCursor
+          onClicked: {
             root.popupOpen = false
             if (root.bar) root.bar.run("omarchy-launch-floating-terminal-with-presentation imac-patcher")
           }
