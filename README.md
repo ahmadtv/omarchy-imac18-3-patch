@@ -95,7 +95,7 @@ An alternative front end, if you would rather have rows in Omarchy's own menu th
 
 That one is not a plugin at all: Omarchy reads `~/.config/omarchy/extensions/omarchy-menu.jsonc` itself and watches it, so the patcher writes rows into that file between markers and leaves everything else in it alone. Either front end, or both, can be used at once; there is one source of truth.
 
-### 󰏫 App patches
+### 󰏫 App patches, and your own
 
 Patches to *other people's* apps — an Omarchy plugin, a third-party one — are a separate tier, marked `[app]`, never included in `safe`, and always opt-in. They follow three rules that keep them from becoming a mess:
 
@@ -110,6 +110,14 @@ A patched plugin would otherwise block its own update, since Omarchy fast-forwar
 ```
 
 Anything that no longer applies afterwards stays off and says so — usually because upstream has fixed it, which is the point: every app patch here is also filed upstream.
+
+**Your own patches live in your own repo.** This one carries the hardware. Anything personal — your plugin fixes, your dotfiles — goes in a repo of yours that registers itself here, one path per line:
+
+```
+~/.config/imac-patcher/module-dirs
+```
+
+Every `modules/*.sh` under a registered path is loaded with `MODULE_ROOT` set to that repo, so a module finds its own patch files. A module file only defines `mod_<id>_title/_tier/_desc/_detect/_apply/_remove` (plus `_label`/`_icon` for the widget, and `_appid` if it patches a plugin). It then appears in the same status list, the same bar widget and the same `--update-apps` as everything shipped here — one patcher, not two.
 
 The patcher shows what's applied, what isn't, and lets you pick — **nothing is applied without asking**. Omakase in spirit: sensible defaults, and you can send any of it back. Each piece is a separate, reversible step:
 
