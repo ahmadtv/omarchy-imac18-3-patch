@@ -119,13 +119,14 @@ mod_audio_preflight() {
     # Without kernel headers the DKMS build fails deep in a compile and the only
     # visible symptom is "partial / no sound" — check up front instead.
     local ok=1 missing=() pkgs=() t
-    for t in dkms patch git gcc make wget tar; do
+    for t in dkms patch git gcc make wget tar jq pw-cli; do
         command -v "$t" >/dev/null || missing+=("$t")
     done
     if (( ${#missing[@]} )); then
         warn "missing tools: ${missing[*]}"
         for t in "${missing[@]}"; do case $t in
             gcc|make) pkgs+=(base-devel) ;;
+            pw-cli)   pkgs+=(pipewire) ;;
             *)        pkgs+=("$t") ;;
         esac; done
         mapfile -t pkgs < <(printf '%s\n' "${pkgs[@]}" | sort -u)
@@ -232,41 +233,83 @@ mod_audio_remove() {
 }
 
 # ═══════════════════════ module: eq ════════════════════════════════════════
+# Installed as a native Omarchy speaker tuning rather than a loose filter-chain.
+# That naming is not cosmetic: the shell hides the physical sink while a sink
+# called omarchy_speaker_tuning fronts it, and excludes the tuning's own output
+# from the application list -- so the stock path shows ONE output named for the
+# speakers, where a hand-rolled chain shows the tuning and the hardware twice.
+# It also makes the volume keys resolve through the filter to the real sink.
+OMARCHY_TUNINGS="${OMARCHY_PATH:-/usr/share/omarchy}/default/audio/tunings"
+EQ_TUNING_SRC="${REPO_DIR}/audio/tunings/imac18-3"
+EQ_TUNING_DEST="${OMARCHY_TUNINGS}/imac18-3"
+PORTWATCH_SRC="${SCRIPT_DIR}/imac-audio-port-watch"
+PORTWATCH_BIN="${HOME}/.local/bin/imac-audio-port-watch"
+PORTWATCH_UNIT_SRC="${REPO_DIR}/audio/systemd/imac-audio-port-watch.service"
+PORTWATCH_UNIT="${HOME}/.config/systemd/user/imac-audio-port-watch.service"
+WP_NAMES_SRC="${REPO_DIR}/audio/wireplumber/51-imac-audio-names.conf"
+WP_NAMES="${HOME}/.config/wireplumber/wireplumber.conf.d/51-imac-audio-names.conf"
 mod_eq_title() { echo "Speaker tone EQ"; }
 mod_eq_tier()  { echo safe; }
-mod_eq_desc()  { echo "The codec does no DSP at all; macOS's warmth is entirely software EQ. Adds a PipeWire filter-chain (bass shelf + clipping clamp)."; }
+mod_eq_desc()  { echo "The codec does no DSP at all; macOS's warmth is entirely software EQ. Installs an Omarchy speaker tuning (bass shelf + lookahead limiter) and keeps it off the headphone jack."; }
 mod_eq_detect() {
-    local conf=0 active=0
-    [[ -f "$EQ_DEST" ]] && conf=1
-    systemctl --user is-active filter-chain.service &>/dev/null && active=1
-    if (( conf && active )); then echo applied
-    elif (( conf || active )); then echo partial
+    local tuning=0 host=0 watch=0
+    [[ -f "${EQ_TUNING_DEST}/tuning.conf" ]] && tuning=1
+    systemctl --user is-active omarchy-speaker-tuning.service &>/dev/null && host=1
+    systemctl --user is-active imac-audio-port-watch.service &>/dev/null && watch=1
+    if (( tuning && host && watch )); then echo applied
+    elif (( tuning || host || watch )); then echo partial
     else echo not-applied; fi
 }
 mod_eq_apply() {
-    mkdir -p "$(dirname "$EQ_DEST")"
-    install -m644 "${REPO_DIR}/configs/eq6.conf" "$EQ_DEST" || return 1
-    systemctl --user enable --now filter-chain.service || return 1
-    sleep 2
-    if command -v wpctl >/dev/null; then
-        local id
-        id=$(wpctl status 2>/dev/null | grep -oP '^\s*\*?\s*\K[0-9]+(?=\.\s+effect_input\.eq6)' | head -1)
-        [[ -n ${id:-} ]] && wpctl set-default "$id" && say "default output set to the EQ sink"
-        # the hardware sink keeps its own volume; leave it at full so the EQ
-        # sink's slider spans the real range (a stale low value silently caps it)
-        local hw
-        hw=$(wpctl status 2>/dev/null | grep -oP '^\s*\*?\s*\K[0-9]+(?=\.\s+.*Analog Stereo)' | head -1)
-        [[ -n ${hw:-} ]] && wpctl set-volume "$hw" 1.0 2>/dev/null || true
+    # Every Omarchy tuning ends in a lookahead limiter, which is an LV2 plugin;
+    # omarchy-audio-tuning refuses to install without it.
+    if [[ ! -e /usr/lib/lv2/lsp-plugins.lv2/limiter_stereo.ttl ]]; then
+        say "installing the LV2 limiter the tuning needs"
+        sudo pacman -S --needed --noconfirm lsp-plugins-lv2 || return 1
     fi
+    [[ -f "${EQ_TUNING_SRC}/tuning.conf" ]] || { warn "tuning missing: ${EQ_TUNING_SRC}"; return 1; }
+    say "installing the iMac18,3 tuning into ${EQ_TUNING_DEST}"
+    sudo install -d -m755 "$EQ_TUNING_DEST" || return 1
+    sudo install -m644 "${EQ_TUNING_SRC}/tuning.conf" "${EQ_TUNING_SRC}/filter-chain.conf" "$EQ_TUNING_DEST" || return 1
+
+    # An earlier revision of this patch shipped the same curve as a loose
+    # filter-chain fragment. Left in place it would run a second copy of the EQ
+    # in series with the tuning.
+    if [[ -f "$EQ_DEST" ]]; then
+        say "removing the superseded standalone EQ fragment"
+        rm -f "$EQ_DEST"
+        systemctl --user disable --now filter-chain.service &>/dev/null
+    fi
+
+    omarchy-audio-tuning on || { warn "omarchy-audio-tuning refused — see the message above"; return 1; }
+
+    # The codec publishes itself as its part number, "CS8409/CS42L83 Analog".
+    say "installing readable device names"
+    install -Dm644 "$WP_NAMES_SRC" "$WP_NAMES" || return 1
+    systemctl --user restart wireplumber || true
+
+    # Speakers and headphones are two ports on one sink here, so pinning the
+    # tuning to the speaker sink does not keep it off headphones. Watch the port.
+    say "installing the headphone bypass watcher"
+    install -Dm755 "$PORTWATCH_SRC" "$PORTWATCH_BIN" || return 1
+    install -Dm644 "$PORTWATCH_UNIT_SRC" "$PORTWATCH_UNIT" || return 1
+    systemctl --user daemon-reload
+    systemctl --user enable --now imac-audio-port-watch.service || return 1
+
+    if omarchy-audio-tuning fronted-sink >/dev/null 2>&1; then
+        say "one output, named iMac Audio — the bare codec is hidden behind it"
+    else
+        warn "the tuning sink is not fronting the hardware; the output list will still show both"
+    fi
+    say "plug headphones in and the speaker EQ drops out on its own"
 }
 mod_eq_remove() {
-    rm -f "$EQ_DEST"
-    systemctl --user disable --now filter-chain.service 2>/dev/null
-    if command -v wpctl >/dev/null; then
-        local hw
-        hw=$(wpctl status 2>/dev/null | grep -oP '^\s*\*?\s*\K[0-9]+(?=\.\s+.*Analog Stereo)' | head -1)
-        [[ -n ${hw:-} ]] && wpctl set-default "$hw" && say "default output restored to the hardware sink"
-    fi
+    systemctl --user disable --now imac-audio-port-watch.service &>/dev/null
+    rm -f "$PORTWATCH_BIN" "$PORTWATCH_UNIT" "$WP_NAMES"
+    systemctl --user daemon-reload
+    omarchy-audio-tuning off || true
+    [[ -d "$EQ_TUNING_DEST" ]] && sudo rm -rf "$EQ_TUNING_DEST"
+    say "tuning removed — output goes straight to the codec again"
 }
 
 # ═══════════════════════ module: color ═════════════════════════════════════
