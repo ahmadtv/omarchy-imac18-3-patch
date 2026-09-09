@@ -1,5 +1,5 @@
 diff --git i/patch_cirrus/cirrus_apple.h w/patch_cirrus/cirrus_apple.h
-index 7e9bcd1..3815f59 100644
+index 7e9bcd1..02c89ec 100644
 --- i/patch_cirrus/cirrus_apple.h
 +++ w/patch_cirrus/cirrus_apple.h
 @@ -2,6 +2,9 @@
@@ -232,23 +232,7 @@ index 7e9bcd1..3815f59 100644
  	// so we have confirmed that these unsol responses are not in linux kernel interrupt state
  	//if (in_interrupt())
  	//	mycodec_info(codec, "cs_8409_cs42l83_unsol_event - INTERRUPT\n");
-@@ -1805,7 +1896,14 @@ static int cs_8409_apple_parse_auto_config(struct hda_codec *codec)
- 
-         myprintk("snd_hda_intel: cs_8409_apple_parse_auto_config\n");
- 
--	err = snd_hda_parse_pin_defcfg(codec, &spec->gen.autocfg, NULL, 0);
-+	/* The jack mic (0x3c) shares the 3.5 mm connector with the headphones.
-+	 * Telling the parser so makes it label the input "Headset Mic" instead of
-+	 * "Mic": PipeWire's card profiles then classify the port as a headset
-+	 * microphone, and the desktop shows "Headset Microphone" when a headset
-+	 * is plugged in rather than a bare "Microphone". Nothing else changes --
-+	 * the driver's own jack handling still decides when the mic is live. */
-+	err = snd_hda_parse_pin_defcfg(codec, &spec->gen.autocfg, NULL,
-+				       HDA_PINCFG_HEADSET_MIC);
- 	if (err < 0)
- 		return err;
- 
-@@ -2557,7 +2655,7 @@ static int cs8409_cs42l83_exec_verb(struct hdac_device *dev, unsigned int cmd, u
+@@ -2557,7 +2648,7 @@ static int cs8409_cs42l83_exec_verb(struct hdac_device *dev, unsigned int cmd, u
                          //*res = (cs42l83->mic_jack_in) ? AC_PINSENSE_PRESENCE : 0;
                          // initially use my jack_present flag integer
  			myprintk("snd_hda_intel: cs 8409 exec verb pin sense 0x%04x %d\n", nid, spec->jack_present);
@@ -257,7 +241,7 @@ index 7e9bcd1..3815f59 100644
                          return 0;
                  }
          } else if (nid == spec->linein_nid) {
-@@ -2584,6 +2682,7 @@ static struct cs8409_apple_spec *cs8409_apple_alloc_spec(struct hda_codec *codec
+@@ -2584,6 +2675,7 @@ static struct cs8409_apple_spec *cs8409_apple_alloc_spec(struct hda_codec *codec
  	if (!spec)
  		return NULL;
  	codec->spec = spec;
@@ -265,7 +249,7 @@ index 7e9bcd1..3815f59 100644
  #if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 13, 0)
  	spec->codec = codec;
  #endif
-@@ -2927,9 +3026,14 @@ static int cs8409_apple(struct hda_codec *codec)
+@@ -2927,9 +3019,14 @@ static int cs8409_apple(struct hda_codec *codec)
  
          spec->have_buttons = 0;
  
