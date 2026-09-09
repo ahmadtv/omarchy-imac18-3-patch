@@ -1,0 +1,10 @@
+[Trigger]
+Operation = Install
+Operation = Upgrade
+Type = Package
+Target = omarchy-settings
+
+[Action]
+Description = Restoring the iMac18,3 speaker tuning the Omarchy update overwrote
+When = PostTransaction
+Exec = /usr/bin/cp -r /usr/local/share/omarchy-imac5k/tunings/imac18-3 /usr/share/omarchy/default/audio/tunings/

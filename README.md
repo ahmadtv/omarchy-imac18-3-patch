@@ -34,6 +34,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/ahmadtv/omarchy-imac5k/main/
 | 🖥️ **Native 5K** | Full **5120×2880**. The panel is two 2560×2880 tiles Apple leaves dormant; this wakes the second one, stitches both into one display, and genlocks them so they scan in lockstep — seamless under motion. |
 | 🔊 **Speakers & mic** | The CS8409 codec the kernel can't drive at all — now with working speakers and both the internal **and** headset mic, with **automatic switching** on plug/unplug just like macOS. |
 | 🎧 **Apple EarPods** | Fully supported. Plug them in and audio + mic follow the jack; unplug and it's back to internal — automatically. All three **inline buttons** work too: play/pause, volume up, volume down. |
+| 🎧 **Jack-aware panel** | Plug headphones in and the volume panel and bar icon say **Headphones** and **Headset Microphone**; unplug and they say **Speakers** and **Internal Microphone** — the way macOS does it. Proposed to Omarchy; carried here via Omarchy's own plugin clone until it lands. |
 | 🎚️ **macOS-style sound** | The codec does zero DSP; macOS's warmth is pure software EQ. A PipeWire profile brings it back. |
 | 🎨 **True colour** | The wide-gamut **Display P3** panel mapped correctly, instead of the oversaturated mess of stock sRGB. |
 
@@ -80,6 +81,7 @@ The patcher shows what's applied, what isn't, and lets you pick — **nothing is
 ```bash
 ./scripts/imac-patcher --apply 5k      # native 5K (rebuilds only the amdgpu module)
 ./scripts/imac-patcher --apply audio   # speakers, mics, EarPods + buttons
+./scripts/imac-patcher --apply panel   # Headphones/Speakers labels + icon follow the jack
 ./scripts/imac-patcher --remove 5k     # full undo, any time
 ```
 
