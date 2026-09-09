@@ -83,7 +83,6 @@ The patcher shows what's applied, what isn't, and lets you pick — **nothing is
 ./scripts/imac-patcher --apply audio   # speakers, mics, EarPods + buttons
 ./scripts/imac-patcher --apply panel   # Speakers/Headphones rows + icon follow the jack
 ./scripts/imac-patcher --apply wifi    # Broadcom firmware handshake off (associates on WPA2/WPA3-mixed)
-./scripts/imac-patcher --apply indexer # file indexer decodes in software (the GPU video engine hangs)
 ./scripts/imac-patcher --apply vram    # ggml/Vulkan tools off the 256 MiB CPU-visible window
 ./scripts/imac-patcher --remove 5k     # full undo, any time
 ```
