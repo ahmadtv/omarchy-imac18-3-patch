@@ -119,14 +119,13 @@ mod_audio_preflight() {
     # Without kernel headers the DKMS build fails deep in a compile and the only
     # visible symptom is "partial / no sound" — check up front instead.
     local ok=1 missing=() pkgs=() t
-    for t in dkms patch git gcc make wget tar jq pw-cli; do
+    for t in dkms patch git gcc make wget tar; do
         command -v "$t" >/dev/null || missing+=("$t")
     done
     if (( ${#missing[@]} )); then
         warn "missing tools: ${missing[*]}"
         for t in "${missing[@]}"; do case $t in
             gcc|make) pkgs+=(base-devel) ;;
-            pw-cli)   pkgs+=(pipewire) ;;
             *)        pkgs+=("$t") ;;
         esac; done
         mapfile -t pkgs < <(printf '%s\n' "${pkgs[@]}" | sort -u)
@@ -242,22 +241,17 @@ mod_audio_remove() {
 OMARCHY_TUNINGS="${OMARCHY_PATH:-/usr/share/omarchy}/default/audio/tunings"
 EQ_TUNING_SRC="${REPO_DIR}/audio/tunings/imac18-3"
 EQ_TUNING_DEST="${OMARCHY_TUNINGS}/imac18-3"
-PORTWATCH_SRC="${SCRIPT_DIR}/imac-audio-port-watch"
-PORTWATCH_BIN="${HOME}/.local/bin/imac-audio-port-watch"
-PORTWATCH_UNIT_SRC="${REPO_DIR}/audio/systemd/imac-audio-port-watch.service"
-PORTWATCH_UNIT="${HOME}/.config/systemd/user/imac-audio-port-watch.service"
 WP_NAMES_SRC="${REPO_DIR}/audio/wireplumber/51-imac-audio-names.conf"
 WP_NAMES="${HOME}/.config/wireplumber/wireplumber.conf.d/51-imac-audio-names.conf"
 mod_eq_title() { echo "Speaker tone EQ"; }
 mod_eq_tier()  { echo safe; }
 mod_eq_desc()  { echo "The codec does no DSP at all; macOS's warmth is entirely software EQ. Installs an Omarchy speaker tuning (bass shelf + lookahead limiter) and keeps it off the headphone jack."; }
 mod_eq_detect() {
-    local tuning=0 host=0 watch=0
+    local tuning=0 host=0
     [[ -f "${EQ_TUNING_DEST}/tuning.conf" ]] && tuning=1
     systemctl --user is-active omarchy-speaker-tuning.service &>/dev/null && host=1
-    systemctl --user is-active imac-audio-port-watch.service &>/dev/null && watch=1
-    if (( tuning && host && watch )); then echo applied
-    elif (( tuning || host || watch )); then echo partial
+    if (( tuning && host )); then echo applied
+    elif (( tuning || host )); then echo partial
     else echo not-applied; fi
 }
 mod_eq_apply() {
@@ -288,25 +282,14 @@ mod_eq_apply() {
     install -Dm644 "$WP_NAMES_SRC" "$WP_NAMES" || return 1
     systemctl --user restart wireplumber || true
 
-    # Speakers and headphones are two ports on one sink here, so pinning the
-    # tuning to the speaker sink does not keep it off headphones. Watch the port.
-    say "installing the headphone bypass watcher"
-    install -Dm755 "$PORTWATCH_SRC" "$PORTWATCH_BIN" || return 1
-    install -Dm644 "$PORTWATCH_UNIT_SRC" "$PORTWATCH_UNIT" || return 1
-    systemctl --user daemon-reload
-    systemctl --user enable --now imac-audio-port-watch.service || return 1
-
     if omarchy-audio-tuning fronted-sink >/dev/null 2>&1; then
         say "one output, named iMac Audio — the bare codec is hidden behind it"
     else
         warn "the tuning sink is not fronting the hardware; the output list will still show both"
     fi
-    say "plug headphones in and the speaker EQ drops out on its own"
 }
 mod_eq_remove() {
-    systemctl --user disable --now imac-audio-port-watch.service &>/dev/null
-    rm -f "$PORTWATCH_BIN" "$PORTWATCH_UNIT" "$WP_NAMES"
-    systemctl --user daemon-reload
+    rm -f "$WP_NAMES"
     omarchy-audio-tuning off || true
     [[ -d "$EQ_TUNING_DEST" ]] && sudo rm -rf "$EQ_TUNING_DEST"
     say "tuning removed — output goes straight to the codec again"
