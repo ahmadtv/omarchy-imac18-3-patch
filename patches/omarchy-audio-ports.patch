@@ -1,31 +1,27 @@
 diff --git shell/plugins/panels/audio/Model.js shell/plugins/panels/audio/Model.js
-index 94b7cda3..33ae0743 100644
+index 94b7cda3..dd262570 100644
 --- shell/plugins/panels/audio/Model.js
 +++ shell/plugins/panels/audio/Model.js
-@@ -47,6 +47,46 @@ function parseSinkAvailability(raw) {
+@@ -47,6 +47,42 @@ function parseSinkAvailability(raw) {
    return next
  }
  
 +// {node name: [port]} from omarchy-audio-ports, which lists only devices with
-+// more than one port. A port is "builtin" when it cannot leave the machine --
-+// speakers, an internal microphone -- as opposed to a jack that is only worth
-+// listing while something is plugged into it.
++// more than one port. "available" is false when nothing is plugged into that
++// jack, or when the driver has routed away from the port on its own.
 +function parsePorts(raw) {
 +  var next = {}
 +  var lines = String(raw || "").split("\n")
 +  for (var i = 0; i < lines.length; i++) {
 +    var p = lines[i].split("\t")
-+    if (p.length < 7 || !p[1] || !p[2]) continue
-+    var id = p[2], type = p[6].trim()
++    if (p.length < 6 || !p[1] || !p[2]) continue
 +    if (!next[p[1]]) next[p[1]] = []
 +    next[p[1]].push({
 +      kind: p[0],
-+      id: id,
++      id: p[2],
 +      label: p[3].trim(),
-+      type: type,
 +      active: p[4] === "1",
-+      available: p[5] === "1",
-+      builtin: type === "Speaker" || id.indexOf("internal") !== -1
++      available: p[5] === "1"
 +    })
 +  }
 +  return next
@@ -49,7 +45,7 @@ index 94b7cda3..33ae0743 100644
  function friendlyDeviceLabel(text) {
    var label = String(text || "").trim()
    label = label.replace(/^sof-soundwire\s+/i, "")
-@@ -78,12 +118,8 @@ function isHeadphones(node) {
+@@ -78,12 +114,8 @@ function isHeadphones(node) {
      p["device.product.name"] || "",
      p["node.description"] || "",
      p["node.nick"] || ""
@@ -64,7 +60,7 @@ index 94b7cda3..33ae0743 100644
  }
  
  function sinkGlyph(node) {
-@@ -240,6 +276,9 @@ if (typeof module !== "undefined") {
+@@ -240,6 +272,9 @@ if (typeof module !== "undefined") {
      listSnapshot: listSnapshot,
      outputVolumeName: outputVolumeName,
      parseSinkAvailability: parseSinkAvailability,
@@ -75,7 +71,7 @@ index 94b7cda3..33ae0743 100644
      nodeProps: nodeProps,
      nodeLabel: nodeLabel,
 diff --git shell/plugins/panels/audio/Panel.qml shell/plugins/panels/audio/Panel.qml
-index 26d0c58d..b898ccbc 100644
+index 26d0c58d..e24941b9 100644
 --- shell/plugins/panels/audio/Panel.qml
 +++ shell/plugins/panels/audio/Panel.qml
 @@ -58,6 +58,16 @@ Panel {
@@ -83,10 +79,10 @@ index 26d0c58d..b898ccbc 100644
    property bool sinkAvailabilityLoaded: false
  
 +  // Ports per device that has more than one, from omarchy-audio-ports:
-+  // {name: [{id, label, type, active, available, builtin}]}. Speakers and a
-+  // headphone jack are one device with two ports, so plugging in switches the
-+  // port and the device name never changes. The port is what a person calls
-+  // the output, so a multi-port device is listed as one row per port, the way
++  // {name: [{id, label, active, available}]}. Speakers and a headphone jack
++  // are one device with two ports, so plugging in switches the port and the
++  // device name never changes. The port is what a person calls the output, so
++  // a multi-port device is listed as one row per available port, the way
 +  // macOS and GNOME present a jack: Speakers / Headphones, and Internal /
 +  // Headset Microphone. The active one is highlighted; picking another is a
 +  // port switch, which the session manager undoes itself on the next jack event.
@@ -144,7 +140,7 @@ index 26d0c58d..b898ccbc 100644
        return
      }
      if (focusSection === "streams" && selectedIndex >= 0) {
-@@ -495,6 +512,98 @@ Panel {
+@@ -495,6 +512,101 @@ Panel {
      sinkAvailabilityLoaded = true
    }
  
@@ -167,15 +163,16 @@ index 26d0c58d..b898ccbc 100644
 +    return ""
 +  }
 +
-+  // Built-in ports cannot leave the machine, so they stay listed even while a
-+  // jack has taken over (some drivers report the speakers "not available" with
-+  // headphones in); a jack port is listed only while something is plugged in.
++  // Only ports the driver reports available: a jack port appears while
++  // something is plugged in, and a driver that routes on the jack itself marks
++  // the port it has taken out of use "not available" -- offering that one
++  // would move the highlight and not the sound.
 +  function shownPorts(owner) {
 +    var ports = owner ? devicePorts[owner] : null
 +    if (!ports) return []
 +    var list = []
 +    for (var i = 0; i < ports.length; i++)
-+      if (ports[i].available || ports[i].builtin) list.push(ports[i])
++      if (ports[i].available) list.push(ports[i])
 +    return list
 +  }
 +
@@ -188,14 +185,16 @@ index 26d0c58d..b898ccbc 100644
 +    return ""
 +  }
 +
-+  // One row per shown port for a multi-port device, else the device itself.
++  // One row per available port for a multi-port device -- even when only one
++  // is available, since "Headphones" says more than the device name does --
++  // else the device itself.
 +  function expandPorts(nodes) {
 +    var rows = []
 +    for (var i = 0; i < nodes.length; i++) {
 +      var node = nodes[i]
 +      var owner = portOwner(node)
 +      var ports = shownPorts(owner)
-+      if (ports.length > 1) {
++      if (ports.length > 0) {
 +        for (var j = 0; j < ports.length; j++) rows.push({ node: node, owner: owner, port: ports[j] })
 +      } else {
 +        rows.push({ node: node, owner: owner, port: null })
@@ -243,7 +242,7 @@ index 26d0c58d..b898ccbc 100644
    function friendlyDeviceLabel(text) {
      return Model.friendlyDeviceLabel(text)
    }
-@@ -508,7 +617,7 @@ Panel {
+@@ -508,7 +620,7 @@ Panel {
    }
  
    function isHeadphones(node) {
@@ -252,7 +251,7 @@ index 26d0c58d..b898ccbc 100644
    }
  
    function sinkGlyph(node) {
-@@ -519,6 +628,10 @@ Panel {
+@@ -519,6 +631,10 @@ Panel {
      return Model.sourceGlyph(node)
    }
  
@@ -263,7 +262,7 @@ index 26d0c58d..b898ccbc 100644
    function friendlyStreamLabel(label) {
      return Model.friendlyStreamLabel(label)
    }
-@@ -601,12 +714,24 @@ Panel {
+@@ -601,12 +717,24 @@ Panel {
      }
    }
  
@@ -289,7 +288,7 @@ index 26d0c58d..b898ccbc 100644
    }
  
    // Runs whether or not the panel is open: the bar shows and scrolls the output
-@@ -617,7 +742,17 @@ Panel {
+@@ -617,7 +745,17 @@ Panel {
      running: true
      repeat: true
      triggeredOnStart: true
@@ -308,7 +307,7 @@ index 26d0c58d..b898ccbc 100644
    }
  
    Timer {
-@@ -857,7 +992,7 @@ Panel {
+@@ -857,7 +995,7 @@ Panel {
                  required property var modelData
                  required property int index
                  width: panelColumn.width
@@ -317,7 +316,7 @@ index 26d0c58d..b898ccbc 100644
                  rowIndex: index
                }
              }
-@@ -965,7 +1100,7 @@ Panel {
+@@ -965,7 +1103,7 @@ Panel {
                  required property var modelData
                  required property int index
                  width: panelColumn.width
@@ -326,7 +325,7 @@ index 26d0c58d..b898ccbc 100644
                  rowIndex: index
                }
              }
-@@ -1012,10 +1147,11 @@ Panel {
+@@ -1012,10 +1150,11 @@ Panel {
    // from hasCursor/current via CursorSurface, never from containsMouse.
    component SinkRow: CursorSurface {
      id: sinkRow
@@ -341,7 +340,7 @@ index 26d0c58d..b898ccbc 100644
      hasCursor: root.cursorActive && root.focusSection === "output" && root.selectedIndex === rowIndex
      onHasCursorChanged: if (hasCursor) root.ensureCursorVisible(sinkRow)
      current: isActive
-@@ -1035,7 +1171,7 @@ Panel {
+@@ -1035,7 +1174,7 @@ Panel {
  
        Text {
          textFormat: Text.PlainText
@@ -350,7 +349,7 @@ index 26d0c58d..b898ccbc 100644
          color: root.bar.foreground
          font.family: root.bar.fontFamily
          font.pixelSize: Style.font.title
-@@ -1046,7 +1182,7 @@ Panel {
+@@ -1046,7 +1185,7 @@ Panel {
  
        Text {
          textFormat: Text.PlainText
@@ -359,7 +358,7 @@ index 26d0c58d..b898ccbc 100644
          color: root.bar.foreground
          font.family: root.bar.fontFamily
          font.pixelSize: Style.font.body
-@@ -1066,17 +1202,18 @@ Panel {
+@@ -1066,17 +1205,18 @@ Panel {
          root.focusSection = "output"
          root.selectedIndex = sinkRow.rowIndex
        }
@@ -382,7 +381,7 @@ index 26d0c58d..b898ccbc 100644
      hasCursor: root.cursorActive && root.focusSection === "input" && root.selectedIndex === rowIndex
      onHasCursorChanged: if (hasCursor) root.ensureCursorVisible(sourceRow)
      current: isActive
-@@ -1096,7 +1233,7 @@ Panel {
+@@ -1096,7 +1236,7 @@ Panel {
  
        Text {
          textFormat: Text.PlainText
@@ -391,7 +390,7 @@ index 26d0c58d..b898ccbc 100644
          color: root.bar.foreground
          font.family: root.bar.fontFamily
          font.pixelSize: Style.font.title
-@@ -1107,7 +1244,7 @@ Panel {
+@@ -1107,7 +1247,7 @@ Panel {
  
        Text {
          textFormat: Text.PlainText
@@ -400,7 +399,7 @@ index 26d0c58d..b898ccbc 100644
          color: root.bar.foreground
          font.family: root.bar.fontFamily
          font.pixelSize: Style.font.body
-@@ -1127,7 +1264,7 @@ Panel {
+@@ -1127,7 +1267,7 @@ Panel {
          root.focusSection = "input"
          root.selectedIndex = sourceRow.rowIndex
        }

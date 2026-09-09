@@ -34,7 +34,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/ahmadtv/omarchy-imac5k/main/
 | 🖥️ **Native 5K** | Full **5120×2880**. The panel is two 2560×2880 tiles Apple leaves dormant; this wakes the second one, stitches both into one display, and genlocks them so they scan in lockstep — seamless under motion. |
 | 🔊 **Speakers & mic** | The CS8409 codec the kernel can't drive at all — now with working speakers and both the internal **and** headset mic, with **automatic switching** on plug/unplug just like macOS. |
 | 🎧 **Apple EarPods** | Fully supported. Plug them in and audio + mic follow the jack; unplug and it's back to internal — automatically. All three **inline buttons** work too: play/pause, volume up, volume down. |
-| 🎧 **Jack-aware panel** | The volume panel lists **Speakers** and **Headphones** (and **Internal** / **Headset Microphone**) as separate rows, highlights the live one, and the bar icon follows the jack — the way macOS lists them. Click the other row to override. Proposed to Omarchy; carried here via Omarchy's own plugin clone until it lands. |
+| 🎧 **Jack-aware panel** | Plug headphones in and the volume panel reads **Headphones** and **Headset Microphone**, with the bar icon to match; unplug and it reads **Speakers** and **Internal Microphone** — the way macOS shows it. Proposed to Omarchy; carried here via Omarchy's own plugin clone until it lands. |
 | 🎚️ **macOS-style sound** | The codec does zero DSP; macOS's warmth is pure software EQ. A PipeWire profile brings it back. |
 | 🎨 **True colour** | The wide-gamut **Display P3** panel mapped correctly, instead of the oversaturated mess of stock sRGB. |
 
