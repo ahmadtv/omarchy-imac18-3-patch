@@ -109,7 +109,7 @@ A patched plugin would otherwise block its own update, since Omarchy fast-forwar
 ./scripts/imac-patcher --update-apps     # patches off, omarchy plugin update, then back
 ```
 
-A refresh symbol appears beside a tweak whose plugin has moved on, and an **Update** row appears in the bar widget while any is waiting. The check needs the network, so it runs every six hours rather than each time you look; `--check-updates` forces it. Updating never happens behind your back: switching a tweak off means only that.
+A refresh symbol appears beside a tweak whose plugin has moved on, in the theme's urgent colour, and the bar glyph turns that colour too. That symbol is its own button: click it to update **only that plugin**, or use the widget's *Update all* row for every waiting one. From the terminal, name the modules you want: `--update-apps game`. The check needs the network, so it runs every six hours rather than each time you look; `--check-updates` forces it. Updating never happens behind your back: switching a tweak off means only that.
 
 A tweak that no longer applies afterwards stays off and says so — usually because upstream has fixed it, which is the point: every tweak here is also filed upstream.
 
