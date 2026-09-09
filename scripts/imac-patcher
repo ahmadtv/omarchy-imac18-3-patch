@@ -1066,7 +1066,13 @@ case "${1:-}" in
             [[ "$("mod_${m}_detect")" == applied ]] || continue
             restore+=("$m"); say "unpatching ${m} so it can update"; "mod_${m}_remove"
         done
-        omarchy-plugin-update "${plugins[@]}" || warn "plugin update reported a problem"
+        # omarchy-plugin-update prints the incoming diff and asks. Without
+        # delta installed that diff goes through git's pager, so it stops on a
+        # ":" prompt waiting for q -- one keypress too many when the update was
+        # already asked for by clicking. Show the diff inline and keep the
+        # confirmation, which is the part actually worth answering.
+        GIT_PAGER=cat PAGER=cat omarchy-plugin-update "${plugins[@]}" \
+            || warn "plugin update reported a problem"
         for m in "${restore[@]}"; do
             case "$("mod_${m}_detect")" in
                 not-applied) run_module apply "$m" ;;
