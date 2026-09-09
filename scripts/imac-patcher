@@ -316,7 +316,7 @@ PANEL_HELPERS=(omarchy-audio-ports omarchy-audio-set-port)   # shipped in script
 panel_clone_manifest() { grep -l '"clonedFrom": *"omarchy.audio"' "${HOME}"/.config/omarchy/plugins/*/manifest.json 2>/dev/null | head -1; }
 mod_panel_title() { echo "Speakers / Headphones rows in the volume panel"; }
 mod_panel_tier()  { echo safe; }
-mod_panel_desc()  { echo "One row per port (Speakers, Headphones; Internal / Headset Microphone) with the active one highlighted and the bar icon following the jack, the way macOS lists them. Click a row to override. Carried as a clone of Omarchy's audio panel until the upstream change lands."; }
+mod_panel_desc()  { echo "Speakers or Headphones (and Internal or Headset Microphone) as rows, the live one highlighted, the bar icon following the jack, the way macOS lists them. On this codec the driver routes on the jack itself, so the rows follow it rather than offering an override. Carried as a clone of Omarchy's audio panel until the upstream change lands."; }
 mod_panel_detect() {
     local m; m="$(panel_clone_manifest)"
     local clone=0 patched=0 helper=0
@@ -354,7 +354,7 @@ mod_panel_apply() {
     rm -f "${HOME}/.local/bin/omarchy-audio-port-labels"   # earlier revision of this module
     say "restarting the shell"
     pkill -x quickshell || true
-    say "plug headphones in: Speakers and Headphones rows, the active one highlighted, bar icon follows"
+    say "plug headphones in: the row reads Headphones and the bar icon follows"
 }
 mod_panel_remove() {
     local m id; m="$(panel_clone_manifest)"
