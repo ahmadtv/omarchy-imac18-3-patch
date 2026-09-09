@@ -311,19 +311,18 @@ mod_eq_remove() {
 # clone mechanism carries it: the built-in panel is cloned into ~/.config and
 # the same diff applied there. Remove this module once the upstream panel has
 # it (the clone would otherwise shadow later upstream improvements).
-PANEL_PATCH="${REPO_DIR}/patches/omarchy-audio-port-labels.patch"
-PANEL_HELPER_SRC="${SCRIPT_DIR}/omarchy-audio-port-labels"
-PANEL_HELPER="${HOME}/.local/bin/omarchy-audio-port-labels"
+PANEL_PATCH="${REPO_DIR}/patches/omarchy-audio-ports.patch"
+PANEL_HELPERS=(omarchy-audio-ports omarchy-audio-set-port)   # shipped in scripts/, installed to ~/.local/bin
 panel_clone_manifest() { grep -l '"clonedFrom": *"omarchy.audio"' "${HOME}"/.config/omarchy/plugins/*/manifest.json 2>/dev/null | head -1; }
-mod_panel_title() { echo "Headphones / Speakers in the volume panel"; }
+mod_panel_title() { echo "Speakers / Headphones rows in the volume panel"; }
 mod_panel_tier()  { echo safe; }
-mod_panel_desc()  { echo "Label the output and input by the active jack port, with the matching icon, the way macOS does. Carried as a clone of Omarchy's audio panel until the upstream change lands."; }
+mod_panel_desc()  { echo "One row per port (Speakers, Headphones; Internal / Headset Microphone) with the active one highlighted and the bar icon following the jack, the way macOS lists them. Click a row to override. Carried as a clone of Omarchy's audio panel until the upstream change lands."; }
 mod_panel_detect() {
     local m; m="$(panel_clone_manifest)"
     local clone=0 patched=0 helper=0
     [[ -n $m ]] && clone=1
-    [[ -n $m ]] && grep -q 'omarchy-audio-port-labels' "$(dirname "$m")/Panel.qml" 2>/dev/null && patched=1
-    [[ -x $PANEL_HELPER ]] && helper=1
+    [[ -n $m ]] && grep -q 'omarchy-audio-ports' "$(dirname "$m")/Panel.qml" 2>/dev/null && patched=1
+    helper=1; local h; for h in "${PANEL_HELPERS[@]}"; do [[ -x "${HOME}/.local/bin/$h" ]] || helper=0; done
     if (( clone && patched && helper )); then echo applied
     elif (( clone || helper )); then echo partial
     else echo not-applied; fi
@@ -338,7 +337,7 @@ mod_panel_apply() {
         m="$(panel_clone_manifest)"; [[ -n $m ]] || { warn "clone did not appear"; return 1; }
     fi
     d="$(dirname "$m")"; id="$(jq -r .id "$m")"
-    if grep -q 'omarchy-audio-port-labels' "$d/Panel.qml"; then
+    if grep -q 'omarchy-audio-ports' "$d/Panel.qml"; then
         say "panel already carries the change"
     else
         # The diff is against Omarchy's tree; the clone holds the same files flat.
@@ -351,15 +350,16 @@ mod_panel_apply() {
         # the clone tool rewrites the plugin id inside its files; keep that true
         sed -i "s|omarchy\.audio|${id}|g" "$d/Panel.qml" "$d/Model.js"
     fi
-    install -Dm755 "$PANEL_HELPER_SRC" "$PANEL_HELPER" || return 1
+    local h; for h in "${PANEL_HELPERS[@]}"; do install -Dm755 "${SCRIPT_DIR}/$h" "${HOME}/.local/bin/$h" || return 1; done
+    rm -f "${HOME}/.local/bin/omarchy-audio-port-labels"   # earlier revision of this module
     say "restarting the shell"
     pkill -x quickshell || true
-    say "plug headphones in: the row and the bar icon now follow the jack"
+    say "plug headphones in: Speakers and Headphones rows, the active one highlighted, bar icon follows"
 }
 mod_panel_remove() {
     local m id; m="$(panel_clone_manifest)"
     if [[ -n $m ]]; then id="$(jq -r .id "$m")"; omarchy-plugin-remove "$id" </dev/null || true; fi
-    rm -f "$PANEL_HELPER"
+    local h; for h in "${PANEL_HELPERS[@]}"; do rm -f "${HOME}/.local/bin/$h"; done
     pkill -x quickshell || true
     say "back on Omarchy's built-in audio panel"
 }
