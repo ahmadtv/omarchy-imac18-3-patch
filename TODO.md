@@ -564,6 +564,50 @@ At `Internal Mic` 100 % plus +20 dB boost the capture peaks at 0.905, close to
 clipping on ordinary room noise. Whoever wires this up should set a sane default
 gain rather than leaving it at maximum.
 
+### Open: choose speakers or the internal mic while a headset is plugged in
+
+**Wanted:** the macOS-style choice — with earbuds in, pick "Speakers" (or the
+internal microphone) from the volume panel and have the sound actually move.
+The panel rows exist (the `panel` module); they were made honest again on
+2026-09-09 by listing only ports the driver reports available, because picking
+the other one moved the highlight and not the sound.
+
+**Proven not to be hardware (experiment 2026-09-09, earbuds in, video playing):**
+`pactl set-sink-port … analog-output-speaker` was accepted, PipeWire reported
+Speakers active, and the codec did not move at all — `0x2c` (headphones) stayed
+`Pin-ctls: 0x40: OUT`, `0x24/0x25` (speakers) stayed `0x00`, sound stayed on
+the earbuds. The speaker pins are `0x00` *even while the speakers are playing*,
+so the speakers are not driven through the standard pin controls: the driver
+runs both amplifiers over its private I2C path to the CS42L83, and its
+jack-detect handler is the only thing that ever sets the routing (headphone amp
+on + speaker path off on insert, the reverse on removal). The card exposes no
+Speaker/Headphone playback switch, so PipeWire's port switch writes to controls
+the driver never reads. Capture is the same story: switching the source port
+left the driver's `Capture Source` selector untouched. The hardware itself has
+separate speaker and headphone amplifiers and separate mic inputs, and the
+driver already toggles them independently — just in a fixed pattern copied
+from what macOS does (Apple also hides the internal speakers when headphones
+are plugged in).
+
+**The fix is driver work, bounded:**
+1. Expose real `Speaker Playback Switch` and `Headphone Playback Switch`
+   kcontrols mapped to the I2C writes the jack handler already does.
+2. Make the jack event set a *default* (headphones on insert, speakers on
+   removal) instead of forcing it — i.e. re-apply the switches, don't bypass them.
+3. Honour `Capture Source` the same way for the microphones (`0x1a` headset
+   ADC vs `intmike_adc_nid`), so the panel's Internal / Headset Microphone
+   rows become real.
+Once the switches exist, PipeWire's `analog-output-speaker/headphones` paths
+(which key on exactly those element names) work with no userspace change, the
+panel's available-only rule can list both ports again, and the override is
+honest. Upstreamable on the same jackdanyell PR.
+
+**Risk:** the routing code is the touchy part of this driver — reconfiguring
+the playback/ASP path from inside a jack event once produced the continuous
+high-pitched tone on the headset output (see the comment in
+`patch_cirrus_new84.h`). Budget a day with ear-testing, not an hour. Do it after
+the headset-mic label reboot check.
+
 ## SD card reader: broken, and not for the reason it first looks
 
 With a card inserted the controller *does* see it and starts initialising, then
