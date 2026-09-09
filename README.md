@@ -114,15 +114,13 @@ sudo systemctl mask suspend.target hibernate.target hybrid-sleep.target suspend-
 
 ## 🎛️ GPU compute tools (voxtype, local LLMs) and shutdown
 
-This GPU exposes only a **256 MiB CPU-visible slice** of its video memory (no large BAR). Vulkan compute engines such as ggml, used by [voxtype](https://github.com/nicobrenner/voxtype) and most local speech/LLM tools, park their buffers in that slice by default and can fill it. The shutdown splash then cannot allocate its framebuffer and the machine **freezes at the Omarchy logo on reboot**. ggml has a switch for exactly this class of GPU; set it for the tool's service, e.g. for voxtype:
+This GPU exposes only a **256 MiB CPU-visible slice** of its video memory (no large BAR). Vulkan compute engines such as ggml, used by [voxtype](https://github.com/nicobrenner/voxtype) and most local speech/LLM tools, park their buffers in that slice by default and can fill it. The shutdown splash then cannot allocate its framebuffer and the machine **freezes at the Omarchy logo on reboot**. The patcher's `vram` module sets ggml's own switch for this class of GPU, session-wide, so every such tool picks it up:
 
-```ini
-# ~/.config/systemd/user/voxtype.service.d/small-bar.conf
-[Service]
-Environment=GGML_VK_DISABLE_HOST_VISIBLE_VIDMEM=1
+```bash
+./scripts/imac-patcher --apply vram    # GGML_VK_DISABLE_HOST_VISIBLE_VIDMEM=1 in ~/.config/environment.d
 ```
 
-Measured here: voxtype's share of the slice fell from 142 MiB to 52 MiB, and the splash needs 59 MiB. Not part of the patcher, since it belongs to whichever tool you run.
+Measured here: voxtype's share of the slice fell from 142 MiB to 52 MiB, and the splash needs 59 MiB. On by default because this repo is built for one iMac first; deselect it if you never run such tools.
 
 ## 🛟 Safety
 
