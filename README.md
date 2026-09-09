@@ -112,6 +112,18 @@ Suspend and hibernate **hard-hang this machine, every time** — an Apple firmwa
 sudo systemctl mask suspend.target hibernate.target hybrid-sleep.target suspend-then-hibernate.target
 ```
 
+## 🎛️ GPU compute tools (voxtype, local LLMs) and shutdown
+
+This GPU exposes only a **256 MiB CPU-visible slice** of its video memory (no large BAR). Vulkan compute engines such as ggml, used by [voxtype](https://github.com/nicobrenner/voxtype) and most local speech/LLM tools, park their buffers in that slice by default and can fill it. The shutdown splash then cannot allocate its framebuffer and the machine **freezes at the Omarchy logo on reboot**. ggml has a switch for exactly this class of GPU; set it for the tool's service, e.g. for voxtype:
+
+```ini
+# ~/.config/systemd/user/voxtype.service.d/small-bar.conf
+[Service]
+Environment=GGML_VK_DISABLE_HOST_VISIBLE_VIDMEM=1
+```
+
+Measured here: voxtype's share of the slice fell from 142 MiB to 52 MiB, and the splash needs 59 MiB. Not part of the patcher, since it belongs to whichever tool you run.
+
 ## 🛟 Safety
 
 Every patch backs up what it replaces and can be reversed. Boot-related changes print their recovery steps first. A new `amdgpu` build never has to replace the working one to be tried — `scripts/imac-alt-entry` boots it from its own hash-pinned Limine entry with the default untouched. See [`patches/README.md`](patches/README.md).
