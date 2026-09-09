@@ -31,10 +31,10 @@ BarWidget {
     var lines = String(raw || "").split("\n")
     for (var i = 0; i < lines.length; i++) {
       var p = lines[i].split("\t")
-      // id, tier, state, short name, full title -- anything the patcher says is
-      // not applicable to this machine is left out rather than shown dead.
-      if (p.length < 5 || p[2] === "n/a") continue
-      out.push({ id: p[0], tier: p[1], state: p[2], label: p[3], title: p[4] })
+      // id, tier, state, short name, full title, icon -- anything the patcher
+      // says is not applicable to this machine is left out rather than dead.
+      if (p.length < 6 || p[2] === "n/a") continue
+      out.push({ id: p[0], tier: p[1], state: p[2], label: p[3], title: p[4], icon: p[5] })
     }
     rows = out
     loaded = true
@@ -154,9 +154,21 @@ BarWidget {
 
             Text {
               textFormat: Text.PlainText
+              text: rowItem.modelData.icon
+              color: root.bar ? root.bar.foreground : Color.foreground
+              opacity: rowItem.on ? 0.95 : 0.45
+              font.family: root.bar ? root.bar.fontFamily : Style.font.family
+              font.pixelSize: Style.font.body
+              width: Style.space(18)
+              horizontalAlignment: Text.AlignHCenter
+              anchors.verticalCenter: parent.verticalCenter
+            }
+
+            Text {
+              textFormat: Text.PlainText
               text: rowItem.modelData.label
               elide: Text.ElideRight
-              width: parent.width - Style.space(22) - (tierTag.visible ? tierTag.width + Style.space(8) : 0)
+              width: parent.width - Style.space(48) - (tierTag.visible ? tierTag.width + Style.space(8) : 0)
               color: root.bar ? root.bar.foreground : Color.foreground
               opacity: rowItem.on ? 1.0 : 0.6
               font.family: root.bar ? root.bar.fontFamily : Style.font.family
