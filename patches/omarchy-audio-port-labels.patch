@@ -1,7 +1,7 @@
-diff --git a/shell/plugins/panels/audio/Model.js b/shell/plugins/panels/audio/Model.js
+diff --git shell/plugins/panels/audio/Model.js shell/plugins/panels/audio/Model.js
 index 94b7cda3..34ae4ea6 100644
---- a/shell/plugins/panels/audio/Model.js
-+++ b/shell/plugins/panels/audio/Model.js
+--- shell/plugins/panels/audio/Model.js
++++ shell/plugins/panels/audio/Model.js
 @@ -47,6 +47,27 @@ function parseSinkAvailability(raw) {
    return next
  }
@@ -54,10 +54,10 @@ index 94b7cda3..34ae4ea6 100644
      friendlyDeviceLabel: friendlyDeviceLabel,
      nodeProps: nodeProps,
      nodeLabel: nodeLabel,
-diff --git a/shell/plugins/panels/audio/Panel.qml b/shell/plugins/panels/audio/Panel.qml
+diff --git shell/plugins/panels/audio/Panel.qml shell/plugins/panels/audio/Panel.qml
 index 26d0c58d..6ee88330 100644
---- a/shell/plugins/panels/audio/Panel.qml
-+++ b/shell/plugins/panels/audio/Panel.qml
+--- shell/plugins/panels/audio/Panel.qml
++++ shell/plugins/panels/audio/Panel.qml
 @@ -58,6 +58,12 @@ Panel {
    property var sinkAvailability: ({})
    property bool sinkAvailabilityLoaded: false
