@@ -1,0 +1,147 @@
+diff --git i/radar/client_projection.py w/radar/client_projection.py
+index 8cc5af5..4123c6b 100644
+--- i/radar/client_projection.py
++++ w/radar/client_projection.py
+@@ -45,6 +45,74 @@ def _parse_retained_read_ids(retained_read_ids_json: str) -> list[str]:
+     return sorted(set(retained))
+ 
+ 
++_ARCHIVED_SUMMARY = (
++    "This story is no longer carried by the News Radar feed. It was restored "
++    "from your local saved copy, so only the title, source and dates survive - "
++    "open the original source to read it."
++)
++
++_ARCHIVED_SECTION_BY_TYPE = {
++    "omarchy-released": "core",
++    "omarchy-news": "core",
++    "plugin-added": "plugins",
++    "plugin-released": "plugins",
++    "plugin-retired": "plugins",
++    "plugin-verification-changed": "plugins",
++    "community-link": "community",
++    "youtube-video": "youtube",
++}
++
++
++def _archived_saved_events(
++    feed: Mapping[str, Any], state: Mapping[str, Any]
++) -> list[dict[str, Any]]:
++    """Rebuild saved stories the published feed no longer carries.
++
++    Saved is selected by intersecting the live feed with the saved id set, so a
++    bookmark silently vanishes once the publisher stops carrying its event. The
++    local save record still holds title, source and dates, so synthesise a
++    deliberately inert event from it rather than dropping the row entirely.
++    """
++
++    present = {event["id"] for event in feed.get("events", [])}
++    restored: list[dict[str, Any]] = []
++    for event_id, record in state["saved"].items():
++        if event_id in present:
++            continue
++        event_type = str(record.get("type") or "community-link")
++        occurred_at = str(record.get("occurredAt") or record.get("savedAt") or "")
++        restored.append(
++            {
++                "id": event_id,
++                "type": event_type,
++                "title": str(record.get("title") or "Saved story"),
++                "summary": _ARCHIVED_SUMMARY,
++                "occurredAt": occurred_at,
++                "discoveredAt": str(record.get("savedAt") or occurred_at),
++                "entity": {
++                    "id": event_id,
++                    "kind": "youtube" if event_type == "youtube-video" else "omarchy",
++                    "name": "Saved",
++                },
++                "classification": {
++                    "curated": False,
++                    "section": _ARCHIVED_SECTION_BY_TYPE.get(event_type, "core"),
++                    "significance": "routine",
++                    "tags": ["saved"],
++                },
++                "source": {
++                    "label": "Original source",
++                    "url": str(record.get("sourceUrl") or ""),
++                },
++                "compatibility": {"basis": "unknown", "channels": []},
++                "trust": {"marketplace": "not-applicable", "securityAudit": False},
++                "metrics": [],
++                "isArchivedSave": True,
++            }
++        )
++    return restored
++
++
+ def _filtered_section_events(
+     feed: Mapping[str, Any],
+     state: Mapping[str, Any],
+@@ -70,6 +138,14 @@ def _filtered_section_events(
+         for event in feed["events"]
+         if section == "saved" or not respect_mutes or not is_muted(event, state)
+     ]
++    # Restore bookmarks the publisher has since dropped. Only the real Saved
++    # rail gets them: for-you borrows Saved's projector but keeps its own ids.
++    if section == "saved":
++        scoped["events"] = sorted(
++            list(scoped["events"]) + _archived_saved_events(feed, state),
++            key=lambda event: event["occurredAt"],
++            reverse=True,
++        )
+     projection_section = section
+     if section == "for-you":
+         scoped["events"] = [event for event in scoped["events"]
+diff --git i/src/BarWidget.qml w/src/BarWidget.qml
+index b66e429..7d567f2 100644
+--- i/src/BarWidget.qml
++++ w/src/BarWidget.qml
+@@ -11,10 +11,16 @@ BarWidget {
+ 
+   readonly property var widgetMetadata: bar && bar.barWidgetRegistry
+     ? bar.barWidgetRegistry.metadataFor(moduleName) : null
+-  readonly property string helperPath: widgetMetadata && widgetMetadata.sourceDir
+-    ? String(widgetMetadata.sourceDir) + "/bin/news-radar-client" : ""
+-  readonly property string shortcutHelperPath: widgetMetadata && widgetMetadata.sourceDir
+-    ? String(widgetMetadata.sourceDir) + "/bin/news-radar-shortcut" : ""
++  // Omarchy 4.0.3 hands third-party widgets a PluginBarApi facade that exposes
++  // no barWidgetRegistry, so widgetMetadata is null and every helper path is
++  // empty -- the widget then never runs "indicator" and stays invisible. Fall
++  // back to the plugin's own install directory.
++  readonly property string sourceDir: widgetMetadata && widgetMetadata.sourceDir
++    ? String(widgetMetadata.sourceDir)
++    : (Quickshell.env("XDG_CONFIG_HOME") || (Quickshell.env("HOME") + "/.config"))
++      + "/omarchy/plugins/" + moduleName
++  readonly property string helperPath: sourceDir + "/bin/news-radar-client"
++  readonly property string shortcutHelperPath: sourceDir + "/bin/news-radar-shortcut"
+   readonly property string stateBase: Quickshell.env("XDG_STATE_HOME") || (Quickshell.env("HOME") + "/.local/state")
+   readonly property string cacheBase: Quickshell.env("XDG_CACHE_HOME") || (Quickshell.env("HOME") + "/.cache")
+   readonly property int refreshMinimumAgeSeconds: 5 * 60
+diff --git i/src/Panel.qml w/src/Panel.qml
+index 44a8f51..2591e43 100644
+--- i/src/Panel.qml
++++ w/src/Panel.qml
+@@ -16,12 +16,17 @@ Item {
+   property var pluginRegistry: null
+ 
+   readonly property string runtimeBuildIdentity: "news-radar-0.5.5+identity-2"
+-  readonly property string helperPath: manifest && manifest.__sourceDir
+-    ? String(manifest.__sourceDir) + "/bin/news-radar-client" : ""
+-  readonly property string shortcutHelperPath: manifest && manifest.__sourceDir
+-    ? String(manifest.__sourceDir) + "/bin/news-radar-shortcut" : ""
+-  readonly property string brandLogoPath: manifest && manifest.__sourceDir
+-    ? String(manifest.__sourceDir) + "/assets/omarchy-logo.svg" : ""
++  // Omarchy 4.0.3 strips __sourceDir from third-party manifests before handing
++  // them to a plugin (shell.qml publicPluginManifest), which leaves every
++  // helper path empty and makes each Process command start with "". Fall back
++  // to the plugin's own install directory so the CLI stays reachable.
++  readonly property string sourceDir: manifest && manifest.__sourceDir
++    ? String(manifest.__sourceDir)
++    : (Quickshell.env("XDG_CONFIG_HOME") || (Quickshell.env("HOME") + "/.config"))
++      + "/omarchy/plugins/" + pluginId
++  readonly property string helperPath: sourceDir + "/bin/news-radar-client"
++  readonly property string shortcutHelperPath: sourceDir + "/bin/news-radar-shortcut"
++  readonly property string brandLogoPath: sourceDir + "/assets/omarchy-logo.svg"
+   readonly property string cacheBase: Quickshell.env("XDG_CACHE_HOME")
+     || (Quickshell.env("HOME") + "/.cache")
+   readonly property string pluginId: manifest && manifest.id

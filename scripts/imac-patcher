@@ -20,7 +20,9 @@
 #
 set -uo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Resolve through symlinks: the menu calls this as ~/.local/bin/imac-patcher,
+# and every patch file we ship is found relative to the real script.
+SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 REPO_DIR="$(dirname "$SCRIPT_DIR")"
 INSTALLER_5K="${SCRIPT_DIR}/patch-imac5k-amdgpu.sh"
 LOGDIR="${HOME}/.local/state/imac-patcher"
@@ -43,7 +45,10 @@ EQ_DEST="${HOME}/.config/pipewire/filter-chain.conf.d/eq6.conf"
 SLEEP_TARGETS=(suspend.target hibernate.target hybrid-sleep.target suspend-then-hibernate.target)
 mkdir -p "$LOGDIR" "$CACHE"
 
-MODULES=(audio eq panel color vram wifi suspend boot 5k)
+# Hardware patches first, then patches to other people's apps (tier "app"):
+# those are opt-in per app, are never included in "safe", and go away by
+# themselves when the app moves on. See the app-patch helpers below.
+MODULES=(audio eq color vram wifi suspend boot 5k panel game news)
 
 HAVE_GUM=0; command -v gum >/dev/null && HAVE_GUM=1
 say()  { printf '\033[1;33m==>\033[0m %s\n' "$*"; }
@@ -57,6 +62,55 @@ if [[ "$product" != "iMac18,3" && " $* " != *" --force "* ]]; then
     echo "This tool targets the iMac18,3 (detected: ${product}). Refusing. Use --force to override." >&2
     exit 1
 fi
+
+# ── patches to other people's apps ─────────────────────────────────────────
+# A patch to an Omarchy plugin or a third-party one. Three rules keep these
+# from becoming a mess:
+#
+#   * The target must be a git checkout. That is what makes removal exact and
+#     traceless -- reverse-applying our own diff and then finding the checkout
+#     identical to upstream is a proof, not a hope -- and it is what lets us
+#     tell that the app has moved on.
+#   * Detection asks the checkout, never a stamp file we wrote. If an update
+#     replaced the file, or the plugin was reinstalled, the patch reads as off
+#     by itself, which is exactly what should happen.
+#   * Apply refuses unless the diff applies cleanly to the checkout as it is
+#     now, so a patch is never half-applied to a version it was not written for.
+#
+# `omarchy plugin update` fast-forwards and aborts on modified tracked files,
+# so patched plugins would block their own update. --update-apps handles that:
+# it removes these patches, updates, and puts back the ones that still apply.
+APPS_DIR="${REPO_DIR}/patches/apps"
+app_dir() { echo "${HOME}/.config/omarchy/plugins/$1"; }
+app_patch_detect() {   # <plugin-id> <patch-file>
+    local d; d="$(app_dir "$1")"
+    [[ -d $d/.git && -f $2 ]] || { echo n/a; return; }          # not installed
+    if   git -C "$d" apply --reverse --check "$2" &>/dev/null; then echo applied
+    elif git -C "$d" apply           --check "$2" &>/dev/null; then echo not-applied
+    else echo n/a; fi                                            # app has moved on
+}
+app_patch_apply() {    # <plugin-id> <patch-file>
+    local d; d="$(app_dir "$1")"
+    [[ -d $d/.git ]] || { warn "$1 is not installed as a git checkout"; return 1; }
+    git -C "$d" apply --reverse --check "$2" &>/dev/null && { say "already applied"; return 0; }
+    git -C "$d" apply --check "$2" 2>/dev/null || {
+        warn "the patch does not apply to $1 as it stands ($(git -C "$d" rev-parse --short HEAD))."
+        warn "The app has moved on — the patch needs re-porting, or upstream already carries it."
+        return 1; }
+    git -C "$d" apply "$2" || return 1
+    say "patched $1"
+}
+app_patch_remove() {   # <plugin-id> <patch-file>
+    local d; d="$(app_dir "$1")"
+    [[ -d $d/.git ]] || return 0
+    git -C "$d" apply --reverse --check "$2" &>/dev/null && { git -C "$d" apply --reverse "$2" || return 1; }
+    if [[ -z "$(git -C "$d" status --porcelain)" ]]; then
+        say "$1 is byte-for-byte upstream again — no trace left"
+    else
+        warn "$1 still differs from upstream: $(git -C "$d" status --short | tr '\n' ' ')"
+    fi
+}
+restart_shell() { pkill -x quickshell 2>/dev/null || true; say "shell restarted"; }
 
 # ═══════════════════════ module: audio ═════════════════════════════════════
 AUDIO_REPO=https://github.com/jackdanyell/imac18-3-cs8409-linux-audio
@@ -315,7 +369,7 @@ PANEL_PATCH="${REPO_DIR}/patches/omarchy-audio-ports.patch"
 PANEL_HELPERS=(omarchy-audio-ports omarchy-audio-set-port)   # shipped in scripts/, installed to ~/.local/bin
 panel_clone_manifest() { grep -l '"clonedFrom": *"omarchy.audio"' "${HOME}"/.config/omarchy/plugins/*/manifest.json 2>/dev/null | head -1; }
 mod_panel_title() { echo "Speakers / Headphones rows in the volume panel"; }
-mod_panel_tier()  { echo safe; }
+mod_panel_tier()  { echo app; }
 mod_panel_desc()  { echo "Speakers or Headphones (and Internal or Headset Microphone) as rows, the live one highlighted, the bar icon following the jack, the way macOS lists them. On this codec the driver routes on the jack itself, so the rows follow it rather than offering an override. Carried as a clone of Omarchy's audio panel until the upstream change lands."; }
 mod_panel_detect() {
     local m; m="$(panel_clone_manifest)"
@@ -363,6 +417,28 @@ mod_panel_remove() {
     pkill -x quickshell || true
     say "back on Omarchy's built-in audio panel"
 }
+
+# ═══════════════════════ module: game ══════════════════════════════════════
+GAME_ID=io.github.ejuro.blow-off-some-steam
+GAME_PATCH="${APPS_DIR}/blow-off-some-steam-lazy-sounds.patch"
+mod_game_title() { echo "Blow off some steam: quiet until opened"; }
+mod_game_tier()  { echo app; }
+mod_game_desc()  { echo "The game loads its sound effects when the bar starts, so two idle \"quickshell\" rows sit in the volume mixer before it has ever been opened, and another pair appears on every audio change. Loads them when the game starts instead. Sent upstream as ejuro/blow-off-some-steam#6."; }
+mod_game_appid()  { echo "$GAME_ID"; }
+mod_game_detect() { app_patch_detect "$GAME_ID" "$GAME_PATCH"; }
+mod_game_apply()  { app_patch_apply  "$GAME_ID" "$GAME_PATCH" && restart_shell; }
+mod_game_remove() { app_patch_remove "$GAME_ID" "$GAME_PATCH" && restart_shell; }
+
+# ═══════════════════════ module: news ══════════════════════════════════════
+NEWS_ID=io.github.mtolhuys.news-radar
+NEWS_PATCH="${APPS_DIR}/news-radar-omarchy-403.patch"
+mod_news_title() { echo "News Radar: working again on Omarchy 4.0.3"; }
+mod_news_tier()  { echo app; }
+mod_news_desc()  { echo "Omarchy 4.0.3 stopped handing third-party plugins the path to their own helper binaries, which left this plugin's panel empty and its bar widget invisible; also saves the full story so bookmarks survive the feed dropping them. Filed upstream as mtolhuys/omarchy-news-radar issues 14 and 15."; }
+mod_news_appid()  { echo "$NEWS_ID"; }
+mod_news_detect() { app_patch_detect "$NEWS_ID" "$NEWS_PATCH"; }
+mod_news_apply()  { app_patch_apply  "$NEWS_ID" "$NEWS_PATCH" && restart_shell; }
+mod_news_remove() { app_patch_remove "$NEWS_ID" "$NEWS_PATCH" && restart_shell; }
 
 # ═══════════════════════ module: color ═════════════════════════════════════
 mod_color_title() { echo "Wide-gamut colour"; }
@@ -726,11 +802,105 @@ show_status() {
     for m in "${MODULES[@]}"; do
         st="$("mod_${m}_detect")"; tier="$("mod_${m}_tier")"
         printf '  %-32s %-22b %s\n' "$("mod_${m}_title")" "$(state_label "$st")" \
-            "$([[ $tier == boot ]] && printf '\033[0;33m[boot]\033[0m')"
+            "$(case $tier in boot) printf '\033[0;33m[boot]\033[0m';; app) printf '\033[0;36m[app]\033[0m';; esac)"
     done
     echo
     printf '  ids: %s\n' "${MODULES[*]}"
 }
+# The menu asks for every module's state each time it opens, and a full sweep
+# costs most of a second (dkms, pactl, hyprctl). Answer from a cache that one
+# sweep fills, so the first row pays and the rest are free.
+STATE_CACHE="${HOME}/.cache/imac-patcher/state"
+state_cache_write() {
+    local m out=""
+    for m in "${MODULES[@]}"; do out+="${m} $("mod_${m}_detect")"$'\n'; done
+    mkdir -p "$(dirname "$STATE_CACHE")" && printf '%s' "$out" > "$STATE_CACHE"
+}
+state_of() {   # <id>
+    local age=99999
+    [[ -f $STATE_CACHE ]] && age=$(( $(date +%s) - $(stat -c %Y "$STATE_CACHE" 2>/dev/null || echo 0) ))
+    (( age > 10 )) && state_cache_write
+    awk -v m="$1" '$1==m{print $2; found=1} END{if(!found) print "n/a"}' "$STATE_CACHE"
+}
+
+# ── the Omarchy menu ───────────────────────────────────────────────────────
+# Not a plugin: Omarchy reads ~/.config/omarchy/extensions/omarchy-menu.jsonc
+# itself, watches it for changes, and evaluates each row's when:/checked: shell
+# expression, so the menu is data rather than code we would have to keep
+# working against Omarchy's internals. Rows are written between markers and
+# regenerated in place, leaving anything the user added around them untouched.
+# Both front ends read the same modules: this file is the only source of truth.
+MENU_EXT="${HOME}/.config/omarchy/extensions/omarchy-menu.jsonc"
+MENU_BEGIN='  // >>> imac-patcher — generated; run `imac-patcher --menu install` to refresh'
+MENU_END='  // <<< imac-patcher'
+# Menu rows are narrow: a long label is truncated and takes the checkmark with
+# it, so each row gets a short name here and the module's full title becomes
+# its description, which the menu also searches.
+menu_label() {
+    case $1 in
+    audio) echo 'Speakers & mic' ;; eq)      echo 'Speaker EQ' ;;
+    panel) echo 'Jack-aware panel' ;; color) echo 'Colour (P3)' ;;
+    vram)  echo 'GPU memory guard' ;; wifi)  echo 'Wi-Fi fix' ;;
+    suspend) echo 'Block suspend' ;; boot)   echo 'Boot hygiene' ;;
+    5k)    echo 'Native 5K' ;; game)         echo 'Quiet game sounds' ;;
+    news)  echo 'News Radar fix' ;; *)       echo "$1" ;;
+    esac
+}
+menu_icon() {
+    case $1 in
+    audio) echo '󰋋' ;; eq) echo '󰋎' ;; panel) echo '󰓃' ;; color) echo '󰸊' ;;
+    vram)  echo '󰢮' ;; wifi) echo '󰖩' ;; suspend) echo '󰤄' ;; boot) echo '󰸈' ;;
+    5k)    echo '󰍹' ;; game) echo '󰊴' ;; news) echo '󰎕' ;; *) echo '󰏫' ;;
+    esac
+}
+menu_block() {
+    local m tier
+    printf '%s\n' "$MENU_BEGIN"
+    printf '  "imac": {"icon":"","label":"iMac","aliases":["imac","patches"],"description":"Hardware and app patches for this iMac"},\n'
+    for m in "${MODULES[@]}"; do
+        tier="$("mod_${m}_tier")"
+        [[ $tier == app ]] && continue
+        printf '  "imac.%s": {"icon":"%s","label":"%s","description":"%s","checked":"imac-patcher --is-applied %s","when":"imac-patcher --is-applicable %s","action":"omarchy-launch-floating-terminal-with-presentation '"'"'imac-patcher --toggle %s'"'"'"},\n' \
+            "$m" "$(menu_icon "$m")" "$(menu_label "$m")" "$("mod_${m}_title")" "$m" "$m" "$m"
+    done
+    printf '  "imac.apps": {"icon":"","label":"App patches","description":"Patches to other people'"'"'s apps; each switches off by itself when the app moves on"},\n'
+    for m in "${MODULES[@]}"; do
+        [[ "$("mod_${m}_tier")" == app ]] || continue
+        printf '  "imac.apps.%s": {"icon":"%s","label":"%s","description":"%s","checked":"imac-patcher --is-applied %s","when":"imac-patcher --is-applicable %s","action":"omarchy-launch-floating-terminal-with-presentation '"'"'imac-patcher --toggle %s'"'"'"},\n' \
+            "$m" "$(menu_icon "$m")" "$(menu_label "$m")" "$("mod_${m}_title")" "$m" "$m" "$m"
+    done
+    printf '  "imac.apps.update": {"icon":"󰚰","label":"Update plugins","description":"Takes our patches off, updates, puts back the ones that still apply","action":"omarchy-launch-floating-terminal-with-presentation '"'"'imac-patcher --update-apps'"'"'"},\n'
+    printf '  "imac.all": {"icon":"","label":"Open the patcher","action":"omarchy-launch-floating-terminal-with-presentation imac-patcher"},\n'
+    printf '%s\n' "$MENU_END"
+}
+menu_splice() {   # <block-file>|"" — replace our block, or drop it when empty
+    local blk="$1" tmp; tmp="$(mktemp)"
+    [[ -f $MENU_EXT ]] || { mkdir -p "$(dirname "$MENU_EXT")"; printf '{\n}\n' > "$MENU_EXT"; }
+    awk -v blk="$blk" '
+        BEGIN { if (blk != "") { while ((getline l < blk) > 0) B = B l "\n" } }
+        /^[[:space:]]*\/\/ >>> imac-patcher/ { skip = 1 }
+        skip { if ($0 ~ /^[[:space:]]*\/\/ <<< imac-patcher/) skip = 0; next }
+        { line[++n] = $0 }
+        END {
+            close_at = 0
+            for (i = 1; i <= n; i++) if (line[i] ~ /^[[:space:]]*}[[:space:]]*$/) close_at = i
+            for (i = 1; i <= n; i++) { if (i == close_at) printf "%s", B; print line[i] }
+        }' "$MENU_EXT" > "$tmp" && mv "$tmp" "$MENU_EXT"
+}
+menu_install() {
+    local blk; blk="$(mktemp)"; menu_block > "$blk"
+    menu_splice "$blk"; rm -f "$blk"
+    install -d "${HOME}/.local/bin"
+    ln -sfn "$(readlink -f "${BASH_SOURCE[0]}")" "${HOME}/.local/bin/imac-patcher"
+    state_cache_write
+    say "added to the Omarchy menu under \"iMac\" — it appears without a restart"
+    command -v imac-patcher >/dev/null || warn "~/.local/bin is not on PATH; the menu rows will not evaluate"
+}
+menu_remove() {
+    menu_splice ""; rm -f "${HOME}/.local/bin/imac-patcher"
+    say "removed from the Omarchy menu"
+}
+
 run_module() {   # $1 = apply|remove, $2 = id
     local action=$1 id=$2 st
     st="$("mod_${id}_detect")"
@@ -747,6 +917,52 @@ run_module() {   # $1 = apply|remove, $2 = id
 
 case "${1:-}" in
     --status) show_status; exit 0 ;;
+
+    # Cheap queries, for the Omarchy menu's when:/checked: expressions.
+    --state)         state_of "${2:-}"; exit 0 ;;
+    --is-applied)    [[ "$(state_of "${2:-}")" == applied ]]; exit $? ;;
+    --is-applicable) [[ "$(state_of "${2:-}")" != n/a ]];     exit $? ;;
+
+    --toggle)
+        id="${2:-}"
+        [[ " ${MODULES[*]} " == *" $id "* ]] || { echo "unknown module: $id" >&2; exit 2; }
+        case "$("mod_${id}_detect")" in
+            applied) run_module remove "$id" ;;
+            n/a)     warn "$("mod_${id}_title"): not applicable right now — nothing to do" ;;
+            *)       run_module apply  "$id" ;;
+        esac
+        state_cache_write
+        exit 0 ;;
+
+    --update-apps)
+        # A patched plugin blocks its own update: omarchy fast-forwards and
+        # aborts on modified tracked files. So take our patches off, update,
+        # and put back only the ones that still apply — a patch that no longer
+        # applies is one upstream has most likely fixed, and it stays off.
+        shift
+        declare -a restore=()
+        for m in "${MODULES[@]}"; do
+            declare -F "mod_${m}_appid" >/dev/null || continue
+            [[ "$("mod_${m}_detect")" == applied ]] || continue
+            restore+=("$m"); say "unpatching ${m} so it can update"; "mod_${m}_remove"
+        done
+        omarchy-plugin-update "$@" || warn "plugin update reported a problem"
+        for m in "${restore[@]}"; do
+            case "$("mod_${m}_detect")" in
+                not-applied) run_module apply "$m" ;;
+                applied)     : ;;
+                *) warn "${m}: the patch no longer fits this version — left off (upstream may already carry it)" ;;
+            esac
+        done
+        state_cache_write; exit 0 ;;
+
+    --menu)
+        case "${2:-}" in
+            install) menu_install ;;
+            remove)  menu_remove ;;
+            *) echo "usage: $0 --menu install|remove" >&2; exit 2 ;;
+        esac
+        exit 0 ;;
     --apply|--remove)
         action="${1#--}"; shift
         [[ ${1:-} == safe ]] && { set -- ; for m in "${MODULES[@]}"; do [[ $("mod_${m}_tier") == safe ]] && set -- "$@" "$m"; done; }
@@ -757,7 +973,7 @@ case "${1:-}" in
         done
         exit 0 ;;
     --force|"") ;;
-    *) echo "usage: $0 [--status | --apply <id...|safe> | --remove <id...|safe>]"; exit 2 ;;
+    *) echo "usage: $0 [--status | --apply <id...|safe> | --remove <id...|safe> | --toggle <id> | --update-apps | --menu install|remove]"; exit 2 ;;
 esac
 
 # ── interactive ────────────────────────────────────────────────────────────
