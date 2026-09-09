@@ -887,17 +887,65 @@ menu_splice() {   # <block-file>|"" — replace our block, or drop it when empty
             for (i = 1; i <= n; i++) { if (i == close_at) printf "%s", B; print line[i] }
         }' "$MENU_EXT" > "$tmp" && mv "$tmp" "$MENU_EXT"
 }
+# ── the bar widget ─────────────────────────────────────────────────────────
+# This one IS a plugin, because a bar widget has to be: Omarchy loads bar
+# widgets as QML from ~/.config/omarchy/plugins/<id>/. It is a thin one --
+# it asks `imac-patcher --list` what exists and calls `--toggle`, so the
+# patcher stays the only thing that knows what a patch is.
+# Both front ends invoke `imac-patcher` by name, so the symlink belongs to
+# neither: it is put in place by either and taken away only when neither is left.
+CLI_LINK="${HOME}/.local/bin/imac-patcher"
+link_cli()   { install -d "$(dirname "$CLI_LINK")"; ln -sfn "$(readlink -f "${BASH_SOURCE[0]}")" "$CLI_LINK"; }
+unlink_cli_if_unused() {
+    [[ -d "${HOME}/.config/omarchy/plugins/ahmad.imac-patches" ]] && return 0
+    grep -qs '>>> imac-patcher' "$MENU_EXT" && return 0
+    rm -f "$CLI_LINK"
+}
+
+BAR_ID=ahmad.imac-patches
+BAR_SRC="${REPO_DIR}/shell/${BAR_ID}"
+BAR_DEST="${HOME}/.config/omarchy/plugins/${BAR_ID}"
+SHELL_JSON="${HOME}/.config/omarchy/shell.json"
+bar_in_layout() { jq -e --arg id "$BAR_ID" '[.bar.layout[]?[]?.id] | index($id) != null' "$SHELL_JSON" >/dev/null 2>&1; }
+bar_install() {
+    command -v jq >/dev/null || { warn "jq is needed to edit shell.json"; return 1; }
+    install -d "$BAR_DEST"
+    install -m644 "$BAR_SRC/manifest.json" "$BAR_SRC/BarWidget.qml" "$BAR_DEST/" || return 1
+    link_cli
+    if bar_in_layout; then
+        say "already in the bar"
+    else
+        [[ -f $SHELL_JSON ]] || { warn "no $SHELL_JSON — open the bar once, then re-run"; return 1; }
+        cp "$SHELL_JSON" "${SHELL_JSON}.bak-$(date +%s)"
+        jq --arg id "$BAR_ID" '.bar.layout.right = ((.bar.layout.right // []) + [{"id":$id}])' \
+            "$SHELL_JSON" > "${SHELL_JSON}.tmp" && mv "${SHELL_JSON}.tmp" "$SHELL_JSON" || return 1
+        say "added to the right of the bar"
+    fi
+    state_cache_write
+    restart_shell
+}
+bar_remove() {
+    if [[ -f $SHELL_JSON ]] && bar_in_layout; then
+        cp "$SHELL_JSON" "${SHELL_JSON}.bak-$(date +%s)"
+        jq --arg id "$BAR_ID" '.bar.layout |= with_entries(.value |= map(select(.id != $id)))' \
+            "$SHELL_JSON" > "${SHELL_JSON}.tmp" && mv "${SHELL_JSON}.tmp" "$SHELL_JSON"
+    fi
+    rm -rf "$BAR_DEST"
+    unlink_cli_if_unused
+    say "removed from the bar"
+    restart_shell
+}
+
 menu_install() {
     local blk; blk="$(mktemp)"; menu_block > "$blk"
     menu_splice "$blk"; rm -f "$blk"
-    install -d "${HOME}/.local/bin"
-    ln -sfn "$(readlink -f "${BASH_SOURCE[0]}")" "${HOME}/.local/bin/imac-patcher"
+    link_cli
     state_cache_write
     say "added to the Omarchy menu under \"iMac\" — it appears without a restart"
     command -v imac-patcher >/dev/null || warn "~/.local/bin is not on PATH; the menu rows will not evaluate"
 }
 menu_remove() {
-    menu_splice ""; rm -f "${HOME}/.local/bin/imac-patcher"
+    menu_splice ""; unlink_cli_if_unused
     say "removed from the Omarchy menu"
 }
 
@@ -917,6 +965,14 @@ run_module() {   # $1 = apply|remove, $2 = id
 
 case "${1:-}" in
     --status) show_status; exit 0 ;;
+
+    # One tab-separated row per module, for the bar widget: id, tier, state,
+    # title. Answered from the same cache the menu expressions use.
+    --list)
+        for m in "${MODULES[@]}"; do
+            printf '%s\t%s\t%s\t%s\n' "$m" "$("mod_${m}_tier")" "$(state_of "$m")" "$("mod_${m}_title")"
+        done
+        exit 0 ;;
 
     # Cheap queries, for the Omarchy menu's when:/checked: expressions.
     --state)         state_of "${2:-}"; exit 0 ;;
@@ -956,6 +1012,14 @@ case "${1:-}" in
         done
         state_cache_write; exit 0 ;;
 
+    --bar)
+        case "${2:-}" in
+            install) bar_install ;;
+            remove)  bar_remove ;;
+            *) echo "usage: $0 --bar install|remove" >&2; exit 2 ;;
+        esac
+        exit 0 ;;
+
     --menu)
         case "${2:-}" in
             install) menu_install ;;
@@ -973,7 +1037,7 @@ case "${1:-}" in
         done
         exit 0 ;;
     --force|"") ;;
-    *) echo "usage: $0 [--status | --apply <id...|safe> | --remove <id...|safe> | --toggle <id> | --update-apps | --menu install|remove]"; exit 2 ;;
+    *) echo "usage: $0 [--status | --apply <id...|safe> | --remove <id...|safe> | --toggle <id> | --update-apps | --bar install|remove | --menu install|remove]"; exit 2 ;;
 esac
 
 # ── interactive ────────────────────────────────────────────────────────────
