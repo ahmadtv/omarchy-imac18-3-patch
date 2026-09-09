@@ -17,3 +17,10 @@ nz=sum(1 for x in s if x); pk=max(abs(x) for x in s)/2**(8*n-1)
 print("capture               : %s  (%d nonzero samples, peak %.1f%%)" % ("SIGNAL" if nz>len(s)//2 else "DIGITAL SILENCE", nz, 100*pk))
 PY
 rm -f "$f"
+
+# The driver's own account of this boot: how it set capture up, and every jack
+# event since. Without this a "dead until I cycled the jack" report cannot be
+# pinned to the driver rather than to the session manager.
+echo "--- driver, this boot (last 12 lines) ---"
+journalctl -b 0 -k --no-pager 2>/dev/null | grep -i 'cs8409' | tail -12 | sed 's/.*hdaudioC0D0: /   /'
+echo "--- jack events so far: $(journalctl -b 0 -k --no-pager 2>/dev/null | grep -c 'jack_unsol_event') ---"
