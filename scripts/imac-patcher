@@ -785,7 +785,7 @@ show_status() {
     for m in "${MODULES[@]}"; do
         st="$("mod_${m}_detect")"; tier="$("mod_${m}_tier")"
         printf '  %-32s %-22b %s\n' "$("mod_${m}_title")" "$(state_label "$st")" \
-            "$(case $tier in boot) printf '\033[0;33m[boot]\033[0m';; tweak) printf '\033[0;36m[tweak]\033[0m';; esac)"
+            "$(case $tier in boot) printf '\033[0;33m[boot]\033[0m';; tweak) printf '\033[0;36m[tweak]\033[0m';; esac)$(has_update "$m" && printf ' \033[1;35m↑ update\033[0m')"
     done
     echo
     printf '  ids: %s\n' "${MODULES[*]}"
@@ -794,6 +794,22 @@ show_status() {
 # costs most of a second (dkms, pactl, hyprctl). Answer from a cache that one
 # sweep fills, so the first row pays and the rest are free.
 STATE_CACHE="${HOME}/.cache/imac-patcher/state"
+# Which tweaked plugins have an update waiting. Filled by --check-updates,
+# which talks to the network and so is never run from a status query: the bar
+# widget refreshes it on a long timer and everything else only reads it.
+UPDATES_CACHE="${HOME}/.cache/imac-patcher/updates"
+check_updates() {
+    local m id d out=""
+    for m in "${MODULES[@]}"; do
+        declare -F "mod_${m}_appid" >/dev/null || continue
+        id="$("mod_${m}_appid")"; d="$(app_dir "$id")"
+        [[ -d $d/.git ]] || continue
+        timeout 25 git -C "$d" fetch --quiet origin HEAD 2>/dev/null || continue
+        [[ "$(git -C "$d" rev-parse HEAD)" == "$(git -C "$d" rev-parse FETCH_HEAD)" ]] || out+="${m}"$'\n'
+    done
+    mkdir -p "$(dirname "$UPDATES_CACHE")" && printf '%s' "$out" > "$UPDATES_CACHE"
+}
+has_update() { [[ -f $UPDATES_CACHE ]] && grep -qx "$1" "$UPDATES_CACHE"; }
 state_cache_write() {
     local m out=""
     for m in "${MODULES[@]}"; do out+="${m} $("mod_${m}_detect")"$'\n'; done
@@ -997,12 +1013,14 @@ case "${1:-}" in
     --status) show_status; exit 0 ;;
 
     # One tab-separated row per module, for the bar widget: id, tier, state,
-    # short name, full title, icon. A bar popup is narrow, so the row shows the short
+    # short name, full title, icon, and whether that plugin has an update
+    # waiting. A bar popup is narrow, so the row shows the short
     # name and keeps the title for the tooltip. Same cache as the menu uses.
     --list)
         for m in "${MODULES[@]}"; do
-            printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$m" "$("mod_${m}_tier")" "$(state_of "$m")" \
-                "$(menu_label "$m")" "$("mod_${m}_title")" "$(menu_icon "$m")"
+            printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$m" "$("mod_${m}_tier")" "$(state_of "$m")" \
+                "$(menu_label "$m")" "$("mod_${m}_title")" "$(menu_icon "$m")" \
+                "$(has_update "$m" && echo update || echo -)"
         done
         exit 0 ;;
 
@@ -1010,6 +1028,12 @@ case "${1:-}" in
     --state)         state_of "${2:-}"; exit 0 ;;
     --is-applied)    [[ "$(state_of "${2:-}")" == applied ]]; exit $? ;;
     --is-applicable) [[ "$(state_of "${2:-}")" != n/a ]];     exit $? ;;
+
+    --check-updates)
+        check_updates
+        if [[ -s $UPDATES_CACHE ]]; then say "update waiting for: $(tr '\n' ' ' < "$UPDATES_CACHE")"
+        else say "every tweaked plugin is up to date"; fi
+        exit 0 ;;
 
     --toggle)
         id="${2:-}"
@@ -1042,7 +1066,7 @@ case "${1:-}" in
                 *) warn "${m}: the patch no longer fits this version — left off (upstream may already carry it)" ;;
             esac
         done
-        state_cache_write; exit 0 ;;
+        state_cache_write; check_updates; exit 0 ;;
 
     --bar)
         case "${2:-}" in
@@ -1069,7 +1093,7 @@ case "${1:-}" in
         done
         exit 0 ;;
     --force|"") ;;
-    *) echo "usage: $0 [--status | --apply <id...|safe> | --remove <id...|safe> | --toggle <id> | --update-apps | --bar install|remove | --menu install|remove]"; exit 2 ;;
+    *) echo "usage: $0 [--status | --apply <id...|safe> | --remove <id...|safe> | --toggle <id> | --update-apps | --check-updates | --bar install|remove | --menu install|remove]"; exit 2 ;;
 esac
 
 # ── interactive ────────────────────────────────────────────────────────────
