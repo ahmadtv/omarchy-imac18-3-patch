@@ -25,14 +25,20 @@ Boot parameter once installed: `amdgpu.tiled_stitch=1`
 ## Install without a second kernel
 
 ```bash
-sudo ../scripts/patch-imac5k-amdgpu.sh            # build + swap the amdgpu module
-sudo ../scripts/patch-imac5k-amdgpu.sh --restore  # undo everything
+sudo ../scripts/patch-imac5k-amdgpu.sh                  # build + swap the amdgpu module
+sudo ../scripts/patch-imac5k-amdgpu.sh --kernel latest  # build for a kernel you have not booted yet
+sudo ../scripts/patch-imac5k-amdgpu.sh --restore        # undo everything
 ```
 
-The script rebuilds **only the amdgpu module** for your *running* kernel and
-swaps it in, backing up the stock module first. It downloads the matching kernel
-source from kernel.org itself — you supply nothing. Re-run it after a kernel
-update (a new kernel reverts you to stock).
+The script rebuilds **only the amdgpu module** and swaps it in, backing up the
+stock module first. It downloads the matching kernel source from kernel.org
+itself — you supply nothing.
+
+A kernel update reverts you to stock, so re-run it after one. `--kernel` lets
+that happen *before* the reboot: the new kernel's headers and module tree are
+already on disk, so the patched module can be built and installed for it while
+you are still on the old kernel, and 5K works on its first boot. The old
+kernel keeps its own patched module, so it remains a working fallback.
 
 The build is reproducible: run in `--build-only` mode from a pristine tarball in
 an empty directory, it produces a module with the same srcversion as a normal
@@ -97,7 +103,8 @@ stays known-good.
   machine.
 
 - **The vermagic must match.** The script verifies the built kernelrelease equals
-  `uname -r` and refuses otherwise. If it refuses, that is it working as designed.
+  the kernel it is building for — the running one, or the `--kernel` target — and
+  refuses otherwise. If it refuses, that is it working as designed.
 
 - **This is a bridge, not the destination.** The endgame is upstreaming (tracked
   in drm/amd#4455). Once merged, stock kernels do all of this and these patches

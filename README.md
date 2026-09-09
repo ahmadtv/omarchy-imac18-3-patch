@@ -83,7 +83,18 @@ The patcher shows what's applied, what isn't, and lets you pick — **nothing is
 ./scripts/imac-patcher --remove 5k     # full undo, any time
 ```
 
-**The 5K module needs kernel 7.1.x or 7.2.x** and the patcher refuses anything else — a mis-applied GPU patch means a broken display, so a newer kernel must be re-ported by hand first. You supply nothing else: the installer fetches the matching kernel source itself (≈8 GB, ~20–40 min the first build; re-runs are fast). Re-run after any kernel update.
+**The 5K module needs kernel 7.1.x or 7.2.x** and the patcher refuses anything else — a mis-applied GPU patch means a broken display, so a newer kernel must be re-ported by hand first. You supply nothing else: the installer fetches the matching kernel source itself (≈8 GB, ~20–40 min the first build; re-runs are fast).
+
+### 🔄 After a kernel update — run it before you reboot
+
+A kernel update replaces the modules the patches live in, so the new kernel boots stock: no 5K, no sound. Run the patcher **while you are still on the old kernel** and it builds for the new one, which is already on disk:
+
+```bash
+./scripts/imac-patcher            # the banner names the pending kernel and what's missing
+./scripts/imac-patcher --apply 5k audio
+```
+
+Both patches target the newest installed kernel, so the machine boots straight into 5K with audio working. Your old kernel keeps its own patched modules, so it stays a working fallback. If you have already rebooted into a stock kernel, the same command still fixes it — you just spend one boot at 4K without sound.
 
 Audio uses the same model — it clones the upstream [jackdanyell](https://github.com/jackdanyell/imac18-3-cs8409-linux-audio) driver at the verified commit and applies [`patches/cs8409-headset-capture.patch`](patches/cs8409-headset-capture.patch) on top, then DKMS-builds it so it survives kernel updates.
 

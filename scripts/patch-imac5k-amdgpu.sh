@@ -46,25 +46,60 @@ verbose)
 *) echo "IMAC5K_STACK must be 'lean' or 'verbose'" >&2; exit 1 ;;
 esac
 WORK="${IMAC5K_WORK:-/home/${SUDO_USER:-$USER}/.cache/kernel-5k-build}"
-KREL="$(uname -r)"                        # e.g. 7.2.2-arch1-1
-KVER="${KREL%%-*}"                        # e.g. 7.2.2
-KSERIES="${KVER%.*}"                      # e.g. 7.2
-MODDIR="/usr/lib/modules/${KREL}/kernel/drivers/gpu/drm/amd/amdgpu"
-BUILDLINK="/usr/lib/modules/${KREL}/build"
+RUNNING_KREL="$(uname -r)"                # e.g. 7.2.2-arch1-1
 
 say()  { printf '\033[1;33m==>\033[0m %s\n' "$*"; }
 die()  { printf '\033[1;31mERROR:\033[0m %s\n' "$*" >&2; exit 1; }
 
-# --build-only: run the whole build as a normal user and stop before
-# installing anything (prints the built module). Used to verify that the
-# installer reproduces a known-good module, e.g. after a patch update.
+usage() {
+	cat <<EOF
+usage: sudo $0 [--kernel <release>|latest] [--build-only] [--restore]
+
+  --kernel <release>  build for an installed kernel other than the running one,
+                      e.g. --kernel 7.2.3-arch1-3.  "latest" picks the newest
+                      installed kernel.  Use this right after a distro kernel
+                      upgrade, BEFORE rebooting: the new kernel's modules are
+                      already on disk while you are still running the old one,
+                      so pre-building means 5K works on its first boot instead
+                      of coming up broken.
+  --build-only        build as a normal user and stop before installing.
+  --restore           put the stock amdgpu module back.
+EOF
+}
+
+# ── arguments ──────────────────────────────────────────────────────────────
+ARGS_GIVEN="$*"
 BUILD_ONLY=0
-[[ "${1:-}" == "--build-only" ]] && BUILD_ONLY=1
-[[ $EUID -eq 0 || $BUILD_ONLY -eq 1 ]] || die "run with sudo: sudo $0 ${*:-}"
+RESTORE=0
+TARGET_KREL="${IMAC5K_KREL:-}"
+while [[ $# -gt 0 ]]; do
+	case "$1" in
+	--build-only) BUILD_ONLY=1 ;;
+	--restore)    RESTORE=1 ;;
+	--kernel)     TARGET_KREL="${2:-}"; shift
+	              [[ -n "$TARGET_KREL" ]] || die "--kernel needs a kernel release, e.g. --kernel ${RUNNING_KREL}" ;;
+	--kernel=*)   TARGET_KREL="${1#*=}" ;;
+	-h|--help)    usage; exit 0 ;;
+	*)            usage >&2; die "unknown argument: $1" ;;
+	esac
+	shift
+done
+[[ $EUID -eq 0 || $BUILD_ONLY -eq 1 ]] || die "run with sudo: sudo $0 ${ARGS_GIVEN}"
+
+# ── which kernel are we building for ───────────────────────────────────────
+installed_kernels() { local d; for d in /usr/lib/modules/*/kernel; do d="${d%/kernel}"; basename "$d"; done | sort -V; }
+[[ "$TARGET_KREL" == latest ]] && TARGET_KREL="$(installed_kernels | tail -1)"
+KREL="${TARGET_KREL:-$RUNNING_KREL}"
+KVER="${KREL%%-*}"                        # e.g. 7.2.2
+KSERIES="${KVER%.*}"                      # e.g. 7.2
+MODDIR="/usr/lib/modules/${KREL}/kernel/drivers/gpu/drm/amd/amdgpu"
+BUILDLINK="/usr/lib/modules/${KREL}/build"
+[[ -d "/usr/lib/modules/${KREL}/kernel" ]] \
+	|| die "kernel ${KREL} is not installed. Installed: $(installed_kernels | tr '\n' ' ')"
 
 # ── restore mode ───────────────────────────────────────────────────────────
 find_amdgpu() { find "$(dirname "$MODDIR")" -maxdepth 2 -name 'amdgpu.ko*' ! -name '*.stock-backup' 2>/dev/null | head -1; }
-if [[ "${1:-}" == "--restore" ]]; then
+if [[ $RESTORE -eq 1 ]]; then
 	AMDKO="$(find_amdgpu)" || true
 	BAK="${AMDKO}.stock-backup"
 	[[ -f "$BAK" ]] || die "no backup found at ${BAK} — nothing to restore"
@@ -79,10 +114,15 @@ fi
 
 # ── sanity / version gate ──────────────────────────────────────────────────
 [[ -f "$PATCH_FILE" ]] || die "patch not found: $PATCH_FILE"
-say "running kernel: ${KREL}  (source version ${KVER}, series ${KSERIES})"
+if [[ "$KREL" == "$RUNNING_KREL" ]]; then
+	say "target kernel: ${KREL} (running)  — source ${KVER}, series ${KSERIES}"
+else
+	say "target kernel: ${KREL} (NOT running; you are on ${RUNNING_KREL})  — source ${KVER}, series ${KSERIES}"
+	say "pre-building: the module is installed for ${KREL} and takes effect when you boot it"
+fi
 if [[ " ${PATCH_KVER_SUPPORTED} " != *" ${KSERIES} "* ]]; then
 	cat >&2 <<EOF
-$(printf '\033[1;31mABORT:\033[0m') this patch is verified for kernel series ${PATCH_KVER_SUPPORTED} but you are on ${KVER}.
+$(printf '\033[1;31mABORT:\033[0m') this patch is verified for kernel series ${PATCH_KVER_SUPPORTED} but the target kernel is ${KVER}.
 It will not apply to a different amdgpu source and would produce a broken module.
 This needs the patch re-ported to ${KSERIES}.x first (a human step, not a re-run).
 Nothing was changed.
@@ -127,8 +167,8 @@ if [[ ! -d "$SRC" ]]; then
 fi
 cd "$SRC"
 
-# ── configure to match the running kernel exactly (vermagic + symbols) ─────
-say "configuring to match the running kernel"
+# ── configure to match the target kernel exactly (vermagic + symbols) ──────
+say "configuring to match kernel ${KREL}"
 cp "$BUILDLINK/.config" .config
 cp "$BUILDLINK/Module.symvers" Module.symvers 2>/dev/null || true
 # Arch's kernel release is e.g. 7.2.2-arch1-1 while kernel.org source builds
@@ -140,8 +180,8 @@ scripts/config --disable LOCALVERSION_AUTO 2>/dev/null || true
 scripts/config --set-str LOCALVERSION "" 2>/dev/null || true
 make olddefconfig >/dev/null
 BUILTREL="$(make -s kernelrelease)"
-[[ "$BUILTREL" == "$KREL" ]] || die "computed kernelrelease '$BUILTREL' != running '$KREL' — refusing to build a module that won't load"
-say "kernelrelease matches running kernel: $BUILTREL"
+[[ "$BUILTREL" == "$KREL" ]] || die "computed kernelrelease '$BUILTREL' != target '$KREL' — refusing to build a module that won't load"
+say "kernelrelease matches target kernel: $BUILTREL"
 
 # ── apply the 5K patch stack (idempotent: skip if already applied) ─────────
 # Idempotency is tracked with a stamp per patch rather than a reverse-apply
@@ -184,9 +224,9 @@ make -j"$(nproc)" M=drivers/gpu/drm/amd/amdgpu modules \
 BUILT="$(find drivers/gpu/drm/amd/amdgpu -name amdgpu.ko | head -1)"
 [[ -f "$BUILT" ]] || die "built amdgpu.ko not found"
 
-# quick sanity: vermagic must match the running kernel or it won't load
+# quick sanity: vermagic must match the target kernel or it won't load
 VM="$(modinfo -F vermagic "$BUILT" 2>/dev/null | awk '{print $1}')"
-[[ "$VM" == "$KREL" ]] || say "WARNING: built vermagic '$VM' != running '$KREL' — module may need --force; test on the clone first."
+[[ "$VM" == "$KREL" ]] || die "built vermagic '$VM' != target '$KREL' — this module would not load. Nothing installed."
 
 if [[ $BUILD_ONLY -eq 1 ]]; then
 	say "build-only: nothing installed. Module: $PWD/$BUILT"
@@ -254,13 +294,17 @@ if [[ -f "$UKI" && -f "$FALLBACK" ]]; then
 fi
 sync
 
+RESTORE_HINT=""
+[[ "$KREL" == "$RUNNING_KREL" ]] || RESTORE_HINT=" --kernel ${KREL}"
+
 cat <<EOF
 
 $(printf '\033[1;32mDONE.\033[0m') Patched amdgpu built for ${KREL} and installed.
 Stock module backed up at: ${BAK}
 Reboot to load it. Your compositor (Hyprland) must run for the single 5K output.
 
-If anything looks wrong after reboot:  sudo $0 --restore
-Re-run this script after any kernel update to rebuild for the new kernel
-(it will refuse cleanly if the patch no longer applies to that version).
+If anything looks wrong after reboot:  sudo $0 --restore${RESTORE_HINT}
+After a kernel update, run it once with --kernel latest BEFORE rebooting, so the
+new kernel boots straight into 5K (it refuses cleanly if the patch no longer
+applies to that version).
 EOF
