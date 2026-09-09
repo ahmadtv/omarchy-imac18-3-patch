@@ -53,6 +53,14 @@ BarWidget {
   // Toggling asks for a terminal on purpose: applying a patch can want sudo,
   // can rebuild a kernel module, and always has something to say. The patcher
   // is the only thing that decides what a toggle means.
+  // Update just this plugin: take its tweak off, update it, put the tweak
+  // back if it still fits. Everything else is left alone.
+  function updateOne(id) {
+    popupOpen = false
+    if (root.bar) root.bar.run("omarchy-launch-floating-terminal-with-presentation imac-patcher --update-apps " + id)
+    refreshLater.restart()
+  }
+
   function toggle(id) {
     popupOpen = false
     if (root.bar) root.bar.run("omarchy-launch-floating-terminal-with-presentation imac-patcher --toggle " + id)
@@ -197,7 +205,10 @@ BarWidget {
               textFormat: Text.PlainText
               text: rowItem.modelData.label
               elide: Text.ElideRight
-              width: parent.width - Style.space(48) - (tierTag.visible ? tierTag.width + Style.space(8) : 0)
+              // leave room for whatever sits to the right of the label
+              width: parent.width - Style.space(48)
+                     - (updBtn.visible ? updBtn.width + Style.space(8) : 0)
+                     - (tierTag.visible ? tierTag.width + Style.space(8) : 0)
               color: root.bar ? root.bar.foreground : Color.foreground
               opacity: rowItem.on ? 1.0 : 0.6
               font.family: root.bar ? root.bar.fontFamily : Style.font.family
@@ -205,17 +216,36 @@ BarWidget {
               anchors.verticalCenter: parent.verticalCenter
             }
 
-            Text {
-              // A plugin we patch has moved on. Updating is its own action --
-              // the row still just toggles the patch.
-              textFormat: Text.PlainText
+            // A plugin we patch has moved on. This glyph is its own button --
+            // clicking it updates only this plugin, while clicking anywhere
+            // else on the row still just toggles the patch. It sits inside the
+            // Row, above the row-wide MouseArea, so it takes the click first.
+            Item {
+              id: updBtn
               visible: rowItem.modelData.update
-              text: "󰚰"
-              color: root.bar ? root.bar.foreground : Color.foreground
-              opacity: 0.85
-              font.family: root.bar ? root.bar.fontFamily : Style.font.family
-              font.pixelSize: Style.font.caption
+              width: visible ? Style.space(20) : 0
+              height: parent.height
               anchors.verticalCenter: parent.verticalCenter
+
+              Text {
+                anchors.centerIn: parent
+                textFormat: Text.PlainText
+                text: "󰚰"
+                color: root.bar ? root.bar.urgent : Color.urgent
+                opacity: updOne.containsMouse ? 1.0 : 0.9
+                font.family: root.bar ? root.bar.fontFamily : Style.font.family
+                font.pixelSize: Style.font.caption
+              }
+
+              MouseArea {
+                id: updOne
+                anchors.fill: parent
+                hoverEnabled: true
+                cursorShape: Qt.PointingHandCursor
+                onClicked: root.updateOne(rowItem.modelData.id)
+                onEntered: if (root.bar) root.bar.showTooltip(rowItem, "Update this plugin, then re-apply the tweak if it still fits")
+                onExited: if (root.bar) root.bar.hideTooltip(rowItem)
+              }
             }
 
             Text {
@@ -261,7 +291,7 @@ BarWidget {
           anchors.leftMargin: Style.space(30)
           anchors.verticalCenter: parent.verticalCenter
           textFormat: Text.PlainText
-          text: "󰚰  Update " + root.updateCount + " plugin" + (root.updateCount === 1 ? "" : "s")
+          text: "󰚰  Update all " + root.updateCount + " plugin" + (root.updateCount === 1 ? "" : "s")
           color: root.bar ? root.bar.foreground : Color.foreground
           font.family: root.bar ? root.bar.fontFamily : Style.font.family
           font.pixelSize: Style.font.body

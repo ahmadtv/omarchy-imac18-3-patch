@@ -1052,13 +1052,21 @@ case "${1:-}" in
         # and put back only the ones that still apply — a patch that no longer
         # applies is one upstream has most likely fixed, and it stays off.
         shift
-        declare -a restore=()
+        # With no arguments this covers every tweak; name one or more module
+        # ids to update just those plugins and leave the rest alone.
+        declare -a want=("$@") restore=() plugins=()
+        for m in "${want[@]}"; do
+            [[ " ${MODULES[*]} " == *" $m "* ]] || { warn "unknown module: $m"; exit 2; }
+            declare -F "mod_${m}_appid" >/dev/null || { warn "${m} does not patch a plugin"; exit 2; }
+            plugins+=("$("mod_${m}_appid")")
+        done
         for m in "${MODULES[@]}"; do
             declare -F "mod_${m}_appid" >/dev/null || continue
+            (( ${#want[@]} )) && [[ " ${want[*]} " != *" $m "* ]] && continue
             [[ "$("mod_${m}_detect")" == applied ]] || continue
             restore+=("$m"); say "unpatching ${m} so it can update"; "mod_${m}_remove"
         done
-        omarchy-plugin-update "$@" || warn "plugin update reported a problem"
+        omarchy-plugin-update "${plugins[@]}" || warn "plugin update reported a problem"
         for m in "${restore[@]}"; do
             case "$("mod_${m}_detect")" in
                 not-applied) run_module apply "$m" ;;
@@ -1093,7 +1101,7 @@ case "${1:-}" in
         done
         exit 0 ;;
     --force|"") ;;
-    *) echo "usage: $0 [--status | --apply <id...|safe> | --remove <id...|safe> | --toggle <id> | --update-apps | --check-updates | --bar install|remove | --menu install|remove]"; exit 2 ;;
+    *) echo "usage: $0 [--status | --apply <id...|safe> | --remove <id...|safe> | --toggle <id> | --update-apps [id...] | --check-updates | --bar install|remove | --menu install|remove]"; exit 2 ;;
 esac
 
 # ── interactive ────────────────────────────────────────────────────────────
