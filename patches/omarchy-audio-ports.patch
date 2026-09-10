@@ -71,10 +71,23 @@ index 94b7cda3..dd262570 100644
      nodeProps: nodeProps,
      nodeLabel: nodeLabel,
 diff --git shell/plugins/panels/audio/Panel.qml shell/plugins/panels/audio/Panel.qml
-index 26d0c58d..e24941b9 100644
+index 26d0c58d..f8dad169 100644
 --- shell/plugins/panels/audio/Panel.qml
 +++ shell/plugins/panels/audio/Panel.qml
-@@ -58,6 +58,16 @@ Panel {
+@@ -50,6 +50,12 @@ Panel {
+       // A tuning's output is a playback stream too, but it is the processing
+       // itself rather than an application, so it does not belong in the list.
+       if (String(n.name || "").indexOf("omarchy_speaker_tuning") === 0) continue
++      // Nor do the shell's own UI sounds. Quickshell keeps one stream per audio
++      // format for the whole session once any plugin has played a sound, so a
++      // notification chirp or a plugin's effect leaves rows called "quickshell"
++      // sitting in the app list with nothing to adjust. Other desktops hide
++      // event sounds for the same reason.
++      if (String(n.name || "") === "quickshell") continue
+       list.push(n)
+     }
+     return list
+@@ -58,6 +64,16 @@ Panel {
    property var sinkAvailability: ({})
    property bool sinkAvailabilityLoaded: false
  
@@ -91,7 +104,7 @@ index 26d0c58d..e24941b9 100644
    // Identify true playback streams without reading node.properties here:
    // PwNode.properties is invalid until the node is bound, and reading it while
    // capture streams are appearing (for example, when Voxtype starts recording)
-@@ -81,13 +91,13 @@ Panel {
+@@ -81,13 +97,13 @@ Panel {
      for (var i = 0; i < candidateSinks.length; i++)
        if (sinkAvailable(candidateSinks[i])) list.push(candidateSinks[i])
      if (sink && list.indexOf(sink) < 0) list.unshift(sink)
@@ -107,7 +120,7 @@ index 26d0c58d..e24941b9 100644
    }
  
    readonly property var audioSinks: rawAudioSinks.length > 0 ? rawAudioSinks : cachedAudioSinks
-@@ -148,6 +158,13 @@ Panel {
+@@ -148,6 +164,13 @@ Panel {
    readonly property real inputVolume: source && source.audio ? source.audio.volume : 0
    readonly property bool inputMuted: source && source.audio ? source.audio.muted : false
  
@@ -121,7 +134,7 @@ index 26d0c58d..e24941b9 100644
    onRawAudioSinksChanged: if (rawAudioSinks.length > 0) cachedAudioSinks = rawAudioSinks
    onRawAudioSourcesChanged: if (rawAudioSources.length > 0) cachedAudioSources = rawAudioSources
  
-@@ -291,14 +308,14 @@ Panel {
+@@ -291,14 +314,14 @@ Panel {
      if (focusSection === "header") { toggleAllMuted(); return }
      if (focusSection === "output") {
        if (selectedIndex === -1) { toggleOutputMute(); return }
@@ -140,7 +153,7 @@ index 26d0c58d..e24941b9 100644
        return
      }
      if (focusSection === "streams" && selectedIndex >= 0) {
-@@ -495,6 +512,101 @@ Panel {
+@@ -495,6 +518,101 @@ Panel {
      sinkAvailabilityLoaded = true
    }
  
@@ -242,7 +255,7 @@ index 26d0c58d..e24941b9 100644
    function friendlyDeviceLabel(text) {
      return Model.friendlyDeviceLabel(text)
    }
-@@ -508,7 +620,7 @@ Panel {
+@@ -508,7 +626,7 @@ Panel {
    }
  
    function isHeadphones(node) {
@@ -251,7 +264,7 @@ index 26d0c58d..e24941b9 100644
    }
  
    function sinkGlyph(node) {
-@@ -519,6 +631,10 @@ Panel {
+@@ -519,6 +637,10 @@ Panel {
      return Model.sourceGlyph(node)
    }
  
@@ -262,7 +275,7 @@ index 26d0c58d..e24941b9 100644
    function friendlyStreamLabel(label) {
      return Model.friendlyStreamLabel(label)
    }
-@@ -601,12 +717,24 @@ Panel {
+@@ -601,12 +723,24 @@ Panel {
      }
    }
  
@@ -288,7 +301,7 @@ index 26d0c58d..e24941b9 100644
    }
  
    // Runs whether or not the panel is open: the bar shows and scrolls the output
-@@ -617,7 +745,17 @@ Panel {
+@@ -617,7 +751,17 @@ Panel {
      running: true
      repeat: true
      triggeredOnStart: true
@@ -307,7 +320,7 @@ index 26d0c58d..e24941b9 100644
    }
  
    Timer {
-@@ -857,7 +995,7 @@ Panel {
+@@ -857,7 +1001,7 @@ Panel {
                  required property var modelData
                  required property int index
                  width: panelColumn.width
@@ -316,7 +329,7 @@ index 26d0c58d..e24941b9 100644
                  rowIndex: index
                }
              }
-@@ -965,7 +1103,7 @@ Panel {
+@@ -965,7 +1109,7 @@ Panel {
                  required property var modelData
                  required property int index
                  width: panelColumn.width
@@ -325,7 +338,7 @@ index 26d0c58d..e24941b9 100644
                  rowIndex: index
                }
              }
-@@ -1012,10 +1150,11 @@ Panel {
+@@ -1012,10 +1156,11 @@ Panel {
    // from hasCursor/current via CursorSurface, never from containsMouse.
    component SinkRow: CursorSurface {
      id: sinkRow
@@ -340,7 +353,7 @@ index 26d0c58d..e24941b9 100644
      hasCursor: root.cursorActive && root.focusSection === "output" && root.selectedIndex === rowIndex
      onHasCursorChanged: if (hasCursor) root.ensureCursorVisible(sinkRow)
      current: isActive
-@@ -1035,7 +1174,7 @@ Panel {
+@@ -1035,7 +1180,7 @@ Panel {
  
        Text {
          textFormat: Text.PlainText
@@ -349,7 +362,7 @@ index 26d0c58d..e24941b9 100644
          color: root.bar.foreground
          font.family: root.bar.fontFamily
          font.pixelSize: Style.font.title
-@@ -1046,7 +1185,7 @@ Panel {
+@@ -1046,7 +1191,7 @@ Panel {
  
        Text {
          textFormat: Text.PlainText
@@ -358,7 +371,7 @@ index 26d0c58d..e24941b9 100644
          color: root.bar.foreground
          font.family: root.bar.fontFamily
          font.pixelSize: Style.font.body
-@@ -1066,17 +1205,18 @@ Panel {
+@@ -1066,17 +1211,18 @@ Panel {
          root.focusSection = "output"
          root.selectedIndex = sinkRow.rowIndex
        }
@@ -381,7 +394,7 @@ index 26d0c58d..e24941b9 100644
      hasCursor: root.cursorActive && root.focusSection === "input" && root.selectedIndex === rowIndex
      onHasCursorChanged: if (hasCursor) root.ensureCursorVisible(sourceRow)
      current: isActive
-@@ -1096,7 +1236,7 @@ Panel {
+@@ -1096,7 +1242,7 @@ Panel {
  
        Text {
          textFormat: Text.PlainText
@@ -390,7 +403,7 @@ index 26d0c58d..e24941b9 100644
          color: root.bar.foreground
          font.family: root.bar.fontFamily
          font.pixelSize: Style.font.title
-@@ -1107,7 +1247,7 @@ Panel {
+@@ -1107,7 +1253,7 @@ Panel {
  
        Text {
          textFormat: Text.PlainText
@@ -399,7 +412,7 @@ index 26d0c58d..e24941b9 100644
          color: root.bar.foreground
          font.family: root.bar.fontFamily
          font.pixelSize: Style.font.body
-@@ -1127,7 +1267,7 @@ Panel {
+@@ -1127,7 +1273,7 @@ Panel {
          root.focusSection = "input"
          root.selectedIndex = sourceRow.rowIndex
        }
