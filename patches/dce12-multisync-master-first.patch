@@ -1,0 +1,43 @@
+--- a/drivers/gpu/drm/amd/display/dc/core/dc.c
++++ b/drivers/gpu/drm/amd/display/dc/core/dc.c
+@@ -1615,6 +1615,30 @@
+ 	int i, multisync_count = 0;
+ 	int pipe_count = dc->res_pool->pipe_count;
+ 	struct pipe_ctx *multisync_pipes[MAX_PIPES] = { NULL };
++	/*
++	 * DCE 12 (Vega): put the master pipe first. Its hwseq,
++	 * dce110_enable_per_frame_crtc_position_reset(), takes the GSL master
++	 * from grouped_pipes[0] and arms grouped_pipes[1..]; handed only the
++	 * slaves, GSL group 0 gets no master and the armed slaves wait on a
++	 * trigger nothing generates ("GSL: Timeout on reset trigger!"). Other
++	 * generations keep the slaves-only list: DCN arms every entry from 0.
++	 */
++	bool master_first = dc->ctx->dce_version == DCE_VERSION_12_0;
++
++	if (master_first) {
++		for (i = 0; i < pipe_count; i++) {
++			if (!ctx->res_ctx.pipe_ctx[i].stream ||
++					!ctx->res_ctx.pipe_ctx[i].stream->triggered_crtc_reset.enabled)
++				continue;
++			if (ctx->res_ctx.pipe_ctx[i].stream != ctx->res_ctx.pipe_ctx[i].stream->triggered_crtc_reset.event_source)
++				continue;
++			multisync_pipes[0] = &ctx->res_ctx.pipe_ctx[i];
++			multisync_count = 1;
++			break;
++		}
++		if (multisync_count == 0)
++			return;
++	}
+ 
+ 	for (i = 0; i < pipe_count; i++) {
+ 		if (!ctx->res_ctx.pipe_ctx[i].stream ||
+@@ -1626,7 +1650,8 @@
+ 		multisync_count++;
+ 	}
+ 
+-	if (multisync_count > 0) {
++	/* With the master in slot 0, at least one slave must have joined it. */
++	if (multisync_count > (master_first ? 1 : 0)) {
+ 		dc->hwss.enable_per_frame_crtc_position_reset(
+ 			dc, multisync_count, multisync_pipes);
+ 	}

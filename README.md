@@ -24,6 +24,8 @@ bash <(curl -fsSL https://raw.githubusercontent.com/ahmadtv/omarchy-imac5k/main/
 ```
 
 > For the **2017 27-inch iMac (iMac18,3)**. Built and tested on Omarchy (Arch + Hyprland); the audio, colour and EQ pieces are largely distro-agnostic.
+>
+> The **native 5K** part also works on the **iMac Pro (iMacPro1,1, Vega 64X)** — see [`patches/README.md`](patches/README.md#imac-pro-imacpro11-vega-64x-dce-12). Nothing else here has been tried on it.
 
 ---
 

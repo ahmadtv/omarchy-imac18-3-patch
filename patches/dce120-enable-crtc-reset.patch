@@ -1,0 +1,90 @@
+--- a/drivers/gpu/drm/amd/display/dc/dce120/dce120_timing_generator.c
++++ b/drivers/gpu/drm/amd/display/dc/dce120/dce120_timing_generator.c
+@@ -1220,6 +1220,79 @@
+ 	return true;
+ }
+ 
++/*
++ * Arm the trigger that resets this CRTC's position from the GSL master, so a
++ * pair of timing generators scans out in lockstep.
++ *
++ * DCE 12 shipped the GSL plumbing (setup_global_swap_lock, enable_reset_trigger,
++ * did_triggered_reset_occur) but never wired .enable_crtc_reset, which is what
++ * dce110_enable_per_frame_crtc_position_reset() calls to select the trigger
++ * source and edge. Without it the per-frame reset cannot be armed on Vega.
++ *
++ * Unlike dce110_timing_generator_enable_crtc_reset(), which puts the raw
++ * source_tg_inst into CRTC_TRIGB_SOURCE_SELECT, this selects GSL group 0 --
++ * the same source dce120_timing_generator_enable_reset_trigger() uses. A raw
++ * instance number of 0 encodes TRIGGER_SOURCE_SELECT_LOGIC_ZERO, which never
++ * produces an edge and leaves the reset waiting until it times out.
++ */
++static void dce120_timing_generator_enable_crtc_reset(
++	struct timing_generator *tg,
++	int source_tg_inst,
++	struct crtc_trigger_info *crtc_tp)
++{
++	struct dce110_timing_generator *tg110 = DCE110TG_FROM_TG(tg);
++	uint32_t rising_edge = 0;
++	uint32_t falling_edge = 0;
++
++	(void)source_tg_inst;
++
++	/* Setup trigger edge */
++	switch (crtc_tp->event) {
++	case CRTC_EVENT_VSYNC_RISING:
++		rising_edge = 1;
++		break;
++	case CRTC_EVENT_VSYNC_FALLING:
++		falling_edge = 1;
++		break;
++	}
++
++	CRTC_REG_UPDATE_N(CRTC0_CRTC_TRIGB_CNTL, 5,
++		FD(CRTC0_CRTC_TRIGB_CNTL__CRTC_TRIGB_SOURCE_SELECT), TRIGGER_SOURCE_SELECT_GSL_GROUP0,
++		FD(CRTC0_CRTC_TRIGB_CNTL__CRTC_TRIGB_POLARITY_SELECT), TRIGGER_POLARITY_SELECT_LOGIC_ZERO,
++		FD(CRTC0_CRTC_TRIGB_CNTL__CRTC_TRIGB_RISING_EDGE_DETECT_CNTL), rising_edge,
++		FD(CRTC0_CRTC_TRIGB_CNTL__CRTC_TRIGB_FALLING_EDGE_DETECT_CNTL), falling_edge,
++		/* clear trigger status */
++		FD(CRTC0_CRTC_TRIGB_CNTL__CRTC_TRIGB_CLEAR), 1);
++
++	switch (crtc_tp->delay) {
++	case TRIGGER_DELAY_NEXT_LINE:
++		CRTC_REG_UPDATE_3(
++			CRTC0_CRTC_FORCE_COUNT_NOW_CNTL,
++			CRTC_FORCE_COUNT_NOW_MODE, 0,
++			CRTC_FORCE_COUNT_NOW_TRIG_SEL, 0,
++			CRTC_FORCE_COUNT_NOW_CLEAR, 1);
++		CRTC_REG_UPDATE_2(
++			CRTC0_CRTC_VERT_SYNC_CONTROL,
++			CRTC_FORCE_VSYNC_NEXT_LINE_CLEAR, 1,
++			CRTC_AUTO_FORCE_VSYNC_MODE, 2);
++		break;
++	case TRIGGER_DELAY_NEXT_PIXEL:
++		CRTC_REG_UPDATE_2(
++			CRTC0_CRTC_VERT_SYNC_CONTROL,
++			CRTC_FORCE_VSYNC_NEXT_LINE_CLEAR, 1,
++			CRTC_AUTO_FORCE_VSYNC_MODE, 0);
++		CRTC_REG_UPDATE_3(
++			CRTC0_CRTC_FORCE_COUNT_NOW_CNTL,
++			CRTC_FORCE_COUNT_NOW_MODE, 2,
++			CRTC_FORCE_COUNT_NOW_TRIG_SEL, 1,
++			CRTC_FORCE_COUNT_NOW_CLEAR, 1);
++		break;
++	}
++
++	CRTC_REG_UPDATE(CRTC0_CRTC_MASTER_UPDATE_MODE,
++			MASTER_UPDATE_MODE, 2);
++}
++
+ static const struct timing_generator_funcs dce120_tg_funcs = {
+ 		.validate_timing = dce120_tg_validate_timing,
+ 		.program_timing = dce120_tg_program_timing,
+@@ -1244,6 +1317,7 @@
+ 		.did_triggered_reset_occur = dce120_timing_generator_did_triggered_reset_occur,
+ 		.setup_global_swap_lock = dce120_timing_generator_setup_global_swap_lock,
+ 		.enable_reset_trigger = dce120_timing_generator_enable_reset_trigger,
++		.enable_crtc_reset = dce120_timing_generator_enable_crtc_reset,
+ 		.disable_reset_trigger = dce120_timing_generator_disable_reset_trigger,
+ 		.tear_down_global_swap_lock = dce120_timing_generator_tear_down_global_swap_lock,
+ 		.enable_advanced_request = dce120_timing_generator_enable_advanced_request,

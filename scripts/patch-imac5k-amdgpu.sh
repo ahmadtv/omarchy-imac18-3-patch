@@ -36,7 +36,13 @@ IMAC5K_STACK="${IMAC5K_STACK:-lean}"
 case "$IMAC5K_STACK" in
 lean)
 	PATCH_FILE="${SCRIPT_DIR}/../patches/imac5k-lean-core-7.2.x.patch"
-	EXTRA_PATCHES=("${SCRIPT_DIR}/../patches/imac5k-stitch-layer-7.x.patch")
+	# iMac Pro (iMacPro1,1, Vega / DCE 12) on top: each is keyed on that panel
+	# or that display generation, so the iMac18,3 build is unchanged by them.
+	EXTRA_PATCHES=("${SCRIPT_DIR}/../patches/imac5k-stitch-layer-7.x.patch"
+		"${SCRIPT_DIR}/../patches/imacpro-slave-dp-panel-mode.patch"
+		"${SCRIPT_DIR}/../patches/dce120-enable-crtc-reset.patch"
+		"${SCRIPT_DIR}/../patches/dce12-multisync-master-first.patch"
+		"${SCRIPT_DIR}/../patches/dce110-genlock-master-from-pipe0.patch")
 	;;
 verbose)
 	PATCH_FILE="${SCRIPT_DIR}/../patches/imac5k-amdgpu-7.2.2.patch"

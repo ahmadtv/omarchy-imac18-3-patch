@@ -1,0 +1,38 @@
+--- a/drivers/gpu/drm/amd/display/dc/hwss/dce110/dce110_hwseq.c
++++ b/drivers/gpu/drm/amd/display/dc/hwss/dce110/dce110_hwseq.c
+@@ -2880,7 +2880,17 @@
+ 	DC_LOGGER_INIT(dc->ctx);
+ 
+ 	gsl_params.gsl_group = 0;
++	/*
++	 * When enable_timing_multisync() put the master pipe first (DCE 12),
++	 * make it the GSL master: setup_global_swap_lock() sets
++	 * DCP_GSL_MASTER_EN only on the pipe whose tg->inst matches, as
++	 * dce110_enable_timing_synchronization() above already relies on. A
++	 * slaves-only list keeps the historical 0.
++	 */
+ 	gsl_params.gsl_master = 0;
++	if (grouped_pipes[0]->stream ==
++	    grouped_pipes[0]->stream->triggered_crtc_reset.event_source)
++		gsl_params.gsl_master = grouped_pipes[0]->stream_res.tg->inst;
+ 
+ 	for (i = 0; i < group_size; i++)
+ 		grouped_pipes[i]->stream_res.tg->funcs->setup_global_swap_lock(
+@@ -2888,11 +2898,13 @@
+ 
+ 	DC_SYNC_INFO("GSL: enabling trigger-reset\n");
+ 
++	/* Index 0 is the master when there is one; it drives the trigger. */
+ 	for (i = 1; i < group_size; i++)
+-		grouped_pipes[i]->stream_res.tg->funcs->enable_crtc_reset(
+-				grouped_pipes[i]->stream_res.tg,
+-				gsl_params.gsl_master,
+-				&grouped_pipes[i]->stream->triggered_crtc_reset);
++		if (grouped_pipes[i]->stream_res.tg->funcs->enable_crtc_reset)
++			grouped_pipes[i]->stream_res.tg->funcs->enable_crtc_reset(
++					grouped_pipes[i]->stream_res.tg,
++					gsl_params.gsl_master,
++					&grouped_pipes[i]->stream->triggered_crtc_reset);
+ 
+ 	DC_SYNC_INFO("GSL: waiting for reset to occur.\n");
+ 	for (i = 1; i < group_size; i++)

@@ -1,0 +1,59 @@
+--- a/drivers/gpu/drm/amd/display/dc/dc.h
++++ b/drivers/gpu/drm/amd/display/dc/dc.h
+@@ -2778,6 +2778,36 @@
+ 	       dc_link_is_apple_tiled_slave(link);
+ }
+ 
++/*
++ * Apple 5K panels whose second tile must be driven in plain DP panel mode.
++ *
++ * The iMac Pro (iMacPro1,1) panel -- APP 0xAE1D as root-compat ID, 0xAE1E once
++ * in dual-tile mode -- does not accept the alternate scrambler reset that eDP
++ * panel mode enables on the sink (DPCD 0x10A bit 0). Its second tile then
++ * trains to full lock but never locks video (0x10A = 01, SINK_STATUS 0x205 =
++ * 00) and the panel scales the root tile across the whole display. Measured
++ * against the same panel brought up by Apple's firmware: 0x10A = 00, 0x205 =
++ * 01. The iMac18,3 panel runs in eDP panel mode, so this is keyed on the ID.
++ * The tile is identified through its own sink, or the root's before it has one.
++ */
++static inline bool dc_link_is_apple_tiled_dp_panel_mode(const struct dc_link *link)
++{
++	const struct dc_sink *sink = link ? link->local_sink : NULL;
++
++	if (!sink && link && link->tiled_peer)
++		sink = link->tiled_peer->local_sink;
++	if (!sink)
++		return false;
++
++	switch (sink->edid_caps.product_id) {
++	case 0xAE1D:
++	case 0xAE1E:
++		return true;
++	default:
++		return false;
++	}
++}
++
+ struct dc_sink_init_data {
+ 	enum signal_type sink_signal;
+ 	struct dc_link *link;
+--- a/drivers/gpu/drm/amd/display/dc/link/protocols/link_edp_panel_control.c
++++ b/drivers/gpu/drm/amd/display/dc/link/protocols/link_edp_panel_control.c
+@@ -139,9 +139,15 @@
+ 		}
+ 	}
+ 
+-	/* Apple 5K second tile: an eDP-class panel behind a DP link. */
++	/*
++	 * Apple 5K second tile: an eDP-class panel behind a DP link. The iMac
++	 * Pro panel is the exception: its second tile never locks video with
++	 * the alternate scrambler reset that eDP panel mode sets in DPCD 0x10A,
++	 * so it gets plain DP panel mode (dc_link_is_apple_tiled_dp_panel_mode).
++	 */
+ 	if (dc_link_is_apple_tiled_slave(link))
+-		return DP_PANEL_MODE_EDP;
++		return dc_link_is_apple_tiled_dp_panel_mode(link) ?
++		       DP_PANEL_MODE_DEFAULT : DP_PANEL_MODE_EDP;
+ 
+ 	if (link->dpcd_caps.panel_mode_edp &&
+ 		(link->connector_signal == SIGNAL_TYPE_EDP ||
