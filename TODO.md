@@ -568,7 +568,8 @@ gain rather than leaving it at maximum.
 
 **Wanted:** the macOS-style choice — with earbuds in, pick "Speakers" (or the
 internal microphone) from the volume panel and have the sound actually move.
-The panel rows exist (the `panel` module); they were made honest again on
+The panel rows exist (the Omarchy change proposed as basecamp/omarchy#10985);
+they were made honest again on
 2026-09-09 by listing only ports the driver reports available, because picking
 the other one moved the highlight and not the sound.
 
@@ -620,6 +621,284 @@ the playback/ASP path from inside a jack event once produced the continuous
 high-pitched tone on the headset output (see the comment in
 `patch_cirrus_new84.h`). Budget a day with ear-testing, not an hour. Do it after
 the headset-mic label reboot check.
+
+## Speaker EQ — parked 2026-09-10
+
+Taken out of the patcher on 2026-09-10 at the owner's call: the speakers sound
+fine without it, and after that day's cold boot it had been silently off anyway.
+Kept here, whole, to revisit.
+
+**What it was.** A native Omarchy speaker tuning for this machine (bass shelf,
+two peaking cuts, a high shelf and an LSP lookahead limiter), installed into
+Omarchy's tunings directory and switched on with `omarchy-audio-tuning on`,
+which runs it as its own PipeWire instance (`omarchy-speaker-tuning.service`,
+`pipewire -c omarchy-speaker-tuning.conf`). The shell hides the physical sink
+while a sink named `omarchy_speaker_tuning` fronts it, so the panel showed one
+output, "iMac Audio".
+
+**Why it went.** After a cold boot the service was `active (running)` but had
+created no nodes: only the bare codec sink existed, so audio bypassed the EQ
+while the patcher reported it applied. The same config started by hand came up
+immediately, so the curve and graph are fine — it is a startup problem. It left
+no trace because the tuning host config sets `log.level = 0`.
+
+**Before bringing it back:**
+1. Find why the host comes up empty at login. It starts `After=pipewire.service
+   wireplumber.service` and connects, but its filter-chain nodes never appear;
+   start it with `PIPEWIRE_DEBUG=3` from a boot to see why (candidates: the
+   LV2 limiter loading before `lilv` can see `/usr/lib/lv2`, or the host
+   racing WirePlumber's startup). Loading the filter-chain inside the main
+   PipeWire through `pipewire.conf.d` would remove the second instance entirely.
+2. Make `detect` check the live node (`pw-cli ls Node | grep
+   omarchy_speaker_tuning`), not files and a service state — that is what let
+   "applied" and "off" coexist.
+3. The tuning also applies to the headphone jack (speakers and headphones are
+   two ports on one sink here); see the note in `filter-chain.conf`.
+4. The device names (`audio/wireplumber/51-imac-audio-names.conf`) moved to the
+   `audio` module; with the tuning back, the bare sink would need a distinct
+   name again, as it had ("iMac Direct (no EQ)").
+
+**Needs** `lsp-plugins-lv2`. **Removal it performed** (already done on the
+owner's machine): `omarchy-audio-tuning off`, then delete the tuning directory,
+the kept copy and the pacman hook listed in the module below.
+
+### The module, as it was in `scripts/imac-patcher`
+
+```bash
+# ═══════════════════════ module: eq ════════════════════════════════════════
+# Installed as a native Omarchy speaker tuning rather than a loose filter-chain.
+# That naming is not cosmetic: the shell hides the physical sink while a sink
+# called omarchy_speaker_tuning fronts it, and excludes the tuning's own output
+# from the application list -- so the stock path shows ONE output named for the
+# speakers, where a hand-rolled chain shows the tuning and the hardware twice.
+# It also makes the volume keys resolve through the filter to the real sink.
+OMARCHY_TUNINGS="${OMARCHY_PATH:-/usr/share/omarchy}/default/audio/tunings"
+EQ_TUNING_SRC="${REPO_DIR}/audio/tunings/imac18-3"
+EQ_TUNING_DEST="${OMARCHY_TUNINGS}/imac18-3"
+EQ_TUNING_KEEP="/usr/local/share/omarchy-imac5k/tunings/imac18-3"
+EQ_TUNING_HOOK="/etc/pacman.d/hooks/imac-speaker-tuning.hook"
+WP_NAMES_SRC="${REPO_DIR}/audio/wireplumber/51-imac-audio-names.conf"
+WP_NAMES="${HOME}/.config/wireplumber/wireplumber.conf.d/51-imac-audio-names.conf"
+mod_eq_title() { echo "Speaker tone EQ"; }
+mod_eq_tier()  { echo safe; }
+mod_eq_desc()  { echo "The codec does no DSP at all; macOS's warmth is entirely software EQ. Installs an Omarchy speaker tuning (bass shelf + lookahead limiter) and keeps it off the headphone jack."; }
+mod_eq_detect() {
+    local tuning=0 host=0
+    [[ -f "${EQ_TUNING_DEST}/tuning.conf" ]] && tuning=1
+    systemctl --user is-active omarchy-speaker-tuning.service &>/dev/null && host=1
+    if (( tuning && host )); then echo applied
+    elif (( tuning || host )); then echo partial
+    else echo not-applied; fi
+}
+mod_eq_apply() {
+    # Every Omarchy tuning ends in a lookahead limiter, which is an LV2 plugin;
+    # omarchy-audio-tuning refuses to install without it.
+    if [[ ! -e /usr/lib/lv2/lsp-plugins.lv2/limiter_stereo.ttl ]]; then
+        say "installing the LV2 limiter the tuning needs"
+        sudo pacman -S --needed --noconfirm lsp-plugins-lv2 || return 1
+    fi
+    [[ -f "${EQ_TUNING_SRC}/tuning.conf" ]] || { warn "tuning missing: ${EQ_TUNING_SRC}"; return 1; }
+    say "installing the iMac18,3 tuning into ${EQ_TUNING_DEST}"
+    sudo install -d -m755 "$EQ_TUNING_DEST" || return 1
+    sudo install -m644 "${EQ_TUNING_SRC}/tuning.conf" "${EQ_TUNING_SRC}/filter-chain.conf" "$EQ_TUNING_DEST" || return 1
+    # omarchy-settings owns that directory and an update replaces it, which
+    # silently switches the EQ off. Keep a copy outside it and let pacman put
+    # the tuning back after every omarchy-settings upgrade.
+    sudo install -d -m755 "$EQ_TUNING_KEEP" || return 1
+    sudo install -m644 "${EQ_TUNING_SRC}/tuning.conf" "${EQ_TUNING_SRC}/filter-chain.conf" "$EQ_TUNING_KEEP" || return 1
+    sudo install -Dm644 "${REPO_DIR}/audio/pacman/imac-speaker-tuning.hook" "$EQ_TUNING_HOOK" || return 1
+
+    # An earlier revision of this patch shipped the same curve as a loose
+    # filter-chain fragment. Left in place it would run a second copy of the EQ
+    # in series with the tuning.
+    if [[ -f "$EQ_DEST" ]]; then
+        say "removing the superseded standalone EQ fragment"
+        rm -f "$EQ_DEST"
+        systemctl --user disable --now filter-chain.service &>/dev/null
+    fi
+
+    omarchy-audio-tuning on || { warn "omarchy-audio-tuning refused — see the message above"; return 1; }
+
+    # The codec publishes itself as its part number, "CS8409/CS42L83 Analog".
+    say "installing readable device names"
+    install -Dm644 "$WP_NAMES_SRC" "$WP_NAMES" || return 1
+    systemctl --user restart wireplumber || true
+
+    if omarchy-audio-tuning fronted-sink >/dev/null 2>&1; then
+        say "one output, named iMac Audio — the bare codec is hidden behind it"
+    else
+        warn "the tuning sink is not fronting the hardware; the output list will still show both"
+    fi
+}
+mod_eq_remove() {
+    rm -f "$WP_NAMES"
+    omarchy-audio-tuning off || true
+    [[ -d "$EQ_TUNING_DEST" ]] && sudo rm -rf "$EQ_TUNING_DEST"
+    sudo rm -rf "$EQ_TUNING_KEEP" "$EQ_TUNING_HOOK"
+    say "tuning removed — output goes straight to the codec again"
+}
+```
+
+### `audio/tunings/imac18-3/tuning.conf`
+
+```bash
+## Apple iMac18,3 (2017 27-inch 5K) internal speakers.
+##
+## Six biquads and a lookahead limiter, applied as a PipeWire filter-chain in
+## front of the internal speaker sink. The CS8409/CS42L83 path does no DSP of
+## its own on Linux: macOS supplies the voicing in software, so without this the
+## speakers sound thin and bright compared with the same machine under macOS.
+
+description="Apple iMac 27-inch 5K (18,3) speakers"
+## Matched on the DMI product name, which is the only identifier Apple exposes
+## here -- these machines carry no product SKU. "iMac18,3" is the 27-inch 5K;
+## the 21.5-inch models are 18,1 and 18,2 and have different speakers, so this
+## must stay an exact model string and never widen to "iMac".
+match_dmi=("iMac18,3")
+## The codec exposes speakers and headphones as two ports on ONE sink, unlike
+## the split speaker/headphone sinks on machines with UCM profiles. See the note
+## in filter-chain.conf about what that means for headphones.
+## Unescaped dots: this is passed to awk as a string, where a backslash escape
+## would be consumed before the regex sees it.
+sink_pattern='^alsa_output.*analog-stereo$'
+
+## Provenance. Tuned by ear on the hardware against the same machine running
+## macOS as the reference, not fitted to a measured response. The figures the
+## shipped tunings carry (magnitude RMS, group delay, limiter headroom) are
+## deliberately absent rather than guessed: no multitone measurement has been
+## taken on this machine yet.
+derived_from="hand-tuned against macOS on the same unit"
+validated_by="ahmadtv"
+validated_hardware="iMac18,3 (2017 27-inch 5K)"
+```
+
+### `audio/tunings/imac18-3/filter-chain.conf`
+
+```
+# Apple iMac18,3 (2017 27-inch 5K) speaker tuning.
+#
+# Four active biquads and a lookahead limiter. The CS8409/CS42L83 codec applies
+# no DSP on Linux, so this supplies the voicing macOS does in software: lift the
+# low end the small sealed cabinets cannot produce, take the edge off the
+# presence region, and tilt the top down.
+#
+# The limiter replaces a hard clamp used earlier. With a +7 dB low shelf, bass
+# transients on a loud master exceed full scale, and a clamp resolves that by
+# clipping them. The limiter resolves it by lookahead gain reduction instead,
+# which is the same protection without the distortion. Input gain is left at
+# unity so the perceived level matches what the clamp version produced; if the
+# bass audibly pumps on dense material, trim "g_in" rather than raising "th".
+#
+# Channels are wired explicitly because the limiter is a stereo plugin; a mono
+# graph is duplicated per channel and would limit each side independently,
+# shifting the stereo image on bass transients.
+#
+# HEADPHONES: this codec exposes speakers and headphones as two ports on a
+# single sink, not as separate sinks, so pinning the output to the speaker sink
+# does not keep this tuning off headphones the way it does on machines with
+# split sinks. The tuning therefore applies to the jack as well.
+#
+# That is deliberate and it is the owner's call. A bypass was built and dropped:
+# it worked, but it is a background process compensating for how the device is
+# modelled, and the real fix is to model the machine the way macOS does -- each
+# port its own output -- which would make the name change on plug and take the
+# tuning off headphones with nothing watching anything. That belongs in an ALSA
+# UCM profile for this machine, not in a daemon.
+#
+# The node is called "iMac Audio" rather than "iMac Speakers" because it is the
+# only output the panel shows and it carries the headphones too.
+
+context.modules = [
+  { name = libpipewire-module-filter-chain
+    args = {
+      node.description = "iMac Audio"
+      media.name       = "iMac Audio"
+
+      filter.graph = {
+        nodes = [
+          { type = builtin name = s0_l label = bq_lowshelf  control = { "Freq" = 150.0  "Q" = 0.7 "Gain" = 7.0 } }
+          { type = builtin name = s1_l label = bq_peaking   control = { "Freq" = 250.0  "Q" = 1.0 "Gain" = 2.0 } }
+          { type = builtin name = s2_l label = bq_peaking   control = { "Freq" = 5000.0 "Q" = 1.0 "Gain" = -2.0 } }
+          { type = builtin name = s3_l label = bq_highshelf control = { "Freq" = 8000.0 "Q" = 0.7 "Gain" = -3.0 } }
+
+          { type = builtin name = s0_r label = bq_lowshelf  control = { "Freq" = 150.0  "Q" = 0.7 "Gain" = 7.0 } }
+          { type = builtin name = s1_r label = bq_peaking   control = { "Freq" = 250.0  "Q" = 1.0 "Gain" = 2.0 } }
+          { type = builtin name = s2_r label = bq_peaking   control = { "Freq" = 5000.0 "Q" = 1.0 "Gain" = -2.0 } }
+          { type = builtin name = s3_r label = bq_highshelf control = { "Freq" = 8000.0 "Q" = 0.7 "Gain" = -3.0 } }
+
+          { type   = lv2
+            name   = limiter
+            plugin = "http://lsp-plug.in/plugins/lv2/limiter_stereo"
+            control = {
+              # Both default to enabled: "alr" regulates level toward the
+              # threshold and "boost" normalises the threshold up to full
+              # scale. A fixed tuning must switch them off or its tone drifts
+              # with programme level.
+              "alr"   = 0
+              "boost" = 0
+              "g_in"  = 1.0
+              "th"    = 0.891
+            }
+          }
+        ]
+
+        links = [
+          { output = "s0_l:Out" input = "s1_l:In" }
+          { output = "s1_l:Out" input = "s2_l:In" }
+          { output = "s2_l:Out" input = "s3_l:In" }
+          { output = "s3_l:Out" input = "limiter:in_l" }
+
+          { output = "s0_r:Out" input = "s1_r:In" }
+          { output = "s1_r:Out" input = "s2_r:In" }
+          { output = "s2_r:Out" input = "s3_r:In" }
+          { output = "s3_r:Out" input = "limiter:in_r" }
+        ]
+
+        inputs  = [ "s0_l:In" "s0_r:In" ]
+        outputs = [ "limiter:out_l" "limiter:out_r" ]
+      }
+
+      audio.channels = 2
+      audio.position = [ FL FR ]
+
+      capture.props = {
+        node.name   = "omarchy_speaker_tuning"
+        media.class = Audio/Sink
+      }
+      playback.props = {
+        node.name     = "omarchy_speaker_tuning_output"
+        node.passive  = true
+        target.object = "@SPEAKER_SINK@"
+        # This stream is the filter's output and is a movable sink input like any
+        # other, so anything that reroutes "all streams" to a newly selected
+        # output would drag the processing along with it -- onto headphones, or
+        # into the tuning's own sink, which is a cycle. Pin it.
+        node.dont-move = true
+        # If the speaker sink is not present yet -- the tuning host can start
+        # before the device is discovered -- WirePlumber would otherwise link this
+        # output to whatever default exists, quietly tuning the wrong device while
+        # the tuning sink still looks healthy. Wait for the named target instead.
+        node.dont-fallback = true
+      }
+    }
+  }
+]
+```
+
+### `audio/pacman/imac-speaker-tuning.hook`
+
+```ini
+[Trigger]
+Operation = Install
+Operation = Upgrade
+Type = Package
+Target = omarchy-settings
+
+[Action]
+Description = Restoring the iMac18,3 speaker tuning the Omarchy update overwrote
+When = PostTransaction
+Exec = /usr/bin/cp -r /usr/local/share/omarchy-imac5k/tunings/imac18-3 /usr/share/omarchy/default/audio/tunings/
+```
 
 ## SD card reader: broken, and not for the reason it first looks
 

@@ -23,7 +23,7 @@ Native **5120×2880**, real **speakers and mic**, true **wide-gamut colour** —
 bash <(curl -fsSL https://raw.githubusercontent.com/ahmadtv/omarchy-imac5k/main/install)
 ```
 
-> For the **2017 27-inch iMac (iMac18,3)**. Built and tested on Omarchy (Arch + Hyprland); the audio, colour and EQ pieces are largely distro-agnostic.
+> For the **2017 27-inch iMac (iMac18,3)**. Built and tested on Omarchy (Arch + Hyprland); the audio and colour pieces are largely distro-agnostic.
 
 ---
 
@@ -34,8 +34,6 @@ bash <(curl -fsSL https://raw.githubusercontent.com/ahmadtv/omarchy-imac5k/main/
 | 🖥️ **Native 5K** | Full **5120×2880**. The panel is two 2560×2880 tiles Apple leaves dormant; this wakes the second one, stitches both into one display, and genlocks them so they scan in lockstep — seamless under motion. |
 | 🔊 **Speakers & mic** | The CS8409 codec the kernel can't drive at all — now with working speakers and both the internal **and** headset mic, with **automatic switching** on plug/unplug just like macOS. |
 | 🎧 **Apple EarPods** | Fully supported. Plug them in and audio + mic follow the jack; unplug and it's back to internal — automatically. All three **inline buttons** work too: play/pause, volume up, volume down. |
-| 🎧 **Jack-aware panel** | Plug headphones in and the volume panel reads **Headphones** and **Headset Microphone**, with the bar icon to match; unplug and it reads **Speakers** and **Internal Microphone** — the way macOS shows it. Proposed to Omarchy; carried here via Omarchy's own plugin clone until it lands. |
-| 🎚️ **macOS-style sound** | The codec does zero DSP; macOS's warmth is pure software EQ. A PipeWire profile brings it back. |
 | 🎨 **True colour** | The wide-gamut **Display P3** panel mapped correctly, instead of the oversaturated mess of stock sRGB. |
 
 ## 🖥️ On the machine
@@ -81,7 +79,6 @@ The patcher shows what's applied, what isn't, and lets you pick — **nothing is
 ```bash
 ./scripts/imac-patcher --apply 5k      # native 5K (rebuilds only the amdgpu module)
 ./scripts/imac-patcher --apply audio   # speakers, mics, EarPods + buttons
-./scripts/imac-patcher --apply panel   # Speakers/Headphones rows + icon follow the jack
 ./scripts/imac-patcher --apply wifi    # Broadcom firmware handshake off (associates on WPA2/WPA3-mixed)
 ./scripts/imac-patcher --apply vram    # ggml/Vulkan tools off the 256 MiB CPU-visible window
 ./scripts/imac-patcher --remove 5k     # full undo, any time

@@ -6,7 +6,7 @@ S=alsa_input.pci-0000_00_1f.3.analog-stereo
 echo "uptime: $(uptime -p)   time: $(date +%T)"
 echo "driver capture source : $(amixer -c0 cget numid=1 | grep ': values' | cut -d= -f2)  (0=Internal 1=jack)"
 echo "ALSA Internal Mic     : $(amixer -c0 sget 'Internal Mic' | grep -m1 -oE 'Capture [0-9]+ \[[0-9]+%\].*')"
-echo "PipeWire input ports  :"; omarchy-audio-ports 2>/dev/null | awk -F'\t' '$1=="source"{print "   " $4 " active=" $5 " avail=" $6}'
+echo "PipeWire input ports  :"; pactl -f json list sources 2>/dev/null | jq -r --arg s "$S" '.[] | select(.name == $s) | .active_port as $a | .ports[] | "   \(.description) active=\(.name == $a) avail=\(.availability)"'
 echo "PipeWire source volume: $(pactl get-source-volume "$S" | head -1 | awk '{print $5}')  mute: $(pactl get-source-mute "$S" | awk '{print $2}')"
 f=$(mktemp --suffix=.wav); timeout 5 pw-record --target "$S" "$f" & sleep 2.5; kill %1 2>/dev/null; wait 2>/dev/null
 python3 - "$f" <<'PY'

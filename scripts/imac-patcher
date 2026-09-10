@@ -41,7 +41,6 @@ SUPPORTED_5K_SERIES="7.1 7.2"
 LIMINE_DEFAULT=/etc/default/limine
 VIDEO_4K='video=eDP-1:3840x2160@60e'
 MONITORS_LUA="${HOME}/.config/hypr/monitors.lua"
-EQ_DEST="${HOME}/.config/pipewire/filter-chain.conf.d/eq6.conf"
 SLEEP_TARGETS=(suspend.target hibernate.target hybrid-sleep.target suspend-then-hibernate.target)
 mkdir -p "$LOGDIR" "$CACHE"
 
@@ -51,7 +50,7 @@ mkdir -p "$LOGDIR" "$CACHE"
 # they are the same on every machine. Those live in omarchy-tweaks, which
 # brings its own tool and its own bar widget. This is a one-time run per
 # machine, so it stays a terminal thing.
-MODULES=(audio eq color vram wifi suspend boot 5k panel)
+MODULES=(audio color vram wifi suspend boot 5k)
 
 HAVE_GUM=0; command -v gum >/dev/null && HAVE_GUM=1
 say()  { printf '\033[1;33m==>\033[0m %s\n' "$*"; }
@@ -93,6 +92,9 @@ AUDIO_SRC="${CACHE}/imac18-3-cs8409-linux-audio"
 AUDIO_PIN=be90113
 AUDIO_PATCH="${REPO_DIR}/patches/cs8409-headset-capture.patch"
 AUDIO_DKMS=snd_hda_macbookpro
+# WirePlumber publishes the codec as its part number, "CS8409/CS42L83 Analog".
+WP_NAMES_SRC="${REPO_DIR}/audio/wireplumber/51-imac-audio-names.conf"
+WP_NAMES="${HOME}/.config/wireplumber/wireplumber.conf.d/51-imac-audio-names.conf"
 # Any other DKMS package that builds a module named snd-hda-codec-cs8409 drops
 # it in the same updates/dkms directory as ours, so on the next kernel update
 # the order `dkms autoinstall` happens to run in decides which one survives.
@@ -249,150 +251,16 @@ mod_audio_apply() {
         else warn "the installed cs8409 module for ${k} is not our patched build"; bad=1; fi
     done
     (( bad )) && { warn "audio will not work fully until this succeeds (check: dkms status)"; return 1; }
+    say "naming the device iMac Audio / iMac Microphone"
+    install -Dm644 "$WP_NAMES_SRC" "$WP_NAMES" || return 1
+    systemctl --user restart wireplumber 2>/dev/null || true
     say "installed — reboot to load the new module"
 }
 mod_audio_remove() {
     [[ -x "$AUDIO_SRC/install.cirrus.driver.sh" ]] && ( cd "$AUDIO_SRC" && sudo ./install.cirrus.driver.sh -r )
     sudo dkms remove snd_hda_macbookpro/0.2 --all 2>/dev/null || true
+    rm -f "$WP_NAMES"; systemctl --user restart wireplumber 2>/dev/null || true
     say "stock module restored — reboot to load it"
-}
-
-# ═══════════════════════ module: eq ════════════════════════════════════════
-# Installed as a native Omarchy speaker tuning rather than a loose filter-chain.
-# That naming is not cosmetic: the shell hides the physical sink while a sink
-# called omarchy_speaker_tuning fronts it, and excludes the tuning's own output
-# from the application list -- so the stock path shows ONE output named for the
-# speakers, where a hand-rolled chain shows the tuning and the hardware twice.
-# It also makes the volume keys resolve through the filter to the real sink.
-OMARCHY_TUNINGS="${OMARCHY_PATH:-/usr/share/omarchy}/default/audio/tunings"
-EQ_TUNING_SRC="${REPO_DIR}/audio/tunings/imac18-3"
-EQ_TUNING_DEST="${OMARCHY_TUNINGS}/imac18-3"
-EQ_TUNING_KEEP="/usr/local/share/omarchy-imac5k/tunings/imac18-3"
-EQ_TUNING_HOOK="/etc/pacman.d/hooks/imac-speaker-tuning.hook"
-WP_NAMES_SRC="${REPO_DIR}/audio/wireplumber/51-imac-audio-names.conf"
-WP_NAMES="${HOME}/.config/wireplumber/wireplumber.conf.d/51-imac-audio-names.conf"
-mod_eq_title() { echo "Speaker tone EQ"; }
-mod_eq_tier()  { echo safe; }
-mod_eq_desc()  { echo "The codec does no DSP at all; macOS's warmth is entirely software EQ. Installs an Omarchy speaker tuning (bass shelf + lookahead limiter) and keeps it off the headphone jack."; }
-mod_eq_detect() {
-    local tuning=0 host=0
-    [[ -f "${EQ_TUNING_DEST}/tuning.conf" ]] && tuning=1
-    systemctl --user is-active omarchy-speaker-tuning.service &>/dev/null && host=1
-    if (( tuning && host )); then echo applied
-    elif (( tuning || host )); then echo partial
-    else echo not-applied; fi
-}
-mod_eq_apply() {
-    # Every Omarchy tuning ends in a lookahead limiter, which is an LV2 plugin;
-    # omarchy-audio-tuning refuses to install without it.
-    if [[ ! -e /usr/lib/lv2/lsp-plugins.lv2/limiter_stereo.ttl ]]; then
-        say "installing the LV2 limiter the tuning needs"
-        sudo pacman -S --needed --noconfirm lsp-plugins-lv2 || return 1
-    fi
-    [[ -f "${EQ_TUNING_SRC}/tuning.conf" ]] || { warn "tuning missing: ${EQ_TUNING_SRC}"; return 1; }
-    say "installing the iMac18,3 tuning into ${EQ_TUNING_DEST}"
-    sudo install -d -m755 "$EQ_TUNING_DEST" || return 1
-    sudo install -m644 "${EQ_TUNING_SRC}/tuning.conf" "${EQ_TUNING_SRC}/filter-chain.conf" "$EQ_TUNING_DEST" || return 1
-    # omarchy-settings owns that directory and an update replaces it, which
-    # silently switches the EQ off. Keep a copy outside it and let pacman put
-    # the tuning back after every omarchy-settings upgrade.
-    sudo install -d -m755 "$EQ_TUNING_KEEP" || return 1
-    sudo install -m644 "${EQ_TUNING_SRC}/tuning.conf" "${EQ_TUNING_SRC}/filter-chain.conf" "$EQ_TUNING_KEEP" || return 1
-    sudo install -Dm644 "${REPO_DIR}/audio/pacman/imac-speaker-tuning.hook" "$EQ_TUNING_HOOK" || return 1
-
-    # An earlier revision of this patch shipped the same curve as a loose
-    # filter-chain fragment. Left in place it would run a second copy of the EQ
-    # in series with the tuning.
-    if [[ -f "$EQ_DEST" ]]; then
-        say "removing the superseded standalone EQ fragment"
-        rm -f "$EQ_DEST"
-        systemctl --user disable --now filter-chain.service &>/dev/null
-    fi
-
-    omarchy-audio-tuning on || { warn "omarchy-audio-tuning refused — see the message above"; return 1; }
-
-    # The codec publishes itself as its part number, "CS8409/CS42L83 Analog".
-    say "installing readable device names"
-    install -Dm644 "$WP_NAMES_SRC" "$WP_NAMES" || return 1
-    systemctl --user restart wireplumber || true
-
-    if omarchy-audio-tuning fronted-sink >/dev/null 2>&1; then
-        say "one output, named iMac Audio — the bare codec is hidden behind it"
-    else
-        warn "the tuning sink is not fronting the hardware; the output list will still show both"
-    fi
-}
-mod_eq_remove() {
-    rm -f "$WP_NAMES"
-    omarchy-audio-tuning off || true
-    [[ -d "$EQ_TUNING_DEST" ]] && sudo rm -rf "$EQ_TUNING_DEST"
-    sudo rm -rf "$EQ_TUNING_KEEP" "$EQ_TUNING_HOOK"
-    say "tuning removed — output goes straight to the codec again"
-}
-
-# ═══════════════════════ module: panel ═════════════════════════════════════
-# The volume panel names devices, and speakers + headphone jack are ONE device
-# with two ports, so its label and icon never followed the jack. Proposed to
-# Omarchy as a change to the audio panel; until it lands, Omarchy's own plugin
-# clone mechanism carries it: the built-in panel is cloned into ~/.config and
-# the same diff applied there. Remove this module once the upstream panel has
-# it (the clone would otherwise shadow later upstream improvements).
-PANEL_PATCH="${REPO_DIR}/patches/omarchy-audio-ports.patch"
-PANEL_HELPERS=(omarchy-audio-ports omarchy-audio-set-port)   # shipped in scripts/, installed to ~/.local/bin
-panel_clone_manifest() { grep -l '"clonedFrom": *"omarchy.audio"' "${HOME}"/.config/omarchy/plugins/*/manifest.json 2>/dev/null | head -1; }
-mod_panel_title() { echo "Speakers / Headphones rows in the volume panel"; }
-# Not "app" despite patching an Omarchy plugin: this exists because of THIS
-# machine's combo jack, it is what makes the volume panel tell the truth here,
-# and a vanilla 18,3 should get it without asking. The app tier is for patches
-# you keep to yourself. (Upstream: basecamp/omarchy#10985 — when that lands,
-# this module removes the clone and the tier stops mattering.)
-mod_panel_tier()  { echo safe; }
-mod_panel_desc()  { echo "Speakers or Headphones (and Internal or Headset Microphone) as rows, the live one highlighted, the bar icon following the jack, the way macOS lists them. On this codec the driver routes on the jack itself, so the rows follow it rather than offering an override. Carried as a clone of Omarchy's audio panel until the upstream change lands."; }
-mod_panel_detect() {
-    local m; m="$(panel_clone_manifest)"
-    local clone=0 patched=0 helper=0
-    [[ -n $m ]] && clone=1
-    [[ -n $m ]] && grep -q 'omarchy-audio-ports' "$(dirname "$m")/Panel.qml" 2>/dev/null && patched=1
-    helper=1; local h; for h in "${PANEL_HELPERS[@]}"; do [[ -x "${HOME}/.local/bin/$h" ]] || helper=0; done
-    if (( clone && patched && helper )); then echo applied
-    elif (( clone || helper )); then echo partial
-    else echo not-applied; fi
-}
-mod_panel_apply() {
-    local m d id
-    command -v omarchy-plugin-clone >/dev/null || { warn "omarchy-plugin-clone not found — this Omarchy is too old for plugin clones"; return 1; }
-    m="$(panel_clone_manifest)"
-    if [[ -z $m ]]; then
-        say "cloning the built-in audio panel into your config"
-        omarchy-plugin-clone omarchy.audio </dev/null || return 1
-        m="$(panel_clone_manifest)"; [[ -n $m ]] || { warn "clone did not appear"; return 1; }
-    fi
-    d="$(dirname "$m")"; id="$(jq -r .id "$m")"
-    if grep -q 'omarchy-audio-ports' "$d/Panel.qml"; then
-        say "panel already carries the change"
-    else
-        # The diff is against Omarchy's tree; the clone holds the same files flat.
-        if ! patch -d "$d" -p4 --dry-run --force < "$PANEL_PATCH" >/dev/null 2>&1; then
-            warn "the panel change no longer applies to this Omarchy version — likely upstream already has it, or the panel moved. Nothing changed."
-            omarchy-plugin-remove "$id" </dev/null >/dev/null 2>&1 || true
-            return 1
-        fi
-        patch -d "$d" -p4 --force < "$PANEL_PATCH" >/dev/null || return 1
-        # the clone tool rewrites the plugin id inside its files; keep that true
-        sed -i "s|omarchy\.audio|${id}|g" "$d/Panel.qml" "$d/Model.js"
-    fi
-    local h; for h in "${PANEL_HELPERS[@]}"; do install -Dm755 "${SCRIPT_DIR}/$h" "${HOME}/.local/bin/$h" || return 1; done
-    rm -f "${HOME}/.local/bin/omarchy-audio-port-labels"   # earlier revision of this module
-    say "restarting the shell"
-    pkill -x quickshell || true
-    say "plug headphones in: the row reads Headphones and the bar icon follows"
-}
-mod_panel_remove() {
-    local m id; m="$(panel_clone_manifest)"
-    if [[ -n $m ]]; then id="$(jq -r .id "$m")"; omarchy-plugin-remove "$id" </dev/null || true; fi
-    local h; for h in "${PANEL_HELPERS[@]}"; do rm -f "${HOME}/.local/bin/$h"; done
-    pkill -x quickshell || true
-    say "back on Omarchy's built-in audio panel"
 }
 
 # ═══════════════════════ module: color ═════════════════════════════════════
