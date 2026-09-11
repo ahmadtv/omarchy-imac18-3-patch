@@ -1,0 +1,49 @@
+#!/usr/bin/env bash
+#
+# vce-hangrate — how often does the VCE encoder hang on this machine, right now?
+#
+# Runs one encode variant N times and reports hangs/N, resetting the GPU as it
+# goes (the reset stack makes that survivable). Meant to be run OUTSIDE the
+# graphical session (a hang restarts the login manager), as a system unit:
+#
+#   sudo systemd-run --unit=vce-hangrate --collect \
+#        -p StandardOutput=file:/var/tmp/vce-hangrate.log -p StandardError=inherit \
+#        -E N=20 -E VARIANT=encode-only /home/ahmad/Projects/omarchy-imac18-3/scripts/vce-hangrate
+#
+# VARIANT: encode-only (software decode, GPU encode -- the variant that hung on
+#          2026-09-11 15:29), strata (Strata's preview pipeline: GPU decode,
+#          scale, encode), or gsr (gpu-screen-recorder-like settings).
+# Each run encodes 30 s of the clip; a run that hangs counts as a hang and the
+# harness waits for "GPU reset(N) succeeded!" before continuing.
+set -u
+CLIP="${CLIP:-/path/to/screen-recording.mp4}"
+N="${N:-20}"; VARIANT="${VARIANT:-encode-only}"
+[[ -f $CLIP ]] || { echo "no such clip: $CLIP"; exit 1; }
+OUT=$(mktemp /tmp/vce-hangrate.XXXXXX.mp4); trap 'rm -f "$OUT"' EXIT
+klog() { journalctl -k --after-cursor="$1" -q --no-pager 2>/dev/null; }
+HW=(-hwaccel vaapi -hwaccel_device /dev/dri/renderD128 -hwaccel_output_format vaapi)
+ENC=(-c:v h264_vaapi -fpsmax 30 -b:v 2M -maxrate 3M -bufsize 4M)
+S16='scale_vaapi=w=1280:h=1280:force_original_aspect_ratio=decrease:force_divisible_by=16:format=nv12'
+
+echo "vce-hangrate: $VARIANT x$N on $(basename "$CLIP"); amdgpu $(cat /sys/module/amdgpu/srcversion); cmdline extras: $(tr ' ' '\n' < /proc/cmdline | grep -E '^amdgpu\.(aspm|pg_mask|cg_mask|dpm|ppfeaturemask|lockup_timeout)=' | tr '\n' ' ')"
+hangs=0
+for i in $(seq 1 "$N"); do
+  cur=$(journalctl -k -n0 --show-cursor -q --no-pager 2>/dev/null | sed -n 's/^-- cursor: //p')
+  t0=$SECONDS
+  case $VARIANT in
+    encode-only) timeout 120 ffmpeg -nostdin -v error -threads 1 -filter_threads 1 -i "$CLIP" -map 0:v:0 -an -t 30 -vf 'scale=1280:-2,format=nv12,hwupload' -vaapi_device /dev/dri/renderD128 "${ENC[@]}" -f mp4 -y "$OUT" 2>/dev/null ;;
+    strata)      timeout 120 ffmpeg -nostdin -v error -threads 1 -filter_threads 1 "${HW[@]}" -i "$CLIP" -map 0:v:0 -map '0:a:0?' -sn -dn -t 30 -vf "$S16" "${ENC[@]}" -c:a aac -b:a 96k -movflags +frag_keyframe+empty_moov -f mp4 -y "$OUT" 2>/dev/null ;;
+    gsr)         timeout 120 ffmpeg -nostdin -v error "${HW[@]}" -i "$CLIP" -map 0:v:0 -an -t 30 -vf "$S16,fps=60" -c:v h264_vaapi -profile:v high -bf 0 -g 120 -b:v 6M -f mp4 -y "$OUT" 2>/dev/null ;;
+    *) echo "unknown VARIANT $VARIANT"; exit 2 ;;
+  esac
+  rc=$?
+  if klog "$cur" | grep -qE 'ring vce0 timeout'; then
+    hangs=$((hangs+1)); printf '%s  run %2d  HANG  (exit %s, %s s)\n' "$(date +%T)" "$i" "$rc" "$((SECONDS-t0))"
+    for w in $(seq 1 24); do klog "$cur" | grep -qE 'GPU reset\([0-9]+\) (succeeded|failed)' && break; sleep 5; done
+    klog "$cur" | grep -qE 'GPU reset\([0-9]+\) succeeded' || { echo "  reset did not complete — stopping"; break; }
+    sleep 5
+  else
+    printf '%s  run %2d  ok    (exit %s, %s s)\n' "$(date +%T)" "$i" "$rc" "$((SECONDS-t0))"
+  fi
+done
+echo; echo "RESULT: $hangs hang(s) in $i run(s) of $VARIANT"
