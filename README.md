@@ -20,7 +20,7 @@ Native **5120×2880**, real **speakers and mic**, true **wide-gamut colour** —
 [Omarchy](https://omarchy.org)'s whole promise is *“we can fix everything.”* This points that at a 2017 iMac.
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/ahmadtv/omarchy-imac5k/main/install)
+bash <(curl -fsSL https://raw.githubusercontent.com/ahmadtv/omarchy-imac18-3/main/install)
 ```
 
 > For the **2017 27-inch iMac (iMac18,3)**. Built and tested on Omarchy (Arch + Hyprland); the audio and colour pieces are largely distro-agnostic.
@@ -70,8 +70,8 @@ Straight about the gaps:
 The one-liner above clones the patcher and opens its menu. Or do it by hand:
 
 ```bash
-git clone https://github.com/ahmadtv/omarchy-imac5k
-cd omarchy-imac5k && ./scripts/imac-patcher
+git clone https://github.com/ahmadtv/omarchy-imac18-3
+cd omarchy-imac18-3 && ./scripts/imac-patcher
 ```
 
 The patcher shows what's applied, what isn't, and lets you pick — **nothing is applied without asking**. Omakase in spirit: sensible defaults, and you can send any of it back. Each piece is a separate, reversible step:
