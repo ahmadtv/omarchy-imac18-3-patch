@@ -1,0 +1,37 @@
+Backport of upstream commit 2ee9836545e6 (in 7.3-rc1, Cc: stable, not yet in
+any 7.2.y as of 7.2.5). This is the actual fix for the VCE encoder hang
+("ring vce0 timeout, signaled seq=N, emitted seq=N+1") that started with
+7.1.6 on Polaris: drm/amd#5595. Drop this patch once the distro kernel
+carries it (grep 'align_mask = 0x1f' in vce_v3_0.c).
+
+From 2ee9836545e690c9e66ec203445d7705959fd7a8 Mon Sep 17 00:00:00 2001
+From: David Rosca <david.rosca@amd.com>
+Date: Thu, 20 Aug 2026 16:32:51 +0200
+Subject: drm/amdgpu: Fix VCE 3 ring align_mask
+
+The largest frame is 20 dwords, so 0xf mask is too small.
+This was always wrong, but we were lucky with the VCE_CMD_END
+commands inserted after fence and vm_flush.
+
+Fixes: 8897ea8c761b ("drm/amdgpu: Implement insert_end for VCE 3")
+Cc: stable@vger.kernel.org
+Acked-by: Alex Deucher <alexander.deucher@amd.com>
+Signed-off-by: David Rosca <david.rosca@amd.com>
+Signed-off-by: Alex Deucher <alexander.deucher@amd.com>
+---
+ drivers/gpu/drm/amd/amdgpu/vce_v3_0.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/drivers/gpu/drm/amd/amdgpu/vce_v3_0.c b/drivers/gpu/drm/amd/amdgpu/vce_v3_0.c
+index a9497e2e07f71..4dbbeaf97ad19 100644
+--- a/drivers/gpu/drm/amd/amdgpu/vce_v3_0.c
++++ b/drivers/gpu/drm/amd/amdgpu/vce_v3_0.c
+@@ -891,7 +891,7 @@ static const struct amdgpu_ring_funcs vce_v3_0_ring_phys_funcs = {
+ 
+ static const struct amdgpu_ring_funcs vce_v3_0_ring_vm_funcs = {
+ 	.type = AMDGPU_RING_TYPE_VCE,
+-	.align_mask = 0xf,
++	.align_mask = 0x1f,
+ 	.nop = VCE_CMD_NO_OP,
+ 	.support_64bit_ptrs = false,
+ 	.no_user_fence = true,

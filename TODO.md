@@ -32,6 +32,24 @@ lost` → the session dies. Seen from an ffmpeg transcode and from
 `gpu-screen-recorder`; on 2026-09-11, **screen recording with the webcam on
 turned the screen pink and froze it**.
 
+- **Root cause found (2026-09-11 evening), fix built, not yet verified on this
+  machine:** a kernel regression, drm/amd#5595 (RX 580, same VCE firmware 53.26,
+  same `signaled N, emitted N+1`; #5707, #5766, #5790 are duplicates). Since
+  7.1.6, "always emit the job vm fence" (`bc639a9eadc7`) changed what the kernel
+  writes on the VCE ring, and `vce_v3_0_ring_vm_funcs.align_mask = 0xf` pads
+  frames to 16 dwords while the largest frame is 20 -- the engine stalls before
+  the last job's fence. Upstream fix `2ee9836545e6` ("Fix VCE 3 ring
+  align_mask", `0xf` -> `0x1f`, Cc stable) is in 7.3-rc1 but in no 7.2.y up to
+  7.2.5. Backported as `patches/amdgpu-vce3-ring-align-mask.patch`; drop it when
+  the distro kernel has it. This machine was installed on 7.1.9, so it has only
+  ever run affected kernels -- which is why it "never happened on macOS" (macOS
+  also encodes on the Intel iGPU, see below). The 30 Aug pink screen was the
+  same bug (`gpu-screen-recorder`, `ring vce0 timeout, signaled seq=19,
+  emitted seq=20`). The Debian #1146343 ASPM bisect is a false positive (that
+  commit is a no-op for a GPU on an Intel root port, and reverting it alone
+  did not help). Mesa is not involved (a 26.1.5 downgrade did not help; no Mesa
+  knob reaches the VCE command stream).
+
 - **Reproduced 2026-09-11 on kernel 7.2.3 / Mesa 26.2.2** with Strata's exact
   preview pipeline (from its 2026-09-04 core dump): `ffmpeg -hwaccel vaapi
   -hwaccel_output_format vaapi -i <file> -t 30 -vf scale_vaapi=w=1280:h=1280:…
@@ -89,7 +107,8 @@ turned the screen pink and froze it**.
   check. Worth its own amd-gfx report with the two stacks.
 - **Ruled out:** macroblock alignment, sandboxing or app version, file
   corruption. Decoding the same file is fine. RADV has no Vulkan encode on
-  Polaris, so VCE is the only encoder.
+  Polaris. VCE is the only H.264 encoder; HEVC encode runs on UVD-ENC, a
+  different ring (`hevc_vaapi`, `gpu-screen-recorder -k hevc`).
 - **Leads:** bisect Mesa radeonsi encode parameters (rate control, GOP/IDR,
   reference frames, slices, dimensions) against a reproducer; the kernel's
   `VCE VM mode` on Polaris (`vce_v3_0.c`); per-ring recovery so a reset does not
