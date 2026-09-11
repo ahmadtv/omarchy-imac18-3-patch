@@ -1,0 +1,478 @@
+#!/usr/bin/env bash
+#
+# video-bench — apples-to-apples video encode/decode benchmark for the iMac18,3:
+# AMD Radeon Pro 575 (VA-API, amdgpu), Intel HD 630 (VA-API, i915) and the CPU,
+# all fed the exact same lossless test sources and the same rate targets.
+#
+#   video-bench --device amd|intel|cpu [--quick] [--workdir DIR] [--force]
+#
+# Tests (fps, CPU use, GPU power where readable, and for encodes quality vs the
+# source at the same bitrate: VMAF + PSNR-Y + SSIM, or PSNR+SSIM without libvmaf):
+#   e1 H.264 1080p60  8 Mb/s     (h264_vaapi | libx264 veryfast + medium)
+#   e2 H.264 2160p30 20 Mb/s     (h264_vaapi | libx264 veryfast + medium)
+#   e3 HEVC  1080p60  5 Mb/s     (hevc_vaapi | libx265 fast)
+#   e4 HEVC  2160p30 12 Mb/s     (hevc_vaapi | libx265 fast)
+#   e5 H.264 1440p60 12 Mb/s     screen-recording case (what gpu-screen-recorder does)
+#   d1-d3 H.264 / HEVC / VP9 2160p30 decode throughput to null ("unsupported" when
+#         the device has no hardware decoder for it — no silent software fallback)
+# Rate control is the same everywhere: -b:v R -maxrate R -bufsize 2R, 2 s GOP
+# (VA-API picks CBR from that; x264/x265 run ABR with a VBV cap at R).
+#
+# Sources are generated once into WORKDIR/src from two real clips (a screen
+# recording and 4K camera footage), stored as Ut Video (lossless, ~250 fps 4K
+# decode) so the source never bottlenecks the encoder. The generation is
+# deterministic; MANIFEST.tsv holds a hash of the decoded frames so runs on
+# different boots can be checked to have used identical input. The CPU cost of
+# decoding the source is measured once per run and subtracted ("net CPU").
+#
+# Safety: one run at a time (flock), tests strictly sequential, `timeout` on
+# every ffmpeg, and a watcher that kills the running test and stops the whole
+# run at the first "ring ... timeout" / GPU hang in the kernel log.
+#
+# Results: a table on stdout and WORKDIR/results/video-bench_<device>_<stamp>.tsv
+#
+set -u -o pipefail
+
+# ---------------------------------------------------------------- arguments ---
+DEVICE="" QUICK=0 FORCE=0
+WORKDIR="${VIDEO_BENCH_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/video-bench}"
+SCREEN_CLIP="${VIDEO_BENCH_SCREEN_CLIP:-/path/to/screen-recording.mp4}"
+CAMERA_CLIP="${VIDEO_BENCH_CAMERA_CLIP:-/path/to/camera-4k-b.mp4}"
+TO_GPU="${VIDEO_BENCH_TIMEOUT_GPU:-300}"   # per ffmpeg call, GPU tests
+TO_CPU="${VIDEO_BENCH_TIMEOUT_CPU:-1200}"  # per ffmpeg call, CPU encodes / source generation / scoring
+
+usage() { sed -n '3,33p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
+while (($#)); do
+  case $1 in
+    --device) DEVICE=${2:-}; shift 2 ;;
+    --device=*) DEVICE=${1#*=}; shift ;;
+    --quick) QUICK=1; shift ;;
+    --workdir) WORKDIR=${2:-}; shift 2 ;;
+    --workdir=*) WORKDIR=${1#*=}; shift ;;
+    --force) FORCE=1; shift ;;
+    -h|--help) usage 0 ;;
+    *) echo "unknown argument: $1" >&2; usage 1 ;;
+  esac
+done
+[[ $DEVICE =~ ^(amd|intel|cpu)$ ]] || { echo "--device amd|intel|cpu is required" >&2; usage 1; }
+
+die() { echo "video-bench: $*" >&2; exit 1; }
+for t in ffmpeg ffprobe timeout flock awk python3; do command -v "$t" >/dev/null || die "missing tool: $t"; done
+NCPU=$(nproc)
+
+# ---------------------------------------------------------- device resolution ---
+NODE="" PDEV="" DRV="" POWER_MODE=none POWER_FILE=""
+find_node() {   # <kernel driver name> -> /dev/dri/renderDNNN (first match)
+  local r
+  for r in /sys/class/drm/renderD*; do
+    [[ -e $r/device/driver ]] || continue
+    if [[ $(basename "$(readlink -f "$r/device/driver")") == "$1" ]]; then
+      echo "/dev/dri/${r##*/}"; return 0
+    fi
+  done
+  return 1
+}
+case $DEVICE in
+  amd)   DRV=amdgpu ;;
+  intel) DRV=i915 ;;
+esac
+if [[ -n $DRV ]]; then
+  NODE=$(find_node "$DRV") || die "no render node bound to $DRV (ls /sys/class/drm/renderD*/device/driver)"
+  [[ -r $NODE && -w $NODE ]] || die "$NODE is not accessible to $(id -un)"
+  SYSDEV=$(readlink -f "/sys/class/drm/${NODE##*/}/device")
+  PDEV=${SYSDEV##*/}
+fi
+
+# Power: amdgpu hwmon (world-readable), else RAPL energy counters (root-only on
+# most systems; then "n/a"). intel: RAPL uncore domain (= iGPU on client parts).
+pick_power() {
+  local f d
+  if [[ $DEVICE == amd ]]; then
+    for f in "$SYSDEV"/hwmon/hwmon*/power1_average "$SYSDEV"/hwmon/hwmon*/power1_input; do
+      [[ -r $f ]] && { read -r _ < "$f"; } 2>/dev/null && { POWER_MODE=hwmon; POWER_FILE=$f; return; }
+    done
+  else
+    for d in /sys/class/powercap/intel-rapl:0*; do
+      [[ -r $d/name ]] || continue
+      if { [[ $DEVICE == intel && $(<"$d/name") == uncore ]] || [[ $DEVICE == cpu && $(<"$d/name") == package-0 ]]; } \
+         && { read -r _ < "$d/energy_uj"; } 2>/dev/null; then
+        POWER_MODE=rapl; POWER_FILE=$d/energy_uj; return
+      fi
+    done
+  fi
+}
+pick_power
+# amdgpu: which DPM levels the engine/memory clocks reach during each run
+CLK_S="" CLK_M=""
+if [[ $DEVICE == amd && -r $SYSDEV/pp_dpm_sclk && -r $SYSDEV/pp_dpm_mclk ]]; then CLK_S=$SYSDEV/pp_dpm_sclk CLK_M=$SYSDEV/pp_dpm_mclk; fi
+clk_now() { sed -n 's/^[0-9]*: *\([0-9]*\)[MmHhZz]* *\*.*/\1/p' "$1" | head -1; }
+
+# --------------------------------------------------------------- work dirs ---
+STAMP=$(date +%Y%m%d-%H%M%S)
+SRC="$WORKDIR/src"; OUT="$WORKDIR/out/$DEVICE-$STAMP"; RES="$WORKDIR/results"
+mkdir -p "$SRC" "$OUT" "$RES" || die "cannot create $WORKDIR"
+TSV="$RES/video-bench_${DEVICE}_${STAMP}.tsv"
+
+exec 9>"${XDG_RUNTIME_DIR:-/tmp}/video-bench.lock"
+flock -n 9 || die "another video-bench run holds the lock — not running two at once"
+
+# ------------------------------------------------------------ kernel watch ---
+CUR=$(journalctl -k -n0 --show-cursor -q --no-pager 2>/dev/null | sed -n 's/^-- cursor: //p')
+HANG_RE='ring [[:alnum:]_.]+ timeout|GPU HANG|GPU reset begin|gpu hang'
+klog() { [[ -n $CUR ]] && journalctl -k --after-cursor="$CUR" -q --no-pager 2>/dev/null; }
+hung() { [[ $DEVICE != cpu ]] && klog | grep -qE "$HANG_RE"; }
+[[ -n $CUR ]] || echo "warning: cannot read the kernel journal — hang watch disabled (timeouts still apply)"
+
+# ------------------------------------------------------- GPU client activity ---
+# Snapshot of DRM engine busy-time counters (ns) of every client on our device.
+drm_snap() {
+  [[ -n $PDEV ]] || return 0
+  grep -sH -E '^drm-(pdev|client-id|engine-[a-z0-9_-]+):' /proc/[0-9]*/fdinfo/* 2>/dev/null |
+  awk -v pdev="$PDEV" '
+    { i = index($0, ":drm-"); path = substr($0, 1, i - 1); rest = substr($0, i + 1)
+      k = rest; sub(/:.*/, "", k); v = rest; sub(/^[^:]*:[ \t]*/, "", v)
+      if (k == "drm-pdev") pd[path] = v
+      else if (k == "drm-client-id") cl[path] = v
+      else if (k ~ /^drm-engine-/ && k !~ /capacity/ && v ~ / ns$/) {
+        e = k; sub(/^drm-engine-/, "", e); sub(/ ns$/, "", v)
+        split(path, pp, "/"); pid[path] = pp[3]; eng[path, e] = v; engs[e] = 1 } }
+    END { for (p in pid) if (pd[p] == pdev) for (e in engs) if ((p, e) in eng) {
+            key = cl[p] "|" e; if (!(key in seen)) { seen[key] = 1; print cl[p], pid[p], e, eng[p, e] } } }'
+}
+# <before-file> <after-file> <seconds> -> "pid comm engine busy%" for clients seen in both
+drm_delta() {
+  awk -v dt="$3" 'NR == FNR { b[$1 "|" $3] = $4; next }
+    ($1 "|" $3) in b { d = ($4 - b[$1 "|" $3]) / (dt * 1e9) * 100; if (d > 0.05) printf "%s %s %.1f\n", $2, $3, d }' "$1" "$2" |
+  while read -r p e d; do echo "$p $(tr " " _ < /proc/"$p"/comm 2>/dev/null || echo '?') $e $d"; done
+}
+# sum of busy% over engines matching a regex
+drm_sum() { awk -v re="$1" '$3 ~ re { s += $4 } END { printf "%.1f", s + 0 }'; }
+MEDIA_RE='enc|dec|video|vcn|uvd|vce|jpeg'
+GFX_RE='gfx|render|compute'
+
+# ----------------------------------------------------------- run one ffmpeg ---
+# run_ff <timeout> <log> <ffmpeg args...>
+# Sets: R_RC R_FRAMES R_UTIME R_STIME R_RTIME R_SYSCPU R_POWER R_BGMEDIA R_BGGFX R_HUNG R_CLK
+cpu_stat() { awk '/^cpu /{ t = 0; for (i = 2; i <= NF; i++) t += $i; print $5 + $6, t; exit }' /proc/stat; }
+run_ff() {
+  local to=$1 log=$2; shift 2
+  local snap0="$OUT/.snap0" snap1="$OUT/.snap1" i=0 psum=0 pn=0 e0="" e1="" t0 t1 idle0 tot0 idle1 tot1 pid
+  R_HUNG=0 R_POWER="n/a" R_BGMEDIA="n/a" R_BGGFX="n/a" R_CLK=""
+  local smax=0 mmax=0 mmin=999999 c
+  drm_snap > "$snap0"
+  read -r idle0 tot0 < <(cpu_stat)
+  [[ $POWER_MODE == rapl ]] && read -r e0 < "$POWER_FILE"
+  t0=$(date +%s.%N)
+  timeout --kill-after=10 "$to" ffmpeg -nostdin -hide_banner -benchmark "$@" > "$log" 2>&1 &
+  pid=$!
+  while kill -0 "$pid" 2>/dev/null; do
+    sleep 0.5
+    if [[ $POWER_MODE == hwmon ]]; then local p; read -r p < "$POWER_FILE" && { psum=$((psum + p)); pn=$((pn + 1)); }; fi
+    if [[ -n $CLK_S ]]; then
+      c=$(clk_now "$CLK_S"); [[ -n $c ]] && ((c > smax)) && smax=$c
+      c=$(clk_now "$CLK_M"); [[ -n $c ]] && { ((c > mmax)) && mmax=$c; ((c < mmin)) && mmin=$c; }
+    fi
+    if (( ++i % 4 == 0 )) && hung; then R_HUNG=1; kill -TERM "$pid" 2>/dev/null; fi
+  done
+  wait "$pid"; R_RC=$?
+  t1=$(date +%s.%N)
+  read -r idle1 tot1 < <(cpu_stat)
+  [[ $POWER_MODE == rapl ]] && read -r e1 < "$POWER_FILE"
+  drm_snap > "$snap1"
+  hung && R_HUNG=1
+  [[ -n $CLK_S ]] && ((smax > 0)) && R_CLK="sclk<=${smax} mclk ${mmin}-${mmax} MHz"
+  [[ $POWER_MODE == hwmon ]] && ((pn > 0)) && R_POWER=$(awk -v s="$psum" -v n="$pn" 'BEGIN{printf "%.1f", s / n / 1e6}')
+  [[ $POWER_MODE == rapl && -n $e0 && -n $e1 ]] && R_POWER=$(awk -v a="$e0" -v b="$e1" -v x="$t0" -v y="$t1" 'BEGIN{ if (b >= a) printf "%.1f", (b - a) / 1e6 / (y - x); else print "n/a" }')
+  R_SYSCPU=$(awk -v a="$idle0" -v b="$tot0" -v c="$idle1" -v d="$tot1" 'BEGIN{ dt = d - b; printf "%.0f", (dt > 0 ? (1 - (c - a) / dt) * 100 : 0) }')
+  if [[ -n $PDEV ]]; then
+    local dl; dl=$(drm_delta "$snap0" "$snap1" "$(awk -v x="$t0" -v y="$t1" 'BEGIN{print y - x}')")
+    R_BGMEDIA=$(drm_sum "$MEDIA_RE" <<< "$dl"); R_BGGFX=$(drm_sum "$GFX_RE" <<< "$dl")
+  fi
+  local b; b=$(grep -a 'bench: utime' "$log" | tail -1)
+  R_UTIME=$(sed -n 's/.*utime=\([0-9.]*\)s.*/\1/p' <<< "$b"); R_STIME=$(sed -n 's/.*stime=\([0-9.]*\)s.*/\1/p' <<< "$b")
+  R_RTIME=$(sed -n 's/.*rtime=\([0-9.]*\)s.*/\1/p' <<< "$b")
+  R_FRAMES=$(tr '\r' '\n' < "$log" | grep -ao 'frame= *[0-9]*' | tail -1 | tr -dc 0-9)
+  : "${R_UTIME:=0}" "${R_STIME:=0}" "${R_RTIME:=0}" "${R_FRAMES:=0}"
+}
+
+abort_on_hang() {   # <test name>
+  ((R_HUNG)) || return 0
+  echo; echo "*** GPU ring timeout / hang during: $1 — stopping (results so far: $TSV) ***"
+  sleep 15; klog | grep -E "$HANG_RE|GPU reset|VRAM is lost|blocked for more than" | sed -E 's/^.*kernel: +/  /' | head -12
+  echo "# ABORTED: ring timeout during $1" >> "$TSV"
+  exit 2
+}
+
+# ---------------------------------------------------------- test sources ---
+# name  w h fps frames  clip  recipe
+declare -A SW SH SF SN
+SW[s1080p60]=1920 SH[s1080p60]=1080 SF[s1080p60]=60 SN[s1080p60]=1200
+SW[s1440p60]=2560 SH[s1440p60]=1440 SF[s1440p60]=60 SN[s1440p60]=1200
+SW[s2160p30]=3840 SH[s2160p30]=2160 SF[s2160p30]=30 SN[s2160p30]=600
+# The screen clip is 1920x1160 @30: take its busiest 40 s (from 240 s), crop the
+# middle 1080 rows and retime 30->60 fps (every frame kept: per-frame motion is
+# that of a 30 fps capture, i.e. harder than a real 60 fps one). The 1440p
+# source is the same frames, Lanczos-upscaled. The camera clip is 3840x2160 @25:
+# 600 frames from 60 s, retimed 25->30.
+src_recipe() {
+  case $1 in
+    s1080p60) echo "screen -ss 240 crop=1920:1080:0:40 retime->60 1200f" ;;
+    s1440p60) echo "screen -ss 240 crop=1920:1080:0:40 lanczos->2560x1440 retime->60 1200f" ;;
+    s2160p30) echo "camera -ss 60 retime->30 600f" ;;
+    d_h264)   echo "s2160p30 libx264 veryfast high 20M/30M" ;;
+    d_hevc)   echo "s2160p30 libx265 veryfast main 20M/30M" ;;
+    d_vp9)    echo "s2160p30 libvpx-vp9 realtime cpu-used=8 20M" ;;
+  esac
+}
+UT=(-pix_fmt yuv420p -c:v utvideo -pred left -slices 8 -f nut)
+gen_one() {   # <name> <file>
+  local n=$1 f=$2 tmp="$2.part.${2##*.}" rc
+  echo "  generating $n ($(src_recipe "$n")) ..."
+  case $n in
+    s1080p60) timeout "$TO_CPU" ffmpeg -nostdin -v error -ss 240 -i "$SCREEN_CLIP" -map 0:v:0 -an -sn -dn \
+                -vf 'crop=1920:1080:0:40,setpts=N/(60*TB)' -r 60 -frames:v 1200 "${UT[@]}" -y "$tmp" ;;
+    s1440p60) timeout "$TO_CPU" ffmpeg -nostdin -v error -ss 240 -i "$SCREEN_CLIP" -map 0:v:0 -an -sn -dn \
+                -vf 'crop=1920:1080:0:40,scale=2560:1440:flags=lanczos,setpts=N/(60*TB)' -r 60 -frames:v 1200 "${UT[@]}" -y "$tmp" ;;
+    s2160p30) timeout "$TO_CPU" ffmpeg -nostdin -v error -ss 60 -i "$CAMERA_CLIP" -map 0:v:0 -an -sn -dn \
+                -vf 'setpts=N/(30*TB)' -r 30 -frames:v 600 "${UT[@]}" -y "$tmp" ;;
+    d_h264)   timeout "$TO_CPU" ffmpeg -nostdin -v error -i "$SRC/s2160p30.nut" -c:v libx264 -preset veryfast -profile:v high \
+                -b:v 20M -maxrate 30M -bufsize 40M -g 60 -f matroska -y "$tmp" ;;
+    d_hevc)   timeout "$TO_CPU" ffmpeg -nostdin -v error -i "$SRC/s2160p30.nut" -c:v libx265 -preset veryfast -profile:v main \
+                -b:v 20M -maxrate 30M -bufsize 40M -g 60 -x265-params log-level=error -f matroska -y "$tmp" ;;
+    d_vp9)    timeout "$TO_CPU" ffmpeg -nostdin -v error -i "$SRC/s2160p30.nut" -c:v libvpx-vp9 -deadline realtime -cpu-used 8 \
+                -row-mt 1 -tile-columns 2 -threads "$NCPU" -b:v 20M -g 60 -f webm -y "$tmp" ;;
+  esac
+  rc=$?; ((rc == 0)) || { rm -f "$tmp"; die "source generation failed for $n (rc $rc)"; }
+  mv "$tmp" "$f"
+  local md5 frames
+  md5=$(ffmpeg -nostdin -v error -i "$f" -map 0:v:0 -f hash -hash md5 - 2>/dev/null | sed 's/^MD5=//')
+  frames=$(ffprobe -v error -select_streams v:0 -count_packets -show_entries stream=nb_read_packets -of csv=p=0 "$f")
+  printf '%s\t%s\t%s\t%s\t%s\n' "$n" "${f##*/}" "$frames" "$md5" "$(src_recipe "$n")" >> "$SRC/MANIFEST.tsv"
+}
+declare -A SRCFILE=(
+  [s1080p60]="$SRC/s1080p60.nut" [s1440p60]="$SRC/s1440p60.nut" [s2160p30]="$SRC/s2160p30.nut"
+  [d_h264]="$SRC/d_h264_2160p30.mkv" [d_hevc]="$SRC/d_hevc_2160p30.mkv" [d_vp9]="$SRC/d_vp9_2160p30.webm")
+ensure_sources() {
+  local n missing=()
+  for n in s1080p60 s1440p60 s2160p30 d_h264 d_hevc d_vp9; do [[ -s ${SRCFILE[$n]} ]] || missing+=("$n"); done
+  ((${#missing[@]})) || return 0
+  [[ -r $SCREEN_CLIP && -r $CAMERA_CLIP ]] || die "source clips not readable: $SCREEN_CLIP / $CAMERA_CLIP"
+  local avail; avail=$(df --output=avail -B1M "$SRC" | tail -1)
+  ((avail > 6000)) || die "only ${avail} MiB free in $SRC — need ~6 GB for the sources"
+  echo "Generating test sources in $SRC (${missing[*]}; one-time, deterministic):"
+  [[ -s $SRC/MANIFEST.tsv ]] || printf 'name\tfile\tframes\tframes_md5\trecipe\n' > "$SRC/MANIFEST.tsv"
+  for n in "${missing[@]}"; do sed -i "/^$n\t/d" "$SRC/MANIFEST.tsv"; gen_one "$n" "${SRCFILE[$n]}"; done
+}
+
+# ------------------------------------------------------------ metadata ---
+va_driver() {
+  [[ -n $NODE ]] || { echo "n/a"; return; }
+  ffmpeg -nostdin -hide_banner -v verbose -init_hw_device "vaapi=va:$NODE" -f lavfi -i nullsrc=s=64x64 -frames:v 1 -f null - 2>&1 |
+    sed -n 's/.*VAAPI driver: //p' | head -1
+}
+pkgver() { pacman -Q "$@" 2>/dev/null | tr '\n' ' '; }
+# (capture first: with pipefail, `ffmpeg | grep -q` fails when grep exits early and ffmpeg gets SIGPIPE)
+FF_FILTERS=$(ffmpeg -hide_banner -filters 2>/dev/null); FF_ENCODERS=$(ffmpeg -hide_banner -encoders 2>/dev/null)
+HAVE_VMAF=0; grep -qw libvmaf <<< "$FF_FILTERS" && HAVE_VMAF=1
+
+# ----------------------------------------------------------- quality ---
+# score <encoded file> <source name> <frames> -> Q_VMAF Q_PSNR Q_SSIM Q_MODEL
+score() {
+  local enc=$1 s=$2 n=$3 j="${1%.*}.quality.json" log="${1%.*}.quality.log"
+  local dur; dur=$(awk -v n="$n" -v f="${SF[$s]}" 'BEGIN{printf "%.4f", n / f}')
+  Q_VMAF="n/a" Q_PSNR="n/a" Q_SSIM="n/a" Q_MODEL="psnr+ssim"
+  if ((HAVE_VMAF)); then
+    Q_MODEL=vmaf_v0.6.1; ((SH[$s] >= 2160)) && Q_MODEL=vmaf_4k_v0.6.1
+    timeout "$TO_CPU" ffmpeg -nostdin -hide_banner -v error -i "$enc" -t "$dur" -i "${SRCFILE[$s]}" -lavfi \
+      "[0:v]setpts=PTS-STARTPTS[d];[1:v]setpts=PTS-STARTPTS[r];[d][r]libvmaf=model=version=$Q_MODEL:n_threads=$NCPU:shortest=1:feature=name=psnr|name=float_ssim:log_fmt=json:log_path=$j" \
+      -f null - > "$log" 2>&1 || return 1
+    read -r Q_VMAF Q_PSNR Q_SSIM < <(python3 -c 'import json,sys; m=json.load(open(sys.argv[1]))["pooled_metrics"]; print("%.2f %.2f %.5f" % (m["vmaf"]["mean"], m["psnr_y"]["mean"], m["float_ssim"]["mean"]))' "$j") || return 1
+  else
+    timeout "$TO_CPU" ffmpeg -nostdin -hide_banner -i "$enc" -t "$dur" -i "${SRCFILE[$s]}" -lavfi \
+      "[0:v]setpts=PTS-STARTPTS,split[d1][d2];[1:v]setpts=PTS-STARTPTS,split[r1][r2];[d1][r1]psnr=shortest=1;[d2][r2]ssim=shortest=1" \
+      -f null - > "$log" 2>&1 || return 1
+    Q_PSNR=$(sed -n 's/.*PSNR y:\([0-9.inf]*\).*/\1/p' "$log" | tail -1)
+    Q_SSIM=$(sed -n 's/.*SSIM Y:\([0-9.]*\).*/\1/p' "$log" | tail -1)
+  fi
+}
+
+# ------------------------------------------------------------- results ---
+COLS="device	test	kind	codec	encoder	preset	res	src_fps	target_kbps	frames	status	fps	x_realtime	proc_cpu_pct	net_cpu_pct	sys_cpu_pct	power_w	out_kbps	vmaf	psnr_y	ssim	quality_metric	bg_media_busy_pct	bg_gfx_busy_pct	wall_s	note"
+ROWS=()
+emit() {   # tab-separated row in COLS order
+  local IFS=$'\t'; local row="$*"
+  echo "$row" >> "$TSV"; ROWS+=("$row")
+}
+calc() { awk "BEGIN{ $1 }"; }
+declare -A BASE_CPU   # source decode CPU-seconds per frame
+
+measure_base() {   # <source name>
+  local s=$1 n=${SN[$1]}; ((QUICK)) && n=$((n / 4))
+  run_ff "$TO_CPU" "$OUT/base_$s.log" -i "${SRCFILE[$s]}" -frames:v "$n" -an -f null -
+  BASE_CPU[$s]=$(calc "printf \"%.6f\", ($R_UTIME + $R_STIME) / ($R_FRAMES > 0 ? $R_FRAMES : 1)")
+}
+
+# enc_test <id> <src> <kbps> <codec h264|hevc> <encoder> <preset|->
+enc_test() {
+  local id=$1 s=$2 kbps=$3 codec=$4 encoder=$5 preset=$6
+  local n=${SN[$s]} fps=${SF[$s]} res="${SW[$s]}x${SH[$s]}" tag="$id-$encoder${preset/#-/}"
+  ((QUICK)) && n=$((n / 4))
+  local f="$OUT/$tag.mkv" log="$OUT/$tag.log" to=$TO_GPU args=()
+  local rc_args=(-b:v "${kbps}k" -maxrate "${kbps}k" -bufsize "$((kbps * 2))k" -g $((fps * 2)))
+  case $encoder in
+    h264_vaapi) args=(-init_hw_device "vaapi=va:$NODE" -filter_hw_device va -i "${SRCFILE[$s]}" -frames:v "$n"
+                      -vf 'format=nv12,hwupload' -c:v h264_vaapi -profile:v high -rc_mode CBR "${rc_args[@]}") ;;
+    hevc_vaapi) args=(-init_hw_device "vaapi=va:$NODE" -filter_hw_device va -i "${SRCFILE[$s]}" -frames:v "$n"
+                      -vf 'format=nv12,hwupload' -c:v hevc_vaapi -profile:v main -rc_mode CBR "${rc_args[@]}") ;;
+    libx264)    to=$TO_CPU; args=(-i "${SRCFILE[$s]}" -frames:v "$n" -c:v libx264 -preset "$preset" -pix_fmt yuv420p "${rc_args[@]}") ;;
+    libx265)    to=$TO_CPU; args=(-i "${SRCFILE[$s]}" -frames:v "$n" -c:v libx265 -preset "$preset" -pix_fmt yuv420p "${rc_args[@]}" -x265-params log-level=error) ;;
+  esac
+  printf '  %-4s %-11s %-9s %s@%s %5s kb/s ... ' "$id" "$encoder" "${preset/#-/}" "$res" "$fps" "$kbps"
+  local w0=$SECONDS
+  run_ff "$to" "$log" "${args[@]}" -an -sn -dn -fps_mode passthrough -f matroska -y "$f"
+  abort_on_hang "$id $encoder $res"
+  local status=ok note="" fpsv="" xrt="" pcpu="" ncpu="" okbps=""
+  if ((R_RC != 0)) || [[ ! -s $f ]]; then
+    if ((R_RC == 124 || R_RC == 137)); then status=timeout
+    elif grep -qaE 'No usable encoding (profile|entrypoint)|not supported|Function not implemented|unsupported' "$log"; then status=unsupported
+    else status=failed; fi
+    note=$(grep -aiE 'error|fail|not supported|no usable' "$log" | grep -v '^bench' | tail -1 | tr '\t' ' ' | cut -c1-120)
+    echo "$status${note:+ ($note)}"
+    emit "$DEVICE" "$id" encode "$codec" "$encoder" "${preset/#-/}" "$res" "$fps" "$kbps" "$R_FRAMES" "$status" "" "" "" "" "$R_SYSCPU" "$R_POWER" "" "" "" "" "" "$R_BGMEDIA" "$R_BGGFX" "$((SECONDS - w0))" "$note"
+    return
+  fi
+  local got; got=$(ffprobe -v error -select_streams v:0 -count_packets -show_entries stream=nb_read_packets -of csv=p=0 "$f")
+  [[ $got == "$n" ]] || { status=frame-mismatch; note="encoded $got of $n frames"; }
+  fpsv=$(calc "printf \"%.1f\", $n / $R_RTIME")
+  xrt=$(calc "printf \"%.2f\", $n / $R_RTIME / $fps")
+  pcpu=$(calc "printf \"%.0f\", ($R_UTIME + $R_STIME) / $R_RTIME / $NCPU * 100")
+  ncpu=$(calc "v = ($R_UTIME + $R_STIME - ${BASE_CPU[$s]} * $n) / $R_RTIME / $NCPU * 100; printf \"%.0f\", (v < 0 ? 0 : v)")
+  okbps=$(calc "printf \"%.0f\", $(stat -c %s "$f") * 8 / ($n / $fps) / 1000")
+  local bf; bf=$(grep -aoE 'Driver does not support (B-frames|some wanted)[^.]*' "$log" | head -1)
+  [[ -n $bf ]] && note="${note:+$note; }$bf"
+  [[ -n $R_CLK ]] && note="${note:+$note; }$R_CLK"
+  printf '%6s fps  cpu %3s%% (net %3s%%)  %s W  ' "$fpsv" "$pcpu" "$ncpu" "$R_POWER"
+  if score "$f" "$s" "$n"; then :; else note="${note:+$note; }quality scoring failed"; fi
+  printf 'VMAF %s  PSNR %s  SSIM %s\n' "$Q_VMAF" "$Q_PSNR" "$Q_SSIM"
+  emit "$DEVICE" "$id" encode "$codec" "$encoder" "${preset/#-/}" "$res" "$fps" "$kbps" "$n" "$status" "$fpsv" "$xrt" "$pcpu" "$ncpu" "$R_SYSCPU" "$R_POWER" "$okbps" "$Q_VMAF" "$Q_PSNR" "$Q_SSIM" "$Q_MODEL" "$R_BGMEDIA" "$R_BGGFX" "$((SECONDS - w0))" "$note"
+  sleep 2   # let clocks/power settle before the next test
+}
+
+# dec_test <id> <codec> <sample name>
+dec_test() {
+  local id=$1 codec=$2 smp=$3 f=${SRCFILE[$3]} log="$OUT/$1-dec-$2.log" args=() to=$TO_GPU
+  local n=600; ((QUICK)) && n=150
+  if [[ $DEVICE == cpu ]]; then args=(-i "$f"); to=$TO_CPU
+  else args=(-hwaccel vaapi -hwaccel_device "$NODE" -hwaccel_output_format vaapi -i "$f"); fi
+  printf '  %-4s %-11s %-9s %s@%s decode ... ' "$id" "$codec" "" 3840x2160 30
+  local w0=$SECONDS status=ok note="" fpsv="" xrt="" pcpu=""
+  run_ff "$to" "$log" "${args[@]}" -frames:v "$n" -an -sn -dn -f null -
+  abort_on_hang "$id $codec decode"
+  if [[ $DEVICE != cpu ]] && grep -qaE 'No support for codec|Failed setup for format vaapi|hwaccel initialisation returned error|Failed to create decode' "$log"; then
+    status=unsupported; note=$(grep -aoE 'No support for codec[^.]*|Failed setup for format vaapi[^.]*' "$log" | head -1)
+  elif ((R_RC == 124 || R_RC == 137)); then status=timeout
+  elif ((R_RC != 0)); then status=failed; note=$(grep -aiE 'error|fail' "$log" | grep -v '^bench' | tail -1 | tr '\t' ' ' | cut -c1-120)
+  elif [[ $DEVICE != cpu ]] && ! grep -qa 'wrapped_avframe, vaapi' "$log"; then
+    status=unsupported; note="decoded in software (hwaccel not used)"
+  fi
+  if [[ $status == ok ]]; then
+    fpsv=$(calc "printf \"%.1f\", $R_FRAMES / $R_RTIME"); xrt=$(calc "printf \"%.2f\", $R_FRAMES / $R_RTIME / 30")
+    pcpu=$(calc "printf \"%.0f\", ($R_UTIME + $R_STIME) / $R_RTIME / $NCPU * 100")
+    printf '%6s fps  cpu %3s%%  %s W\n' "$fpsv" "$pcpu" "$R_POWER"
+  else
+    echo "$status${note:+ ($note)}"
+  fi
+  [[ -n $R_CLK && $status == ok ]] && note="${note:+$note; }$R_CLK"
+  local enc; case $DEVICE in cpu) enc="$codec (sw)" ;; *) enc="vaapi" ;; esac
+  emit "$DEVICE" "$id" decode "$codec" "$enc" "" 3840x2160 30 "" "$R_FRAMES" "$status" "$fpsv" "$xrt" "$pcpu" "$pcpu" "$R_SYSCPU" "$([[ $status == ok ]] && echo "$R_POWER")" "" "" "" "" "" "$R_BGMEDIA" "$R_BGGFX" "$((SECONDS - w0))" "$note"
+  sleep 2
+}
+
+# ===================================================================== main ===
+T_START=$SECONDS
+echo "video-bench --device $DEVICE$( ((QUICK)) && echo ' --quick')   workdir $WORKDIR"
+[[ -n $NODE ]] && echo "  node $NODE ($DRV, $PDEV)"
+ensure_sources
+
+# pre-flight: anything else using this GPU right now?
+BG_NOTE="n/a"
+if [[ -n $PDEV ]]; then
+  drm_snap > "$OUT/.pre0"; sleep 3; drm_snap > "$OUT/.pre1"
+  PRE=$(drm_delta "$OUT/.pre0" "$OUT/.pre1" 3)
+  BG_NOTE=$(awk '$4 >= 0.5 { printf "%s%s(%s) %s %s%%", sep, $2, $1, $3, $4; sep = ", " }' <<< "$PRE")
+  echo "  other GPU clients (3 s sample, >=0.5% busy): ${BG_NOTE:-none}"
+  # Another encoder on the same engine would corrupt the numbers and is the one
+  # thing the VCE hang history says never to do — refuse. (amdgpu: enc = VCE,
+  # enc_1 = UVD-encode; i915: video = VCS, shared by decode and encode.)
+  if awk '($3 ~ /^enc/ || $3 ~ /^video/) && $4 >= 1 { f = 1 } END { exit !f }' <<< "$PRE"; then
+    ((FORCE)) || die "another process is using the encode engine (above) — stop it or pass --force"
+    echo "  --force: continuing despite encode-engine activity"
+  fi
+fi
+read -r i0 t0 < <(cpu_stat); sleep 3; read -r i1 t1 < <(cpu_stat)
+L1=$(awk -v a="$i0" -v b="$t0" -v c="$i1" -v d="$t1" 'BEGIN{ printf "%.0f", (d > b ? (1 - (c - a) / (d - b)) * 100 : 0) }')
+echo "  system CPU busy before start (3 s sample, 100 = all cores): $L1%"
+[[ $DEVICE != cpu ]] || echo "  top CPU users now: $(ps -eo pcpu=,comm= --sort=-pcpu | head -4 | awk '{printf "%s %s%%  ", $2, $1}')"
+IDLE_W="n/a"
+if [[ $POWER_MODE == hwmon ]]; then
+  IDLE_W=$(for _ in 1 2 3 4 5 6; do cat "$POWER_FILE"; sleep 0.5; done | awk '{ s += $1 } END { printf "%.1f", s / NR / 1e6 }')
+fi
+echo "  power source: $POWER_MODE ${POWER_FILE:-(none readable — power reported as n/a)}  idle: $IDLE_W W"
+
+VA=$(va_driver)
+{
+  echo "# video-bench device=$DEVICE node=${NODE:-none} driver=${DRV:-none} pdev=${PDEV:-none} quick=$QUICK"
+  echo "# date=$(date -Is) host=$(hostname) kernel=$(uname -r) cpu=$(sed -n 's/^model name\s*: //p' /proc/cpuinfo | head -1) ncpu=$NCPU"
+  echo "# va_driver=${VA:-n/a}"
+  echo "# packages=$(pkgver mesa intel-media-driver libva-intel-driver libva ffmpeg x264 x265 libvpx)"
+  echo "# ffmpeg=$(ffmpeg -version | head -1)"
+  [[ $DEVICE == amd ]] && echo "# amdgpu_srcversion=$(cat /sys/module/amdgpu/srcversion 2>/dev/null)"
+  echo "# power=$POWER_MODE ${POWER_FILE} idle_w=$IDLE_W ; quality=$( ((HAVE_VMAF)) && echo 'libvmaf (vmaf_v0.6.1, 4K model at 2160p) + psnr_y + float_ssim' || echo 'psnr+ssim (no libvmaf)')"
+  echo "# preflight_other_gpu_clients=${BG_NOTE:-none} sys_cpu_busy_pre=$L1%"
+  echo "# cpu percentages: 100 = all $NCPU cores. net_cpu = proc_cpu minus the measured cost of decoding the Ut Video source."
+  sed 's/^/# source: /' "$SRC/MANIFEST.tsv"
+  echo "$COLS"
+} > "$TSV"
+
+echo "Measuring source-decode CPU baseline ..."
+for s in s1080p60 s1440p60 s2160p30; do measure_base "$s"; done
+
+echo "Encode tests:"
+if [[ $DEVICE == cpu ]]; then
+  enc_test e1 s1080p60 8000 h264 libx264 veryfast
+  ((QUICK)) || enc_test e1 s1080p60 8000 h264 libx264 medium
+  enc_test e2 s2160p30 20000 h264 libx264 veryfast
+  ((QUICK)) || enc_test e2 s2160p30 20000 h264 libx264 medium
+  if grep -qw libx265 <<< "$FF_ENCODERS"; then
+    enc_test e3 s1080p60 5000 hevc libx265 fast
+    enc_test e4 s2160p30 12000 hevc libx265 fast
+  else
+    echo "  e3/e4: libx265 not available in this ffmpeg — skipped"
+  fi
+  enc_test e5 s1440p60 12000 h264 libx264 veryfast
+else
+  enc_test e1 s1080p60 8000 h264 h264_vaapi -
+  enc_test e2 s2160p30 20000 h264 h264_vaapi -
+  enc_test e3 s1080p60 5000 hevc hevc_vaapi -
+  enc_test e4 s2160p30 12000 hevc hevc_vaapi -
+  enc_test e5 s1440p60 12000 h264 h264_vaapi -
+fi
+echo "Decode tests:"
+dec_test d1 h264 d_h264
+dec_test d2 hevc d_hevc
+dec_test d3 vp9 d_vp9
+
+ELAPSED=$((SECONDS - T_START))
+echo "# finished $(date -Is) elapsed_s=$ELAPSED" >> "$TSV"
+
+echo
+echo "Results — $DEVICE, $(uname -r), ${VA:-sw}, $(date +%F)"
+printf '%s\n' "${ROWS[@]}" | awk -F'\t' '
+  function d(x) { return x == "" ? "-" : x }
+  BEGIN { OFS = "\t"; print "test", "encoder", "preset", "res@fps", "target", "fps", "xRT", "cpu%", "net%", "W", "kb/s", "VMAF", "PSNR-Y", "SSIM", "bgMedia%", "status" }
+  { print $2, $5, d($6), $7 "@" $8, ($9 == "" ? "decode" : $9 / 1000 "M"), d($12), d($13), d($14), d($15), d($17), d($18), d($19), d($20), d($21), d($23), $11 }' |
+  column -t -s $'\t'
+printf '%s\n' "${ROWS[@]}" | awk -F'\t' '$26 != "" { printf "  %s %s: %s\n", $2, $5 ($6 == "" ? "" : " " $6), $26 }'
+echo
+echo "TSV: $TSV"
+echo "elapsed: $((ELAPSED / 60)) min $((ELAPSED % 60)) s"
