@@ -61,7 +61,7 @@ Straight about the gaps:
 - 💳 **SD / memory-card reader** — not working yet. The card is recognised, then every read fails at the data phase; **still being worked on** — cross-checking against macOS on the same machine to tell a driver quirk from a genuine hardware fault.
 - 🔆 **Auto-brightness** — the ambient-light sensor is present but not wired to the backlight.
 - 😴 **Suspend / sleep** — hard-hangs the machine (Apple firmware); masked off so nothing triggers it by accident.
-- 🎬 **Video encode (VCE)** — hangs the GPU on some transcodes; under investigation.
+- 🎬 **Video encode (VCE)** — hardware encode can hang the GPU (seen with some transcodes, and screen recording with the webcam on); under investigation.
 
 ---
 

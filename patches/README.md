@@ -46,47 +46,50 @@ install.
 
 ## The patch files
 
-Two forms of the same fix ship here; the installer builds the **lean pair** by
-default.
+The installer applies these in order to pristine kernel source:
 
-- **`imac5k-lean-core-7.2.x.patch`** — the mainline candidate: taprobane99's
-  mechanism reworked down to the panel-ID quirk, tile-peer wiring, `0x4F1` latch
-  pulse, slave AUX pre-detect, source-table revision, stream-enable latch, root
-  EDID re-read, deterministic genlock, the reboot handoff, and a fix so the
-  driver's own latch write is not mistaken for a hotplug (no self-inflicted
-  re-detects). Compiles clean and applies with zero rejects to pristine 7.1.9 and
-  7.2.2. Posted upstream in drm/amd#4455. With this alone the kernel exposes two
-  proper tiles and a tile-aware compositor (Mutter, KWin) stitches them.
-
+- **`imac5k-lean-core-7.2.x.patch`** — the mainline candidate: the panel-ID
+  quirk, tile-peer wiring, `0x4F1` latch pulse, slave AUX pre-detect,
+  source-table revision, stream-enable latch, root EDID re-read, deterministic
+  genlock, the reboot handoff, and a fix so the driver's own latch write is not
+  mistaken for a hotplug. Posted upstream in drm/amd#4455. With this alone the
+  kernel exposes two proper tiles and a tile-aware compositor (Mutter, KWin)
+  stitches them.
 - **`imac5k-stitch-layer-7.x.patch`** — erik2's single-display stitch
-  (`amdgpu.tiled_stitch`, slave tile marked non-desktop) as a layer **on top of**
-  the lean core, plus the two stitch-specific boot fixes (an early modeset before
-  Plymouth for a full-width disk-password prompt, and a settle-and-resync after
-  tiled commits). Needed only for compositors without tile support, i.e.
+  (`amdgpu.tiled_stitch`) on top of the core, plus its two boot fixes: an early
+  modeset so the disk-password prompt is full width, and a settle-and-resync
+  after tiled commits. Needed only for compositors without tile support, i.e.
   Hyprland. Upstream will not take this layer.
+- **`imac5k-stitch-hide-slave.patch`** — with the stitch on, the slave tile's
+  connector reports disconnected, so compositors and settings panels see one
+  display instead of offering the tile as a second output.
 
 ```bash
-patch -p1 < patches/imac5k-lean-core-7.2.x.patch     # core (+ genlock + reboot handoff)
-patch -p1 < patches/imac5k-stitch-layer-7.x.patch    # Hyprland stitch (+ early modeset, resync)
+patch -p1 < patches/imac5k-lean-core-7.2.x.patch
+patch -p1 < patches/imac5k-stitch-layer-7.x.patch
+patch -p1 < patches/imac5k-stitch-hide-slave.patch
 ```
 
-The older monolithic **`imac5k-amdgpu-7.2.2.patch`** plus the five `5k-*.patch`
-increments are the same feature set with the core-side debug logging left in.
-Select it with `IMAC5K_STACK=verbose sudo ../scripts/patch-imac5k-amdgpu.sh`.
+Audio is separate: **`cs8409-headset-capture.patch`** goes on top of the
+jackdanyell CS8409 driver (automatic mic switching, Apple EarPods buttons); the
+patcher's `audio` module applies it and DKMS-builds the result.
 
-## Booting a build from its own entry: `scripts/imac-alt-entry`
+## Trying a build without risking the working one
 
 ```bash
-sudo scripts/imac-alt-entry add  5K-lean path/to/amdgpu.ko   # new UKI + Limine entry
+sudo scripts/imac-test-entry stage <known-good-amdgpu.ko.zst>   # current UKI becomes "/Test - 5K boot fixes"
+sudo scripts/imac-test-entry promote                            # the test build becomes the default
+sudo scripts/imac-test-entry drop                               # remove the test entry
+sudo scripts/imac-alt-entry add <name> path/to/amdgpu.ko        # a named entry with its own UKI
 sudo scripts/imac-alt-entry list
-sudo scripts/imac-alt-entry drop 5K-lean
 ```
 
-Builds a separate UKI from a private copy of the running kernel's module tree, so
-`/usr/lib/modules`, the default UKI and any other entry are untouched. Refuses a
-module whose vermagic is not the running kernel, and verifies the module inside
-the built UKI is the one given. Test a new build here first — the default entry
-stays known-good.
+Install the new module, then `stage` it: the image you just built becomes the
+test entry and the known-good module goes back into the default, so the default
+never runs anything untested. `imac-alt-entry` builds a separate UKI from a
+private copy of the module tree instead, for entries that need their own
+cmdline (the backlight test). Both refuse a module whose vermagic is not the
+running kernel.
 
 ## The rules
 
@@ -112,8 +115,8 @@ stays known-good.
 
 ## Known-good configuration
 
-- Kernel 7.2.2 + this patch, `amdgpu.tiled_stitch=1`, Omarchy/Hyprland.
-- Result: genuine 5120×2880, both tiles HBR2×4, 10-bpc, `sync_enabled=1`, seamless
-  under motion, zero GPU faults.
+- Kernel 7.2.3 + this stack, `amdgpu.tiled_stitch=1`, Omarchy/Hyprland.
+- Result: genuine 5120×2880 as one display, both tiles HBR2×4, 10-bpc, genlocked,
+  seamless under motion, zero GPU faults.
 - Silicon limit, unrelated to this patch: YouTube 4K is CPU-decoded (Polaris has
   no VP9/AV1 hardware).
