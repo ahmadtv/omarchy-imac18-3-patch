@@ -35,6 +35,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/ahmadtv/omarchy-imac18-3/mai
 | 🔊 **Speakers & mic** | The CS8409 codec the kernel can't drive at all — now with working speakers and both the internal **and** headset mic, with **automatic switching** on plug/unplug just like macOS. |
 | 🎧 **Apple EarPods** | Fully supported. Plug them in and audio + mic follow the jack; unplug and it's back to internal — automatically. All three **inline buttons** work too: play/pause, volume up, volume down. |
 | 🎨 **True colour** | The wide-gamut **Display P3** panel mapped correctly, instead of the oversaturated mess of stock sRGB. |
+| 🎬 **Hardware video encode** | Screen recording and H.264 export on the Radeon's own encoder, without the GPU hang every Polaris card has had since kernel 7.1.6 (AMD's upstream fix, backported until the distro kernel carries it). And if the GPU ever does hang, it now resets and you are back at a fresh desktop in about five seconds instead of a frozen machine. |
 
 ## 🖥️ On the machine
 
@@ -61,7 +62,6 @@ Straight about the gaps:
 - 💳 **SD / memory-card reader** — not working yet. The card is recognised, then every read fails at the data phase; **still being worked on** — cross-checking against macOS on the same machine to tell a driver quirk from a genuine hardware fault.
 - 🔆 **Auto-brightness** — the ambient-light sensor is present but not wired to the backlight.
 - 😴 **Suspend / sleep** — hard-hangs the machine (Apple firmware); masked off so nothing triggers it by accident.
-- 🎬 **Video encode (VCE)** — hardware encode can still hang the GPU's encoder (some transcodes, screen recording with the webcam on); the cause is unknown. Since 2026-09-11 a hang is survivable: the GPU resets and you are back at a fresh desktop in about five seconds — open apps are lost, the machine is not. (Two driver fixes plus the `gpureset` module; both fixes are being sent upstream.)
 
 ---
 

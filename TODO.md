@@ -25,15 +25,21 @@ either (DPCD `0x701` reads `0x00`), so the control has to be the GPU's PWM.
 - **If it works:** move it into `KERNEL_CMDLINE[default]`, then wire the ambient
   light sensor to auto-brightness.
 
-## Video encode (VCE) hangs the GPU
+## Video encode (VCE) hangs the GPU -- FIXED 2026-09-11
 
 Hardware encode can hang the GPU: `ring vce0 timeout` → full reset → `VRAM is
 lost` → the session dies. Seen from an ffmpeg transcode and from
 `gpu-screen-recorder`; on 2026-09-11, **screen recording with the webcam on
 turned the screen pink and froze it**.
 
-- **Root cause found (2026-09-11 evening), fix built, not yet verified on this
-  machine:** a kernel regression, drm/amd#5595 (RX 580, same VCE firmware 53.26,
+- **Verified and promoted (2026-09-11 20:14):** with the fix (amdgpu 625040DB)
+  `scripts/vce-stress` ran 3 rounds on the Cursor clip and on each of the four
+  clips that hung it before -- 165 encode jobs, every variant including the
+  sw-decode + hwupload one that hung at 15:29, zero `vce0` timeouts. The same
+  harness hung on its 7th encode before the fix. Default entry now 625040DB;
+  the pre-fix module is kept as `amdgpu.ko.zst.known-good-B5E2105C` in the
+  build cache. Remaining: a real screen recording with the webcam on.
+- **Root cause (found 2026-09-11 evening):** a kernel regression, drm/amd#5595 (RX 580, same VCE firmware 53.26,
   same `signaled N, emitted N+1`; #5707, #5766, #5790 are duplicates). Since
   7.1.6, "always emit the job vm fence" (`bc639a9eadc7`) changed what the kernel
   writes on the VCE ring, and `vce_v3_0_ring_vm_funcs.align_mask = 0xf` pads
