@@ -296,13 +296,23 @@ tile panel, issue a second `drm_client_dev_hotplug()`. That takes the
 `dev->fb_helper` path, which *does* commit, so the peer tile stream is created
 during probe instead of whenever something else happens to trigger a modeset.
 
-### DP-1 phantom output (cosmetic, low priority)
+### Fixed 2026-09-11: DP-1 listed as a second display
 
-`hyprctl` lists DP-1 as a disabled connector. It is functionally correct — the
-kernel drives the panel over both links (`master_link[1]`) and the stitch depends
-on it. **Do not disable it from the compositor**; that risks the fused output.
-Clean fix is patch-level: mark the slave connector `non-desktop` so compositors
-ignore it without powering it down.
+With the stitch on, the slave tile's connector was marked `non-desktop` but
+still read `connected`. Hyprland listed a disabled `DP-1` and reserved crtc 75
+for it, and Omarchy's display panel showed a **DISPLAYS** section whose `DP-1`
+row runs `hyprctl keyword monitor DP-1,preferred,auto,auto` -- one click from
+enabling the tile as a second output underneath the stitched one.
+
+`patches/imac5k-stitch-hide-slave.patch` reports the slave disconnected from
+`amdgpu_dm_connector_detect()` when the stitch is on. Its dc_link and sink are
+untouched, so the peer stream is unaffected; without `tiled_stitch` the tile is
+reported as usual for compositors that stitch the pair themselves. Verified on a
+test entry, two boots: `DP-1 disconnected`, Hyprland lists only eDP-1
+(5120x2880, 10-bit), the peer stream is added on every modeset (`has_sink=1`),
+no amdgpu/drm warnings, the panel's DISPLAYS section is gone, the centre seam is
+seamless under drag/scroll/video (owner's eyes), and a warm reboot out of it was
+clean.
 
 ## GPU video encode (VCE) hang
 

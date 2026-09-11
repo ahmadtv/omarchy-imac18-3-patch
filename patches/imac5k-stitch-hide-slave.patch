@@ -1,0 +1,33 @@
+iMac 5K stitch: report the slave tile's connector as disconnected
+
+With amdgpu.tiled_stitch=1 the slave tile is already marked non-desktop, but
+its connector still reads "connected", so compositors list it (Hyprland shows a
+disabled DP-1 and assigns it a crtc) and Omarchy's display panel offers a
+"DP-1" row whose click runs `hyprctl keyword monitor DP-1,preferred,...` --
+enabling the tile as a second output underneath the stitched one. The slave is
+part of the one panel; report it disconnected and every consumer sees exactly
+one display. dc_link/sink state is untouched, so the peer stream is unaffected.
+
+--- a/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.c
++++ b/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.c
+@@ -8691,6 +8691,20 @@
+ 	else if (aconnector->base.force == DRM_FORCE_OFF)
+ 		return connector_status_disconnected;
+ 
++	/*
++	 * Tiled stitch: the slave tile is part of the one stitched panel, not a
++	 * display of its own -- the root connector presents all 5120 columns
++	 * and this tile is driven as the root crtc's peer stream. Report it
++	 * disconnected so no compositor claims a crtc for it and no settings
++	 * panel offers to switch it on as a second output (non_desktop alone
++	 * still leaves it listed). The dc_link and its sink stay intact: the
++	 * peer stream, the boot re-probe and link recovery use those, not this
++	 * status. Without tiled_stitch the tile is reported as usual, for
++	 * compositors that stitch the pair themselves.
++	 */
++	if (amdgpu_dm_link_is_tiled_stitch_slave(aconnector->dc_link))
++		return connector_status_disconnected;
++
+ 	/* Poll analog connectors and only when either
+ 	 * disconnected or connected to an analog display.
+ 	 */

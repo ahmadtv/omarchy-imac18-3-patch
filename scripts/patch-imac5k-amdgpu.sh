@@ -36,7 +36,8 @@ IMAC5K_STACK="${IMAC5K_STACK:-lean}"
 case "$IMAC5K_STACK" in
 lean)
 	PATCH_FILE="${SCRIPT_DIR}/../patches/imac5k-lean-core-7.2.x.patch"
-	EXTRA_PATCHES=("${SCRIPT_DIR}/../patches/imac5k-stitch-layer-7.x.patch")
+	EXTRA_PATCHES=("${SCRIPT_DIR}/../patches/imac5k-stitch-layer-7.x.patch"
+		"${SCRIPT_DIR}/../patches/imac5k-stitch-hide-slave.patch")
 	;;
 verbose)
 	PATCH_FILE="${SCRIPT_DIR}/../patches/imac5k-amdgpu-7.2.2.patch"
