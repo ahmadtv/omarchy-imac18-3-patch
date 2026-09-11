@@ -32,6 +32,17 @@ lost` → the session dies. Seen from an ffmpeg transcode and from
 `gpu-screen-recorder`; on 2026-09-11, **screen recording with the webcam on
 turned the screen pink and froze it**.
 
+- **Reproduced 2026-09-11 on kernel 7.2.3 / Mesa 26.2.2** with Strata's exact
+  preview pipeline (from its 2026-09-04 core dump): `ffmpeg -hwaccel vaapi
+  -hwaccel_output_format vaapi -i <file> -t 30 -vf scale_vaapi=w=1280:h=1280:…
+  :format=nv12 -c:v h264_vaapi -b:v 2M …`. Two clips passed (a 10-bit HEVC
+  1080p, a 4K H.264); the third, a 4K H.264 Canon clip
+  (`camera-4k-b.mp4`), hung `vce0` and the GPU reset itself stuck in
+  `amdgpu_device_pre_asic_reset` — the same failure as 2026-09-04. Kernel log in
+  `evidence/vce-hang-2026-09-11/` (untracked). So it is not app-specific and not
+  fixed by the September updates: **keep apps on software video encode**
+  (Strata's `video_preview_backend = "software"`). Screen recording also encodes
+  on VCE (`gpu-screen-recorder -k auto`), so it carries the same risk.
 - **Ruled out:** macroblock alignment, sandboxing or app version, file
   corruption. Decoding the same file is fine. RADV has no Vulkan encode on
   Polaris, so VCE is the only encoder.
