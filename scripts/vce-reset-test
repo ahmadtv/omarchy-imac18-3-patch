@@ -30,8 +30,10 @@ while [[ ${1:-} == --* ]]; do
 done
 RECOVER=/sys/kernel/debug/dri/1/amdgpu_gpu_recover
 IBTEST=/sys/kernel/debug/dri/1/amdgpu_test_ib
-# The exact sequence that hung vce0 on 2026-09-11 (third clip), same order.
-CLIPS=("/path/to/clip-hevc10.mov"
+# First the confirmed reproducer (hung vce0 on 2026-09-01 and 09-02 through
+# Strata's preview pipeline), then the sequence that hung it on 2026-09-11.
+CLIPS=("/path/to/screen-recording.mp4"
+       "/path/to/clip-hevc10.mov"
        "/path/to/camera-4k-a.mp4"
        "/path/to/camera-4k-b.mp4"
        "/path/to/camera-4k-c.mp4")
