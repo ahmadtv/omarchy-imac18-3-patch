@@ -37,3 +37,33 @@ Known limits: Omarchy's screen recorder (gpu-screen-recorder) encodes on the
 GPU it captures from, so screen recording stays on the Radeon unless a
 cross-GPU path works; ffmpeg, Strata (via its ffmpeg) and Chromium can be
 pointed at the Intel node. Kaby Lake encodes up to 4K.
+
+## Routing video to the Intel chip: what already exists (researched 2026-09-11)
+
+There is no system-wide router on Linux: libva has no device-selection variable
+(requests intel/libva#221 from 2018 and #752 from 2023 are open, no code), and
+switcheroo / "launch on dedicated GPU" only set `DRI_PRIME`, which does not reach
+iHD. On Wayland libva opens the compositor's main device, so every client gets
+the Radeon unless the app picks a device itself. Existing building blocks:
+
+| Scope | Mechanism |
+|---|---|
+| All GStreamer apps | `GST_PLUGIN_FEATURE_RANK=varenderD129h264dec:MAX,...` (va plugin names extra devices after their render node) |
+| ffmpeg | `-init_hw_device vaapi=va:,kernel_driver=i915`; `h264_qsv` picks Intel on its own (needs intel-media-sdk) |
+| Chromium / Electron | `--hardware-video-device-path=/dev/dri/by-path/pci-0000:00:02.0-render` in `~/.config/chromium-flags.conf` / `electron*-flags.conf` |
+| Firefox | `MOZ_DRM_DEVICE=` |
+| mpv | `--hwdec=vaapi-copy --vaapi-device=...` (device option only applies to copy mode) |
+| OBS, Kdenlive | device setting in the encoder / render preset (Kdenlive's shipped "VAAPI Intel" preset assumes renderD128) |
+| Screen recording | OBS with its VAAPI device set to the Intel node (AMD captures and scales, only the output frame crosses); wf-recorder `-d` (CPU copy of full frames, fine at low res/fps); a GStreamer portal pipeline (zero CPU copy, needs a test that LINEAR dma-bufs cross from AMD to Intel) |
+
+Not routable today: gpu-screen-recorder (Omarchy's recorder; its FAQ says capture
+and encode must be on the same GPU, and it unsets `DRI_PRIME`), Strata's preview
+(tries render nodes in order inside a `--clearenv` sandbox, so AMD first).
+Playback caveat: decoding on Intel for an AMD-displayed player needs a frame copy
+(Firefox closed cross-GPU decode as WONTFIX). Kaby Lake H.264 tops out near 4096x2304,
+so 5K captures must be scaled before encoding on either chip.
+
+If per-app settings are not enough, the smallest thing to build is a VA driver
+shim on the nvidia-vaapi-driver model (`NVD_GPU`): selected with
+`LIBVA_DRIVER_NAME`, it opens the Intel node and hands off to `iHD_drv_video.so`.
+None exists yet.
