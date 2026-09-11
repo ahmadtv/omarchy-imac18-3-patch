@@ -43,7 +43,7 @@ for r in $(seq 1 "$ROUNDS"); do
   echo "--- round $r"
   run "strata-current (div16, 30s)"  "${HW[@]}" -i "$CLIP" -map 0:v:0 -map '0:a:0?' -sn -dn -t 30 -vf "$S16" "${ENC[@]}" -c:a aac -b:a 96k -movflags +frag_keyframe+empty_moov -f mp4
   run "strata-sep1 (div2, 30s)"      "${HW[@]}" -i "$CLIP" -map 0:v:0 -map '0:a:0?' -sn -dn -t 30 -vf "$S2"  "${ENC[@]}" -c:a aac -b:a 96k -f mp4
-  run "no-scale 1920x1160 (30s)"     "${HW[@]}" -i "$CLIP" -map 0:v:0 -an -t 30 -vf 'format=nv12|vaapi,hwupload' "${ENC[@]}" -f mp4
+  run "no-scale, native size (30s)"     "${HW[@]}" -i "$CLIP" -map 0:v:0 -an -t 30 -vf 'scale_vaapi=format=nv12' "${ENC[@]}" -f mp4
   run "long (120s, div16)"           "${HW[@]}" -i "$CLIP" -map 0:v:0 -an -t 120 -vf "$S16" "${ENC[@]}" -f mp4
   run "high bitrate 8M (30s)"        "${HW[@]}" -i "$CLIP" -map 0:v:0 -an -t 30 -vf "$S16" -c:v h264_vaapi -b:v 8M -maxrate 10M -bufsize 16M -f mp4
   run "cqp quality (30s)"            "${HW[@]}" -i "$CLIP" -map 0:v:0 -an -t 30 -vf "$S16" -c:v h264_vaapi -rc_mode CQP -qp 20 -f mp4

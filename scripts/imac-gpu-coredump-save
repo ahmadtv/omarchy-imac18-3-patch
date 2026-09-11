@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+#
+# imac-gpu-coredump-save -- keep the amdgpu devcoredump of a GPU hang.
+#
+# The kernel writes a coredump (hung ring, the hung job's command buffer, VM
+# fault info, firmware versions) at every ring timeout, readable only by root
+# and expiring after a few minutes. This copies it to /var/lib/imac-gpu-coredumps
+# so a VCE hang can be analysed afterwards. Run by
+# configs/udev/89-imac-gpu-coredump.rules with the devcoredump devpath.
+set -u
+dir=/var/lib/imac-gpu-coredumps
+mkdir -p "$dir"; chmod 700 "$dir"
+src="/sys${1:?devpath}/data"
+out="$dir/$(date +%Y%m%d-%H%M%S)-${1##*/}.txt"
+cat "$src" > "$out" 2>/dev/null
+cp /proc/cmdline "$out.cmdline" 2>/dev/null
+logger -t imac-gpu-coredump "saved $(stat -c %s "$out" 2>/dev/null || echo 0) bytes to $out"

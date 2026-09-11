@@ -1,49 +1,83 @@
 #!/usr/bin/env bash
 #
-# vce-hangrate — how often does the VCE encoder hang on this machine, right now?
+# vce-hangrate -- how often does the VCE encoder hang on this machine, and does
+# a runtime setting change that?
 #
-# Runs one encode variant N times and reports hangs/N, resetting the GPU as it
-# goes (the reset stack makes that survivable). Meant to be run OUTSIDE the
-# graphical session (a hang restarts the login manager), as a system unit:
+# Runs one encode variant N times and counts hangs, resetting the GPU as it
+# goes (the reset stack makes that survivable). A hang restarts the login
+# manager, so run it OUTSIDE the graphical session, as a system unit:
 #
 #   sudo systemd-run --unit=vce-hangrate --collect \
 #        -p StandardOutput=file:/var/tmp/vce-hangrate.log -p StandardError=inherit \
-#        -E N=20 -E VARIANT=encode-only /home/ahmad/Projects/omarchy-imac18-3/scripts/vce-hangrate
+#        -E N=40 -E CONDS="default aspm-off" \
+#        /home/ahmad/Projects/omarchy-imac18-3/scripts/vce-hangrate
 #
-# VARIANT: encode-only (software decode, GPU encode -- the variant that hung on
-#          2026-09-11 15:29), strata (Strata's preview pipeline: GPU decode,
-#          scale, encode), or gsr (gpu-screen-recorder-like settings).
-# Each run encodes 30 s of the clip; a run that hangs counts as a hang and the
-# harness waits for "GPU reset(N) succeeded!" before continuing.
+# VARIANT: encode-only (software decode, GPU encode -- hung 2026-09-11 15:29),
+#          strata (GPU decode, scale, encode: Strata's preview pipeline), or
+#          gsr (gpu-screen-recorder-like settings).
+# CONDS:   runtime conditions cycled round-robin, one per run, so every
+#          condition sees the same machine state over time:
+#            default   firmware state (PCIe ASPM L1 on, DPM auto)
+#            aspm-off  PCIe ASPM off on the GPU link (both ends), via setpci
+#            dpm-high  power_dpm_force_performance_level=high (clocks pinned)
+#          A GPU reset restores PCI config space, so the condition is
+#          re-applied before every run. Everything is restored on exit.
 set -u
 CLIP="${CLIP:-/path/to/screen-recording.mp4}"
-N="${N:-20}"; VARIANT="${VARIANT:-encode-only}"
+N="${N:-20}"; VARIANT="${VARIANT:-encode-only}"; read -ra CL <<<"${CONDS:-default}"
 [[ -f $CLIP ]] || { echo "no such clip: $CLIP"; exit 1; }
-OUT=$(mktemp /tmp/vce-hangrate.XXXXXX.mp4); trap 'rm -f "$OUT"' EXIT
+[[ $EUID -eq 0 ]] || { echo "run as root (systemd-run, see header)"; exit 1; }
+GPU=0000:01:00.0; BRIDGE=$(basename "$(readlink -f /sys/bus/pci/devices/$GPU/..)")
+LEVEL=/sys/bus/pci/devices/$GPU/power_dpm_force_performance_level
+OUT=$(mktemp /tmp/vce-hangrate.XXXXXX.mp4)
+
+aspm() {   # on|off -- ASPM control bits of LnkCtl on the GPU link
+  if [[ $1 == off ]]; then   # downstream functions first, then the bridge
+    setpci -s ${GPU%.0}.1 CAP_EXP+0x10.w=0:3; setpci -s $GPU CAP_EXP+0x10.w=0:3; setpci -s $BRIDGE CAP_EXP+0x10.w=0:3
+  else                       # bridge first, then the device (firmware value: L1)
+    setpci -s $BRIDGE CAP_EXP+0x10.w=2:3; setpci -s $GPU CAP_EXP+0x10.w=2:3; setpci -s ${GPU%.0}.1 CAP_EXP+0x10.w=2:3
+  fi
+}
+apply() {  # <condition>
+  aspm on; echo auto > "$LEVEL"
+  case $1 in
+    default) ;;
+    aspm-off) aspm off ;;
+    dpm-high) echo high > "$LEVEL" ;;
+    *) echo "unknown condition $1"; exit 2 ;;
+  esac
+}
+state() { printf 'lnkctl=%s level=%s' "$(setpci -s $GPU CAP_EXP+0x10.w)" "$(cat "$LEVEL")"; }
+trap 'aspm on; echo auto > "$LEVEL"; rm -f "$OUT"' EXIT
+
 klog() { journalctl -k --after-cursor="$1" -q --no-pager 2>/dev/null; }
 HW=(-hwaccel vaapi -hwaccel_device /dev/dri/renderD128 -hwaccel_output_format vaapi)
 ENC=(-c:v h264_vaapi -fpsmax 30 -b:v 2M -maxrate 3M -bufsize 4M)
 S16='scale_vaapi=w=1280:h=1280:force_original_aspect_ratio=decrease:force_divisible_by=16:format=nv12'
 
-echo "vce-hangrate: $VARIANT x$N on $(basename "$CLIP"); amdgpu $(cat /sys/module/amdgpu/srcversion); cmdline extras: $(tr ' ' '\n' < /proc/cmdline | grep -E '^amdgpu\.(aspm|pg_mask|cg_mask|dpm|ppfeaturemask|lockup_timeout)=' | tr '\n' ' ')"
-hangs=0
+echo "vce-hangrate: $VARIANT x$N, conditions: ${CL[*]}, clip $(basename "$CLIP")"
+echo "  amdgpu $(cat /sys/module/amdgpu/srcversion); cmdline extras: $(tr ' ' '\n' < /proc/cmdline | grep -E '^amdgpu\.(aspm|pg_mask|cg_mask|dpm|ppfeaturemask|lockup_timeout)=' | tr '\n' ' ')"
+declare -A runs hangs
+for c in "${CL[@]}"; do runs[$c]=0; hangs[$c]=0; done
 for i in $(seq 1 "$N"); do
+  c=${CL[$(( (i-1) % ${#CL[@]} ))]}; apply "$c"
   cur=$(journalctl -k -n0 --show-cursor -q --no-pager 2>/dev/null | sed -n 's/^-- cursor: //p')
-  t0=$SECONDS
+  t0=$SECONDS; st=$(state)
   case $VARIANT in
     encode-only) timeout 120 ffmpeg -nostdin -v error -threads 1 -filter_threads 1 -i "$CLIP" -map 0:v:0 -an -t 30 -vf 'scale=1280:-2,format=nv12,hwupload' -vaapi_device /dev/dri/renderD128 "${ENC[@]}" -f mp4 -y "$OUT" 2>/dev/null ;;
     strata)      timeout 120 ffmpeg -nostdin -v error -threads 1 -filter_threads 1 "${HW[@]}" -i "$CLIP" -map 0:v:0 -map '0:a:0?' -sn -dn -t 30 -vf "$S16" "${ENC[@]}" -c:a aac -b:a 96k -movflags +frag_keyframe+empty_moov -f mp4 -y "$OUT" 2>/dev/null ;;
     gsr)         timeout 120 ffmpeg -nostdin -v error "${HW[@]}" -i "$CLIP" -map 0:v:0 -an -t 30 -vf "$S16,fps=60" -c:v h264_vaapi -profile:v high -bf 0 -g 120 -b:v 6M -f mp4 -y "$OUT" 2>/dev/null ;;
     *) echo "unknown VARIANT $VARIANT"; exit 2 ;;
   esac
-  rc=$?
+  rc=$?; runs[$c]=$(( ${runs[$c]} + 1 ))
   if klog "$cur" | grep -qE 'ring vce0 timeout'; then
-    hangs=$((hangs+1)); printf '%s  run %2d  HANG  (exit %s, %s s)\n' "$(date +%T)" "$i" "$rc" "$((SECONDS-t0))"
+    hangs[$c]=$(( ${hangs[$c]} + 1 ))
+    printf '%s  run %3d  %-9s HANG  (exit %s, %s s, %s)\n' "$(date +%T)" "$i" "$c" "$rc" "$((SECONDS-t0))" "$st"
     for w in $(seq 1 24); do klog "$cur" | grep -qE 'GPU reset\([0-9]+\) (succeeded|failed)' && break; sleep 5; done
-    klog "$cur" | grep -qE 'GPU reset\([0-9]+\) succeeded' || { echo "  reset did not complete — stopping"; break; }
-    sleep 5
+    klog "$cur" | grep -qE 'GPU reset\([0-9]+\) succeeded' || { echo "  reset did not complete -- stopping"; break; }
+    sleep 10
   else
-    printf '%s  run %2d  ok    (exit %s, %s s)\n' "$(date +%T)" "$i" "$rc" "$((SECONDS-t0))"
+    printf '%s  run %3d  %-9s ok    (exit %s, %s s, %s)\n' "$(date +%T)" "$i" "$c" "$rc" "$((SECONDS-t0))" "$st"
   fi
 done
-echo; echo "RESULT: $hangs hang(s) in $i run(s) of $VARIANT"
+echo; for c in "${CL[@]}"; do echo "RESULT $c: ${hangs[$c]} hang(s) in ${runs[$c]} run(s) of $VARIANT"; done
