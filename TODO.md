@@ -43,6 +43,17 @@ turned the screen pink and froze it**.
   fixed by the September updates: **keep apps on software video encode**
   (Strata's `video_preview_backend = "software"`). Screen recording also encodes
   on VCE (`gpu-screen-recorder -k auto`), so it carries the same risk.
+- **Why the reset freezes the machine instead of recovering:** the 2026-09-11
+  kernel log shows a deadlock. The reset worker (`drm_sched_job_timedout →
+  amdgpu_device_asic_reset → dm_suspend → amdgpu_dm_irq_suspend → __flush_work`)
+  waits for pending display IRQ work, while that work (`dm_irq_work_func →
+  handle_hpd_irq_helper`) is blocked on a mutex the kernel says the reset worker
+  holds. So a hotplug interrupt arriving mid-reset turns a recoverable VCE hang
+  (as on 09-01/09-02, which reset and only took the session down) into a frozen
+  machine. None of the imac5k patches change these functions, so this looks like
+  upstream reset locking; which link raised the hotplug is not logged — the 5K
+  slave tile dropping its HPD when the reset stops the streams is a guess to
+  check. Worth its own amd-gfx report with the two stacks.
 - **Ruled out:** macroblock alignment, sandboxing or app version, file
   corruption. Decoding the same file is fine. RADV has no Vulkan encode on
   Polaris, so VCE is the only encoder.
