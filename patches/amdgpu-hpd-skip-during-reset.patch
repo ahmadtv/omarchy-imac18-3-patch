@@ -1,0 +1,39 @@
+drm/amd/display: don't take dc_lock from HPD work during a GPU reset
+
+In the GPU reset path dm_suspend() takes dm->dc_lock and keeps it for
+the whole reset (dm_resume() drops it). From under that lock it calls
+amdgpu_dm_irq_suspend(), which flushes the pending HPD work. If an HPD
+interrupt landed just before -- amdgpu_dm_commit_zero_streams(), called
+a few lines earlier under the same lock, is one way to raise one -- the
+work item is blocked in handle_hpd_irq_helper() waiting for dc_lock,
+and flush_work() waits for the work item: the reset never finishes and
+the machine has to be power-cycled. dm_handle_hpd_rx_offload_work()
+already skips its dc_lock section when amdgpu_in_reset(); give the
+plain HPD handler the same check.
+
+Seen on an iMac18,3 (Polaris, kernel 7.2.3): a VCE ring timeout starts
+a reset, and the hung-task report shows kworker (amdgpu_device_asic_reset
+-> dm_suspend -> amdgpu_dm_irq_suspend -> __flush_work) waiting on
+kworker (dm_irq_work_func -> handle_hpd_irq_helper -> mutex_lock), the
+latter "blocked on a mutex likely owned by" the former.
+
+--- a/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.c	2026-09-11 13:06:11.596216898 +0300
++++ b/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.c	2026-09-11 13:06:11.608241282 +0300
+@@ -5201,6 +5201,17 @@
+ 		return;
+ 
+ 	/*
++	 * During a GPU reset dm_suspend() holds dc_lock for the whole reset
++	 * and, from under it, amdgpu_dm_irq_suspend() flushes the HPD work.
++	 * Taking dc_lock here would deadlock with that flush -- the reset
++	 * waits for this work, this work waits for the reset. Drop the
++	 * event, as dm_handle_hpd_rx_offload_work() already does; the sink
++	 * state is re-established when the display resumes after the reset.
++	 */
++	if (amdgpu_in_reset(adev))
++		return;
++
++	/*
+ 	 * In case of failure or MST no need to update connector status or notify the OS
+ 	 * since (for MST case) MST does this in its own context.
+ 	 */

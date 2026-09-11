@@ -43,7 +43,19 @@ turned the screen pink and froze it**.
   fixed by the September updates: **keep apps on software video encode**
   (Strata's `video_preview_backend = "software"`). Screen recording also encodes
   on VCE (`gpu-screen-recorder -k auto`), so it carries the same risk.
-- **Why the reset freezes the machine instead of recovering:** the 2026-09-11
+- **Deadlock fixed, recovery still broken (2026-09-11 13:38):**
+  `patches/amdgpu-hpd-skip-during-reset.patch` makes the HPD handler skip its
+  dc_lock section while a reset is in progress, as the HPD-RX handler already
+  does. Verified on a test entry with `scripts/vce-reset-test`: the encoder
+  hung, the reset completed in one second ("GPU reset succeeded"), no hung-task
+  reports. But the GPU never came back: `suspend of IP block <vce_v3_0> failed
+  -22` before the reset, the driver fell back to a PCI CONFIG reset, and after
+  resume the SMU stopped answering (`last message was failed ret is 0` every
+  4–5 s) until the journal ended 23 s later — power button again. The older
+  "successful" resets (08-30, 09-01) also lost the machine within seconds, so
+  a reset has never restored this GPU. Two problems: the deadlock (fixed, worth
+  upstream) and post-reset recovery on this Polaris (open, next).
+- **Why the reset used to freeze the machine outright:** the 2026-09-11
   kernel log shows a deadlock. The reset worker (`drm_sched_job_timedout →
   amdgpu_device_asic_reset → dm_suspend → amdgpu_dm_irq_suspend → __flush_work`)
   waits for pending display IRQ work, while that work (`dm_irq_work_func →
