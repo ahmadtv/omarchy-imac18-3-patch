@@ -11,6 +11,11 @@ set -u
 if ! systemctl is-active --quiet sddm.service; then
     echo "GPU reset: no login manager running, nothing to restart"; exit 0
 fi
+# The old session is showing whatever the reset left in video memory (pink
+# noise). The kernel repaints text consoles after a reset, so show a calm one
+# with a line of explanation while the login manager restarts, instead.
+chvt 2 2>/dev/null
+printf '\033[2J\033[H\n\n   GPU reset -- the graphics session was lost.\n   Restarting the desktop...\n' > /dev/tty2 2>/dev/null
 sleep 2   # let the driver finish re-initialising before the new session starts
 echo "GPU reset: restarting the login manager so the desktop comes back"
 exec systemctl restart sddm.service
