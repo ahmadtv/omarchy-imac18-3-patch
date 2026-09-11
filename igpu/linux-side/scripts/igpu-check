@@ -1,0 +1,82 @@
+#!/usr/bin/env bash
+# DRAFT — not installed.   Read-only status report for the headless HD 630.
+# Run as the desktop user; `sudo igpu-check` additionally shows i915 params,
+# DMC/DC-state counters and runtime-PM detail from debugfs. Changes nothing.
+set -u
+IGPU=/sys/bus/pci/devices/0000:00:02.0
+AMD=/sys/bus/pci/devices/0000:01:00.0
+hdr() { printf '\n== %s\n' "$*"; }
+drv() { basename "$(readlink -f "$1/driver" 2>/dev/null)" 2>/dev/null || echo none; }
+
+hdr "PCI / drivers"
+if [[ -e $IGPU ]]; then
+	echo "00:02.0 present, driver=$(drv $IGPU), boot_vga=$(cat $IGPU/boot_vga 2>/dev/null), runtime=$(cat $IGPU/power/runtime_status 2>/dev/null) ($(cat $IGPU/power/control 2>/dev/null))"
+else
+	echo "00:02.0 absent (iGPU hidden: default boot). Nothing else to check."
+fi
+echo "01:00.0 driver=$(drv $AMD), boot_vga=$(cat $AMD/boot_vga 2>/dev/null)  <- must stay 1"
+[[ -r /sys/firmware/efi/efivars ]] && for v in /sys/firmware/efi/efivars/ImacSetOsStatus-*; do
+	[[ -e $v ]] && echo "set_os loader: $(tail -c +5 "$v" | tr -d '\0')"
+done
+
+hdr "/dev/dri"
+ls -l /dev/dri /dev/dri/by-path 2>/dev/null
+for n in amd-card amd-render intel-card intel-render; do
+	printf '%-14s -> %s\n' "$n" "$(readlink /dev/dri/$n 2>/dev/null || echo MISSING)"
+done
+
+hdr "Connectors per card (the Intel card must have none)"
+for c in /sys/class/drm/card[0-9]; do
+	d=$(drv "$c/device")
+	printf '%s (%s): %s\n' "${c##*/}" "$d" "$(cd /sys/class/drm && ls -d "${c##*/}"-* 2>/dev/null | tr '\n' ' ')"
+done
+
+hdr "Compositor GPU pin"
+hp=$(pgrep -x Hyprland | head -1)
+[[ -n $hp ]] && tr '\0' '\n' < /proc/$hp/environ 2>/dev/null | grep -E '^(AQ_DRM_DEVICES|LIBVA_DRIVER_NAME)=' || echo "(no AQ_DRM_DEVICES / LIBVA_DRIVER_NAME in Hyprland's environment)"
+if [[ -e /dev/dri/intel-card ]] && command -v fuser >/dev/null; then
+	echo "processes holding the Intel card/render node:"
+	fuser -v /dev/dri/intel-card /dev/dri/intel-render 2>&1 | sed 's/^/  /'
+fi
+
+hdr "Kernel log (i915, DMC, GuC/HuC, VBT, HDA binding)"
+journalctl -k -b --no-pager 2>/dev/null | grep -E -i 'i915|kbl_|dmc|guc|huc|vbt|snd_hda_intel|hdaudio' | grep -v -i 'amdgpu' | tail -40
+
+hdr "Taint"
+t=$(cat /proc/sys/kernel/tainted); echo "tainted=$t, U-bit(6, unsafe module param e.g. enable_guc)=$(( (t >> 6) & 1 ))"
+
+hdr "ALSA / PipeWire"
+cat /proc/asound/cards
+for c in /proc/asound/card*/codec#*; do echo "$c: $(head -1 "$c")"; done
+command -v wpctl >/dev/null && wpctl status 2>/dev/null | sed -n '/Audio/,/Video/p' | grep -E 'Sinks|Sources|\*|[0-9]+\.' | head -20
+
+hdr "VA-API"
+if command -v vainfo >/dev/null; then
+	for n in intel-render amd-render; do
+		[[ -e /dev/dri/$n ]] || continue
+		echo "--- $n"
+		vainfo --display drm --device /dev/dri/$n 2>&1 | grep -E 'Driver version|VAProfile(H264|HEVC|VP9).*(EncSlice|VLD)' | head -14
+	done
+else
+	echo "vainfo missing (libva-utils)"
+fi
+
+hdr "GT idle"
+for c in /sys/class/drm/card[0-9]; do
+	[[ -r $c/gt/gt0/rc6_residency_ms ]] && echo "${c##*/} rc6_residency_ms=$(cat $c/gt/gt0/rc6_residency_ms) (should climb ~1000/s at idle)"
+done
+
+if [[ $EUID -eq 0 ]]; then
+	hdr "root-only: i915 params, DMC, runtime PM"
+	for p in disable_display vbt_firmware enable_dc enable_guc; do
+		f=/sys/module/i915/parameters/$p; [[ -r $f ]] && echo "i915.$p=$(cat $f)"
+	done
+	for p in probe_mask power_save; do echo "snd_hda_intel.$p=$(cat /sys/module/snd_hda_intel/parameters/$p 2>/dev/null)"; done
+	for d in /sys/kernel/debug/dri/*/; do
+		[[ -r $d/name ]] && grep -q i915 "$d/name" || continue
+		echo "--- $d"
+		cat "$d/i915_dmc_info" 2>/dev/null
+		grep -E 'Runtime power status|GPU idle' "$d/i915_runtime_pm_status" 2>/dev/null
+		cat "$d/gt0/uc/huc_info" 2>/dev/null | head -5
+	done
+fi

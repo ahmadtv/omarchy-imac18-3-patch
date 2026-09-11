@@ -1,0 +1,38 @@
+# DRAFT — not installed.   Target: /etc/udev/rules.d/61-imac-dri-names.rules
+#
+# Stable, colon-free names for the iMac18,3's two GPUs.
+#
+# cardN / renderDN numbers are handed out in probe order (drm_minor_alloc():
+# lowest free index). Today amdgpu is card1 + renderD128 because simpledrm holds
+# card0 while amdgpu allocates, then goes away. Once i915 binds the HD 630 later
+# in boot it most likely takes the freed card0 and renderD129 -- but "most
+# likely" is not something to hard-code anywhere. The by-path links are stable
+# but contain colons, which AQ_DRM_DEVICES uses as its list separator.
+#
+#   /dev/dri/amd-card     -> Radeon Pro 575 primary node   (compositor, KMS)
+#   /dev/dri/amd-render   -> Radeon Pro 575 render node    (everything by default)
+#   /dev/dri/intel-card   -> HD 630 primary node           (never a display)
+#   /dev/dri/intel-render -> HD 630 render node            (VA-API / Quick Sync)
+#
+# Keyed on the fixed PCI address AND the bound driver. udev matches KERNELS and
+# DRIVERS against the same parent (the PCI function), so an eGPU running amdgpu
+# on Thunderbolt could not steal amd-card. DEVTYPE=drm_minor skips connector
+# devices such as card1-DP-1 (which have no device node anyway).
+# The drm minor is registered from the driver's probe(), after the sysfs driver
+# link exists, so DRIVERS== already matches on the "add" event.
+#
+# Runs after 60-drm.rules (by-path links). Symlinks inherit the node's owner,
+# mode and uaccess ACLs; nothing here changes permissions.
+#
+# Apply without a reboot:  sudo udevadm control --reload && sudo udevadm trigger -s drm
+
+ACTION=="remove", GOTO="imac_dri_names_end"
+SUBSYSTEM!="drm", GOTO="imac_dri_names_end"
+ENV{DEVTYPE}!="drm_minor", GOTO="imac_dri_names_end"
+
+KERNEL=="card[0-9]*",    KERNELS=="0000:01:00.0", DRIVERS=="amdgpu", SYMLINK+="dri/amd-card"
+KERNEL=="renderD[0-9]*", KERNELS=="0000:01:00.0", DRIVERS=="amdgpu", SYMLINK+="dri/amd-render"
+KERNEL=="card[0-9]*",    KERNELS=="0000:00:02.0", DRIVERS=="i915",   SYMLINK+="dri/intel-card"
+KERNEL=="renderD[0-9]*", KERNELS=="0000:00:02.0", DRIVERS=="i915",   SYMLINK+="dri/intel-render"
+
+LABEL="imac_dri_names_end"
