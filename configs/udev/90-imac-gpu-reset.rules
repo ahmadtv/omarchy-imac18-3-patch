@@ -1,0 +1,5 @@
+# After amdgpu recovers the GPU from a hang it announces the reset on the card
+# device (WEDGED=none: recovered, nothing further for the driver to do). The
+# graphics session has lost its video memory by then and keeps drawing nothing,
+# so hand it to a one-shot service that brings the login screen back.
+ACTION=="change", SUBSYSTEM=="drm", KERNEL=="card[0-9]*", ENV{WEDGED}=="none", RUN+="/usr/bin/systemctl --no-block start imac-gpu-reset-recover.service"

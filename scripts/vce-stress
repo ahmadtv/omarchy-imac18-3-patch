@@ -1,0 +1,60 @@
+#!/usr/bin/env bash
+#
+# vce-stress — throw one video at the VCE encoder every way that has ever been
+# implicated in a hang, and stop at the first "ring vce0 timeout".
+#
+# Meant to run OUTSIDE the graphical session, because a hang now resets the GPU
+# and restarts the login manager (which kills every session process):
+#
+#   sudo systemd-run --unit=vce-stress --collect -p StandardOutput=file:/var/tmp/vce-stress.log \
+#        -p StandardError=inherit -E ROUNDS=3 /home/ahmad/Projects/omarchy-imac18-3/scripts/vce-stress "<clip>"
+#   tail -f /var/tmp/vce-stress.log
+#
+# Every variant is a real encode of up to 30 s (or more, where noted) of the
+# clip. The log names the variant that was running when the hang hit.
+set -u
+CLIP="${1:-/path/to/screen-recording.mp4}"
+ROUNDS="${ROUNDS:-3}"
+[[ -f $CLIP ]] || { echo "no such clip: $CLIP"; exit 1; }
+CUR=$(journalctl -k -n0 --show-cursor -q --no-pager 2>/dev/null | sed -n 's/^-- cursor: //p')
+klog() { journalctl -k --after-cursor="$CUR" -q --no-pager 2>/dev/null; }
+OUT=$(mktemp /tmp/vce-stress.XXXXXX.mp4); trap 'rm -f "$OUT" "$OUT.2"' EXIT
+HW=(-hwaccel vaapi -hwaccel_device /dev/dri/renderD128 -hwaccel_output_format vaapi)
+COMMON=(-nostdin -v error -threads 1 -filter_threads 1)
+
+run() {   # <name> <ffmpeg args...>
+  local name=$1; shift
+  printf '%s  %-34s ' "$(date +%T)" "$name"
+  local t0=$SECONDS
+  timeout 180 ffmpeg "${COMMON[@]}" "$@" -y "$OUT" 2>/dev/null; local rc=$?
+  echo "exit $rc  ($((SECONDS - t0)) s)"
+  if klog | grep -qE 'ring vce0 timeout'; then
+    echo; echo "*** vce0 HUNG during: $name ***"
+    sleep 20; klog | grep -E 'ring .* timeout|suspend of IP block|GPU reset|VRAM is lost|last message|blocked for more than' | sed -E 's/^.*kernel: +/  /' | head -12
+    exit 2
+  fi
+}
+S16='scale_vaapi=w=1280:h=1280:force_original_aspect_ratio=decrease:force_divisible_by=16:format=nv12'
+S2='scale_vaapi=w=1280:h=1280:force_original_aspect_ratio=decrease:force_divisible_by=2:format=nv12'
+ENC=(-c:v h264_vaapi -fpsmax 30 -b:v 2M -maxrate 3M -bufsize 4M)
+
+echo "vce-stress on $(basename "$CLIP"), amdgpu $(cat /sys/module/amdgpu/srcversion), $ROUNDS rounds"
+for r in $(seq 1 "$ROUNDS"); do
+  echo "--- round $r"
+  run "strata-current (div16, 30s)"  "${HW[@]}" -i "$CLIP" -map 0:v:0 -map '0:a:0?' -sn -dn -t 30 -vf "$S16" "${ENC[@]}" -c:a aac -b:a 96k -movflags +frag_keyframe+empty_moov -f mp4
+  run "strata-sep1 (div2, 30s)"      "${HW[@]}" -i "$CLIP" -map 0:v:0 -map '0:a:0?' -sn -dn -t 30 -vf "$S2"  "${ENC[@]}" -c:a aac -b:a 96k -f mp4
+  run "no-scale 1920x1160 (30s)"     "${HW[@]}" -i "$CLIP" -map 0:v:0 -an -t 30 -vf 'format=nv12|vaapi,hwupload' "${ENC[@]}" -f mp4
+  run "long (120s, div16)"           "${HW[@]}" -i "$CLIP" -map 0:v:0 -an -t 120 -vf "$S16" "${ENC[@]}" -f mp4
+  run "high bitrate 8M (30s)"        "${HW[@]}" -i "$CLIP" -map 0:v:0 -an -t 30 -vf "$S16" -c:v h264_vaapi -b:v 8M -maxrate 10M -bufsize 16M -f mp4
+  run "cqp quality (30s)"            "${HW[@]}" -i "$CLIP" -map 0:v:0 -an -t 30 -vf "$S16" -c:v h264_vaapi -rc_mode CQP -qp 20 -f mp4
+  run "gsr-like (high, bf0, 60fps)"  "${HW[@]}" -i "$CLIP" -map 0:v:0 -an -t 30 -vf "$S2,fps=60" -c:v h264_vaapi -profile:v high -bf 0 -g 120 -b:v 6M -f mp4
+  run "sw-decode + hwupload (30s)"   -i "$CLIP" -map 0:v:0 -an -t 30 -vf 'scale=1280:-2,format=nv12,hwupload' -vaapi_device /dev/dri/renderD128 "${ENC[@]}" -f mp4
+  run "hevc_vaapi (30s)"             "${HW[@]}" -i "$CLIP" -map 0:v:0 -an -t 30 -vf "$S16" -c:v hevc_vaapi -b:v 2M -f mp4
+  run "seek to middle (30s)"         "${HW[@]}" -ss 300 -i "$CLIP" -map 0:v:0 -an -t 30 -vf "$S16" "${ENC[@]}" -f mp4
+  printf '%s  %-34s ' "$(date +%T)" "two encodes at once (30s)"; t0=$SECONDS
+  timeout 180 ffmpeg "${COMMON[@]}" "${HW[@]}" -i "$CLIP" -map 0:v:0 -an -t 30 -vf "$S16" "${ENC[@]}" -f mp4 -y "$OUT" 2>/dev/null &
+  timeout 180 ffmpeg "${COMMON[@]}" "${HW[@]}" -ss 200 -i "$CLIP" -map 0:v:0 -an -t 30 -vf "$S2" "${ENC[@]}" -f mp4 -y "$OUT.2" 2>/dev/null; wait
+  echo "done  ($((SECONDS - t0)) s)"
+  if klog | grep -qE 'ring vce0 timeout'; then echo; echo "*** vce0 HUNG during: two encodes at once ***"; sleep 20; klog | grep -E 'ring .* timeout|GPU reset|VRAM is lost|blocked for more than' | sed -E 's/^.*kernel: +/  /' | head -8; exit 2; fi
+done
+echo; echo "NO HANG after $ROUNDS rounds ($(( ROUNDS * 11 )) encodes)"

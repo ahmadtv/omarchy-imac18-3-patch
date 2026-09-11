@@ -43,6 +43,13 @@ turned the screen pink and froze it**.
   fixed by the September updates: **keep apps on software video encode**
   (Strata's `video_preview_backend = "software"`). Screen recording also encodes
   on VCE (`gpu-screen-recorder -k auto`), so it carries the same risk.
+- **End to end, on a real hang (2026-09-11 15:29):** `scripts/vce-stress` ran
+  the confirmed reproducer (`/path/to/screen-recording.mp4`)
+  through eleven encode variants; the eighth — software decode, GPU encode
+  only — hung vce0. Reset completed in 0.7 s, the `gpureset` module restarted
+  the login manager, fresh desktop 5 s after the hang, no power button. Note
+  for the root cause: the variant that hung does no GPU decoding, so the
+  encoder is the faulty part, not decode or scaling. Still open: why VCE hangs.
 - **Recovery fixed (2026-09-11 14:27, test entry `B5E2105C`):** the dead GPU
   after a reset was the driver, not firmware. `amdgpu_vce_suspend()` returns
   -EINVAL while an encode session is open, which in a reset is always (the hung

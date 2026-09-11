@@ -61,7 +61,7 @@ Straight about the gaps:
 - 💳 **SD / memory-card reader** — not working yet. The card is recognised, then every read fails at the data phase; **still being worked on** — cross-checking against macOS on the same machine to tell a driver quirk from a genuine hardware fault.
 - 🔆 **Auto-brightness** — the ambient-light sensor is present but not wired to the backlight.
 - 😴 **Suspend / sleep** — hard-hangs the machine (Apple firmware); masked off so nothing triggers it by accident.
-- 🎬 **Video encode (VCE)** — hardware encode can hang the GPU (seen with some transcodes, and screen recording with the webcam on); under investigation.
+- 🎬 **Video encode (VCE)** — hardware encode can still hang the GPU's encoder (some transcodes, screen recording with the webcam on); the cause is unknown. Since 2026-09-11 a hang is survivable: the GPU resets and you are back at a fresh desktop in about five seconds — open apps are lost, the machine is not. (Two driver fixes plus the `gpureset` module; both fixes are being sent upstream.)
 
 ---
 

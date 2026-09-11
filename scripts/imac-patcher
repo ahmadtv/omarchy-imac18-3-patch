@@ -50,7 +50,7 @@ mkdir -p "$LOGDIR" "$CACHE"
 # they are the same on every machine. Those live in omarchy-tweaks, which
 # brings its own tool and its own bar widget. This is a one-time run per
 # machine, so it stays a terminal thing.
-MODULES=(audio color vram wifi suspend boot 5k)
+MODULES=(audio color vram wifi suspend gpureset boot 5k)
 
 HAVE_GUM=0; command -v gum >/dev/null && HAVE_GUM=1
 say()  { printf '\033[1;33m==>\033[0m %s\n' "$*"; }
@@ -339,6 +339,38 @@ mod_wifi_apply() {
 }
 mod_wifi_remove() {
     sudo rm -f "$WIFI_CONF"; say "removed — firmware handshake again after the next driver load"
+}
+
+# ═══════════════════════ module: gpureset ══════════════════════════════════
+# With the two reset patches in the 5K stack, a hung GPU (the VCE encoder,
+# mostly) resets and comes back instead of taking the machine down. The
+# session that was running has lost its video memory though, and Hyprland
+# keeps running blind: a black screen. The kernel announces the recovery on
+# the card device (drm uevent WEDGED=none); this reacts by restarting the
+# login manager, so a hang ends at a fresh desktop a few seconds later.
+GPURESET_RULE_SRC="${REPO_DIR}/configs/udev/90-imac-gpu-reset.rules"
+GPURESET_RULE="/etc/udev/rules.d/90-imac-gpu-reset.rules"
+GPURESET_UNIT_SRC="${REPO_DIR}/configs/systemd/imac-gpu-reset-recover.service"
+GPURESET_UNIT="/etc/systemd/system/imac-gpu-reset-recover.service"
+GPURESET_BIN_SRC="${SCRIPT_DIR}/imac-gpu-reset-recover"
+GPURESET_BIN="/usr/local/bin/imac-gpu-reset-recover"
+mod_gpureset_title() { echo "Desktop back after a GPU reset"; }
+mod_gpureset_tier()  { echo safe; }
+mod_gpureset_desc()  { echo "When the GPU hangs and resets (hardware video encode can do that), the running session is left drawing nothing. Restarts the login manager on the kernel's reset event, so you are back at a fresh desktop in seconds instead of reaching for the power button."; }
+mod_gpureset_detect() {
+    [[ -f $GPURESET_RULE && -f $GPURESET_UNIT && -x $GPURESET_BIN ]] && echo applied || echo not-applied
+}
+mod_gpureset_apply() {
+    sudo install -Dm644 "$GPURESET_RULE_SRC" "$GPURESET_RULE" || return 1
+    sudo install -Dm644 "$GPURESET_UNIT_SRC" "$GPURESET_UNIT" || return 1
+    sudo install -Dm755 "$GPURESET_BIN_SRC" "$GPURESET_BIN" || return 1
+    sudo udevadm control --reload && sudo systemctl daemon-reload
+    say "armed — a GPU reset now ends at the login screen, not a black screen"
+}
+mod_gpureset_remove() {
+    sudo rm -f "$GPURESET_RULE" "$GPURESET_UNIT" "$GPURESET_BIN"
+    sudo udevadm control --reload; sudo systemctl daemon-reload
+    say "removed — after a GPU reset the session is left as the driver leaves it"
 }
 
 # ═══════════════════════ module: suspend ═══════════════════════════════════

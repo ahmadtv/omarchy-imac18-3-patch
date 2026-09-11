@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+# Runs once per GPU reset (see configs/udev/90-imac-gpu-reset.rules).
+#
+# The reset succeeds now, but a compositor that was running loses every buffer
+# it owned ("VRAM is lost") and, on Hyprland, keeps running while drawing
+# nothing: a black screen with no way back except a reboot. Restarting the
+# login manager ends that session and starts a fresh one (autologin included),
+# which is a few seconds instead of a power cycle. Nothing to do when no
+# graphical session is up -- e.g. a reset provoked from a text console.
+set -u
+if ! systemctl is-active --quiet sddm.service; then
+    echo "GPU reset: no login manager running, nothing to restart"; exit 0
+fi
+sleep 2   # let the driver finish re-initialising before the new session starts
+echo "GPU reset: restarting the login manager so the desktop comes back"
+exec systemctl restart sddm.service

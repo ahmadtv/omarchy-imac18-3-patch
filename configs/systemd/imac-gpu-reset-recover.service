@@ -1,0 +1,7 @@
+[Unit]
+Description=Bring the login screen back after a GPU reset
+# Started by 90-imac-gpu-reset.rules on the drm WEDGED=none event.
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/imac-gpu-reset-recover
