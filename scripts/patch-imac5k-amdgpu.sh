@@ -34,7 +34,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PATCH_FILE="${SCRIPT_DIR}/../patches/imac5k-lean-core-7.2.x.patch"
 EXTRA_PATCHES=("${SCRIPT_DIR}/../patches/imac5k-stitch-layer-7.x.patch"
 	"${SCRIPT_DIR}/../patches/imac5k-stitch-hide-slave.patch"
-	"${SCRIPT_DIR}/../patches/amdgpu-hpd-skip-during-reset.patch")
+	"${SCRIPT_DIR}/../patches/amdgpu-hpd-skip-during-reset.patch"
+	"${SCRIPT_DIR}/../patches/amdgpu-vce-suspend-in-reset.patch")
 WORK="${IMAC5K_WORK:-/home/${SUDO_USER:-$USER}/.cache/kernel-5k-build}"
 RUNNING_KREL="$(uname -r)"                # e.g. 7.2.2-arch1-1
 

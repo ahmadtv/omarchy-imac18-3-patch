@@ -43,7 +43,21 @@ turned the screen pink and froze it**.
   fixed by the September updates: **keep apps on software video encode**
   (Strata's `video_preview_backend = "software"`). Screen recording also encodes
   on VCE (`gpu-screen-recorder -k auto`), so it carries the same risk.
-- **Deadlock fixed, recovery still broken (2026-09-11 13:38):**
+- **Recovery fixed (2026-09-11 14:27, test entry `B5E2105C`):** the dead GPU
+  after a reset was the driver, not firmware. `amdgpu_vce_suspend()` returns
+  -EINVAL while an encode session is open, which in a reset is always (the hung
+  job). That abort stopped the suspend of every block behind VCE, so after the
+  ASIC reset they still claimed to be up, were never re-initialised, and the
+  SMU firmware was never reloaded — hence "last message was failed". With
+  `patches/amdgpu-vce-suspend-in-reset.patch` (drop the dead sessions and let
+  the suspend go through) the on-demand reset (`vce-reset-test --trigger`),
+  the same with an encode session open (`--trigger-encoding`), and a third
+  run passed: "GPU reset(N) succeeded!", IB ring tests pass, SMU answering,
+  no hung tasks, clean reboot afterwards. A reset still costs the graphics
+  session (VRAM is lost by design); what happens to the desktop is the
+  remaining check. The four-clip hang sequence did not trip the encoder in
+  20 encodes that day — the hang is intermittent.
+- **Deadlock fixed first (2026-09-11 13:38):**
   `patches/amdgpu-hpd-skip-during-reset.patch` makes the HPD handler skip its
   dc_lock section while a reset is in progress, as the HPD-RX handler already
   does. Verified on a test entry with `scripts/vce-reset-test`: the encoder

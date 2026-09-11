@@ -1,21 +1,35 @@
 #!/usr/bin/env bash
 #
-# vce-reset-test — provoke a VCE encoder hang from a text console and report
-# whether the GPU reset completes, instead of freezing the machine.
+# vce-reset-test — make the GPU reset on purpose and report whether it recovers.
 #
 # Run from a TTY (Ctrl+Alt+F3) on the boot entry under test, never from the
-# desktop: the reset kills the graphics session by design ("VRAM is lost"), so
-# this first leaves the desktop (multi-user.target) and only then encodes.
+# desktop: a reset kills the graphics session by design ("VRAM is lost"), so
+# this first leaves the desktop (multi-user.target) and only then resets.
 #
-#   sudo scripts/vce-reset-test            # uses the clip known to hang vce0
-#   sudo scripts/vce-reset-test <video>
+#   sudo scripts/vce-reset-test --trigger            # reset on demand, GPU idle
+#   sudo scripts/vce-reset-test --trigger-encoding   # reset on demand while an
+#                                                    # encode session is open (the
+#                                                    # vce_v3_0 -22 case)
+#   sudo scripts/vce-reset-test                      # provoke a real vce0 hang
+#                                                    # (the 2026-09-11 clip sequence)
+#   --keep-desktop before any of them keeps Hyprland running (it will die).
 #
-# Pass:  "GPU reset succeeded" in the kernel log and the shell still answers.
-# Fail:  no "succeeded" within the wait, hung-task reports, or a dead box.
+# PASS: the reset completed, no hung task, no SMU "last message was failed",
+#       and the debugfs IB test passes afterwards.
 set -u
 # Under sudo $HOME is /root; the clips live in the invoking user's home.
 USER_HOME="$(getent passwd "${SUDO_USER:-$USER}" | cut -d: -f6)"
-KEEP_DESKTOP=0; [[ ${1:-} == --keep-desktop ]] && { KEEP_DESKTOP=1; shift; }
+KEEP_DESKTOP=0; MODE=hang
+while [[ ${1:-} == --* ]]; do
+  case "$1" in
+    --keep-desktop) KEEP_DESKTOP=1 ;;
+    --trigger) MODE=trigger ;;
+    --trigger-encoding) MODE=trigger-encoding ;;
+    *) echo "unknown option $1"; exit 2 ;;
+  esac; shift
+done
+RECOVER=/sys/kernel/debug/dri/1/amdgpu_gpu_recover
+IBTEST=/sys/kernel/debug/dri/1/amdgpu_test_ib
 # The exact sequence that hung vce0 on 2026-09-11 (third clip), same order.
 CLIPS=("/path/to/clip-hevc10.mov"
        "/path/to/camera-4k-a.mp4"
@@ -34,30 +48,52 @@ else say "leaving the desktop"; systemctl isolate multi-user.target; sleep 3; fi
 CUR=$(journalctl -k -n0 --show-cursor -q --no-pager 2>/dev/null | sed -n 's/^-- cursor: //p')
 OUT=$(mktemp /tmp/vce-test.XXXXXX.mp4)
 
-hung=0
-for r in $(seq 1 $ROUNDS); do
-  for c in "${CLIPS[@]}"; do
-    printf '  round %s  %-44s ' "$r" "$(basename "$c" | cut -c1-44)"
-    timeout 90 ffmpeg -nostdin -v error -max_alloc 536870912 -max_pixels 50000000 -threads 1 -filter_threads 1 \
-      -hwaccel vaapi -hwaccel_device /dev/dri/renderD128 -hwaccel_output_format vaapi \
-      -i "$c" -map 0:v:0 -map '0:a:0?' -sn -dn -t 30 \
-      -vf scale_vaapi=w=1280:h=1280:force_original_aspect_ratio=decrease:force_divisible_by=16:format=nv12 \
-      -c:v h264_vaapi -fpsmax 30 -b:v 2M -maxrate 3M -bufsize 4M -c:a aac -b:a 96k \
-      -movflags +frag_keyframe+empty_moov -f mp4 -y "$OUT" 2>/dev/null
-    rc=$?; echo "exit $rc"
-    if klog | grep -qE 'ring vce0 timeout'; then hung=1; break 2; fi
-  done
-done
+encode() {   # <clip> : Strata's exact preview pipeline
+  timeout 90 ffmpeg -nostdin -v error -max_alloc 536870912 -max_pixels 50000000 -threads 1 -filter_threads 1 \
+    -hwaccel vaapi -hwaccel_device /dev/dri/renderD128 -hwaccel_output_format vaapi \
+    -i "$1" -map 0:v:0 -map '0:a:0?' -sn -dn -t 30 \
+    -vf scale_vaapi=w=1280:h=1280:force_original_aspect_ratio=decrease:force_divisible_by=16:format=nv12 \
+    -c:v h264_vaapi -fpsmax 30 -b:v 2M -maxrate 3M -bufsize 4M -c:a aac -b:a 96k \
+    -movflags +frag_keyframe+empty_moov -f mp4 -y "$OUT" 2>/dev/null
+}
+
+reset_happened=0
+case $MODE in
+  hang)
+    for r in $(seq 1 $ROUNDS); do
+      for c in "${CLIPS[@]}"; do
+        printf '  round %s  %-44s ' "$r" "$(basename "$c" | cut -c1-44)"; encode "$c"; echo "exit $?"
+        if klog | grep -qE 'ring vce0 timeout'; then reset_happened=1; break 2; fi
+      done
+    done ;;
+  trigger|trigger-encoding)
+    [[ -r $RECOVER ]] || { say "no $RECOVER (debugfs missing?)"; exit 1; }
+    if [[ $MODE == trigger-encoding ]]; then
+      say "starting an encode session in the background (${CLIPS[0]##*/})"
+      ( while :; do encode "${CLIPS[0]}"; done ) & ENC=$!; sleep 4
+    fi
+    say "triggering a GPU reset via $RECOVER"
+    res=$(cat "$RECOVER" 2>&1); echo "  amdgpu_gpu_recover returned: ${res:-?}"
+    reset_happened=1
+    [[ -n ${ENC:-} ]] && { kill $ENC 2>/dev/null; pkill -x ffmpeg 2>/dev/null; wait $ENC 2>/dev/null; } ;;
+esac
 rm -f "$OUT"
 
-if (( hung )); then
-  say "vce0 hung — waiting up to 90 s for the reset to finish"
-  for i in $(seq 1 18); do klog | grep -qE 'GPU reset succeeded' && break; sleep 5; done
-  echo; klog | grep -E 'ring .* timeout|GPU reset|VRAM is lost|blocked for more than|succeeded|failed' | sed -E 's/^.*kernel: +/  /' | head -20; echo
-  if klog | grep -qE 'GPU reset succeeded' && ! klog | grep -q 'blocked for more than'; then
-    say "PASS: vce0 hung and the reset completed — the machine recovered"
-  else say "FAIL: vce0 hung and the reset did not complete"; fi
+if (( reset_happened )); then
+  say "waiting up to 90 s for the reset to finish, then 15 s for the SMU to settle"
+  for i in $(seq 1 18); do klog | grep -qE 'GPU reset\([0-9]+\) (succeeded|failed)|GPU reset succeeded' && break; sleep 5; done
+  sleep 15
+  ib="(no IB test file)"; [[ -r $IBTEST ]] && ib=$(timeout 30 cat "$IBTEST" 2>&1 | tail -3 | tr '\n' ' ')
+  echo; klog | grep -E 'ring .* timeout|suspend of IP block|GPU reset|GPU pre asic|VRAM is lost|resume of IP block|blocked for more than|last message was failed|ring .* test failed|ib (ring )?test' | sed -E 's/^.*kernel: +/  /' | head -24
+  echo "  IB test: $ib"; echo
+  L=$(klog)
+  if grep -q 'blocked for more than' <<<"$L"; then say "FAIL: hung task — the reset did not complete"
+  elif ! grep -qE 'GPU reset succeeded' <<<"$L"; then say "FAIL: no 'GPU reset succeeded' in the log"
+  elif grep -q 'last message was failed' <<<"$L"; then say "FAIL: reset completed but the SMU is not answering (GPU dead)"
+  elif grep -qE 'resume of IP block .* failed|GPU reset\([0-9]+\) failed' <<<"$L"; then say "FAIL: a block failed to resume after the reset"
+  elif grep -qiE 'fail' <<<"$ib"; then say "FAIL: reset completed but the IB test fails"
+  else say "PASS: the GPU reset and came back (SMU answering, IB test ok)"; fi
 else
-  say "NO HANG in $ROUNDS rounds of ${#CLIPS[@]} clips — try:  sudo $0 --keep-desktop"
+  say "NO HANG in $ROUNDS rounds of ${#CLIPS[@]} clips — try:  sudo $0 --trigger-encoding"
 fi
 say "reboot with:  systemctl reboot"

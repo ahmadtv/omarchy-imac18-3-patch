@@ -1,0 +1,49 @@
+drm/amdgpu: let VCE suspend during a GPU reset while sessions are open
+
+amdgpu_vce_suspend() returns -EINVAL when any encode session handle is
+open. In a GPU reset that is the normal state: the hung encode job is
+what triggered the reset. The error makes amdgpu_device_ip_suspend_phase2()
+unwind at the very first block it tries (VCE is last in the VI block
+list, so first in the reverse walk), leaving SMU, SDMA, GFX, GMC and IH
+with status.hw set. amdgpu_device_pre_asic_reset() reports the error
+but the ASIC reset goes ahead; afterwards every resume phase skips those
+blocks because they still claim to be up, so nothing re-initialises
+them and the SMU firmware is never reloaded. The GPU comes back dead:
+"GPU reset succeeded, trying to resume" followed only by
+"last message was failed ret is 0" every few seconds, on every reset
+this Polaris10 machine has had (five of them, kernels 7.1.9 and 7.2.3).
+
+During a reset the sessions cannot be preserved anyway -- the ASIC
+reset drops them and VRAM is lost -- so clear the handles and let the
+suspend succeed. UVD already suspends unconditionally.
+
+Seen on an iMac18,3 (Radeon Pro 575, POLARIS10, DCE 11.2), triggered by
+a VCE ring timeout under h264_vaapi encode.
+
+--- a/drivers/gpu/drm/amd/amdgpu/amdgpu_vce.c	2026-09-11 13:50:59.311487670 +0300
++++ b/drivers/gpu/drm/amd/amdgpu/amdgpu_vce.c	2026-09-11 13:50:59.322594032 +0300
+@@ -314,6 +314,24 @@
+ 	if (i == AMDGPU_MAX_VCE_HANDLES)
+ 		return 0;
+ 
++	/*
++	 * In a GPU reset the open sessions are already lost -- a hung encode
++	 * job is usually what triggered the reset, and the ASIC reset drops
++	 * every session regardless. Refusing to suspend here makes
++	 * amdgpu_device_ip_suspend_phase2() unwind before it reaches the
++	 * blocks behind VCE (SMU, SDMA, GFX, GMC, IH), so after the reset
++	 * they still report hw=true, are never re-initialised, and the GPU
++	 * comes back without SMU firmware. Drop the handles and let the
++	 * suspend go through.
++	 */
++	if (amdgpu_in_reset(adev)) {
++		for (i = 0; i < AMDGPU_MAX_VCE_HANDLES; ++i) {
++			atomic_set(&adev->vce.handles[i], 0);
++			adev->vce.filp[i] = NULL;
++		}
++		return 0;
++	}
++
+ 	/* TODO: suspending running encoding sessions isn't supported */
+ 	return -EINVAL;
+ }
