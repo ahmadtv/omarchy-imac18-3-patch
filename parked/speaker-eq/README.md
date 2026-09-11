@@ -1,7 +1,8 @@
 # Speaker EQ — parked 2026-09-10
 
-Taken out of the patcher on 2026-09-10 at the owner's call: the speakers sound
-fine without it, and after that day's cold boot it had been silently off anyway.
+Taken out of the patcher on 2026-09-10 at the owner's call: the speakers seemed
+acceptable without it (not yet tested properly — see the listening tests in
+`TODO.md`), and after that day's cold boot it had been silently off anyway.
 Kept here, whole, to revisit.
 
 **What it was.** A native Omarchy speaker tuning for this machine (bass shelf,

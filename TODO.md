@@ -78,6 +78,28 @@ After that PipeWire's paths work unchanged and the panel can list every port.
 **Risk:** reconfiguring the playback path inside a jack event once produced a
 continuous tone on the headset output — budget a day with ear-testing.
 
+## Audio: listening tests (speakers not yet judged)
+
+The speakers sound acceptable without an EQ, but that is a first impression,
+not a test. Before deciding whether the 18,3 needs a tuning at all:
+
+1. **Compare against macOS on the same machine** (macOS boots from the external
+   drive): the same tracks at matched loudness, speakers only — bass, voices,
+   harshness at the top.
+2. **Map the four channels.** Switch the card to the Analog Surround 4.0 profile
+   and play a quiet test tone on each channel, to learn which feeds the tweeters
+   and which the woofers. Keep the level low: bass sent to a tweeter at volume
+   can damage it.
+3. **Find out what the stereo profile does** with those four drivers — whether
+   each side's woofer and tweeter both get the full-range signal.
+4. **Headphones and EarPods** — the same check on the jack.
+
+If a tuning turns out to be needed, measure it on this machine with a calibrated
+microphone. Other tunings (taprobane99's, bundled by Pronkin's patcher) were
+measured on an iMac17,1, whose codec and amplifiers differ (CS4206 on the stock
+driver, versus CS8409 + CS42L83 here), so they are a starting point at most.
+The parked module in `parked/speaker-eq/` is the other starting point.
+
 ## Audio: two small driver bugs
 
 - The driver leaves `Internal Mic Boost Volume` at 3 while its ALSA range is
@@ -107,8 +129,9 @@ is Plymouth's sibling check.
 
 ## Parked: speaker EQ
 
-Removed on 2026-09-10 — the speakers sound fine without it, and after a cold
-boot its tuning host had come up empty. The code and what to fix before it
+Removed on 2026-09-10 — it had come up empty after a cold boot, and the
+speakers seemed acceptable without it (not yet tested properly; see the
+listening tests above). The code and what to fix before it
 returns are in [`parked/speaker-eq/`](parked/speaker-eq/).
 
 ## Considered and rejected
