@@ -25,9 +25,9 @@ Boot parameter once installed: `amdgpu.tiled_stitch=1`
 ## Install without a second kernel
 
 ```bash
-sudo ../scripts/patch-imac5k-amdgpu.sh                  # build + swap the amdgpu module
-sudo ../scripts/patch-imac5k-amdgpu.sh --kernel latest  # build for a kernel you have not booted yet
-sudo ../scripts/patch-imac5k-amdgpu.sh --restore        # undo everything
+sudo scripts/patch-imac5k-amdgpu.sh                  # build + swap the amdgpu module
+sudo scripts/patch-imac5k-amdgpu.sh --kernel latest  # build for a kernel you have not booted yet
+sudo scripts/patch-imac5k-amdgpu.sh --restore        # undo everything
 ```
 
 The script rebuilds **only the amdgpu module** and swaps it in, backing up the
@@ -64,10 +64,25 @@ The installer applies these in order to pristine kernel source:
   connector reports disconnected, so compositors and settings panels see one
   display instead of offering the tile as a second output.
 
+Then three fixes that aren't about 5K, carried in the same module build:
+
+- **`amdgpu-vce3-ring-align-mask.patch`** — backport of upstream `2ee9836545e6`
+  (drm/amd#5595): since 7.1.6 the VCE 3 encoder can hang the GPU during screen
+  recording or H.264 export. In 7.3; drop it once Arch's kernel has
+  `align_mask = 0x1f` in `vce_v3_0_ring_vm_funcs`.
+- **`amdgpu-hpd-skip-during-reset.patch`** and
+  **`amdgpu-vce-suspend-in-reset.patch`** — make a GPU reset actually recover:
+  the hotplug worker no longer deadlocks against `dm_suspend()`, and VCE
+  suspend no longer aborts the reset. Reported with the patches as
+  [drm/amd#5810](https://gitlab.freedesktop.org/drm/amd/-/issues/5810).
+
 ```bash
 patch -p1 < patches/imac5k-lean-core-7.2.x.patch
 patch -p1 < patches/imac5k-stitch-layer-7.x.patch
 patch -p1 < patches/imac5k-stitch-hide-slave.patch
+patch -p1 < patches/amdgpu-hpd-skip-during-reset.patch
+patch -p1 < patches/amdgpu-vce-suspend-in-reset.patch
+patch -p1 < patches/amdgpu-vce3-ring-align-mask.patch
 ```
 
 Audio is separate: **`cs8409-headset-capture.patch`** goes on top of the
@@ -88,7 +103,7 @@ Install the new module, then `stage` it: the image you just built becomes the
 test entry and the known-good module goes back into the default, so the default
 never runs anything untested. `imac-alt-entry` builds a separate UKI from a
 private copy of the module tree instead, for entries that need their own
-cmdline (the backlight test). Both refuse a module whose vermagic is not the
+cmdline (an extra kernel parameter, say). Both refuse a module whose vermagic is not the
 running kernel.
 
 ## The rules

@@ -19,8 +19,6 @@
 set -u
 # The Radeon's render node: renderD128 unless the Intel iGPU is exposed and loads first.
 AMD_RENDER=/dev/dri/amd-render; [[ -e $AMD_RENDER ]] || AMD_RENDER=/dev/dri/renderD128
-# Under sudo $HOME is /root; the clips live in the invoking user's home.
-USER_HOME="$(getent passwd "${SUDO_USER:-$USER}" | cut -d: -f6)"
 KEEP_DESKTOP=0; MODE=hang
 while [[ ${1:-} == --* ]]; do
   case "$1" in
@@ -30,10 +28,11 @@ while [[ ${1:-} == --* ]]; do
     *) echo "unknown option $1"; exit 2 ;;
   esac; shift
 done
-RECOVER=/sys/kernel/debug/dri/1/amdgpu_gpu_recover
-IBTEST=/sys/kernel/debug/dri/1/amdgpu_test_ib
-# First the confirmed reproducer (hung vce0 on 2026-09-01 and 09-02 through
-# Strata's preview pipeline), then the sequence that hung it on 2026-09-11.
+# amdgpu's debugfs directory. Its number is the card's DRM minor, which moves
+# when the Intel iGPU is exposed (i915 takes card1), so find it by what's in it.
+DBG=; for d in /sys/kernel/debug/dri/*/; do [[ -e ${d}amdgpu_gpu_recover ]] && DBG=${d%/}; done
+RECOVER=$DBG/amdgpu_gpu_recover
+IBTEST=$DBG/amdgpu_test_ib
 CLIPS=()   # the video files to encode, given on the command line
 (( $# )) && CLIPS=("$@")
 [[ $MODE == trigger || ${#CLIPS[@]} -gt 0 ]] || { echo "give one or more video files:  sudo $0 [--trigger-encoding] <video>..."; exit 2; }

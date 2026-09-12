@@ -1,2 +1,0 @@
-# Save every amdgpu devcoredump (GPU hang evidence) before it expires.
-ACTION=="add", SUBSYSTEM=="devcoredump", RUN+="/usr/local/bin/imac-gpu-coredump-save $devpath"

@@ -1,4 +1,4 @@
-# Intel HD 630 on the iMac18,3 -- experimental
+# Intel HD 630 on the iMac18,3 (macOS mode, the default boot)
 
 The iMac18,3 has an Intel HD 630 (8086:5912) next to the Radeon Pro 575. Apple
 firmware hides it unless something announces macOS through the Apple `set_os`
@@ -18,7 +18,7 @@ and nothing else. `imac-patcher --apply macos` installs it (stage 2f below).
 
 ## Order of work
 
-Each stage is its own non-default Limine entry; the default is never touched.
+Each stage was its own non-default Limine entry until the promotion (stage 3); the default was never touched while testing.
 
 0. **Discovery boot.** Loader + today's cmdline without `resume=`, plus
    `module_blacklist=i915 snd_hda_core.gpu_bind=0`. The second option is not
@@ -34,8 +34,8 @@ Each stage is its own non-default Limine entry; the default is never touched.
    overrode it (`boot_vga`: Radeon 1, Intel 0); fb0 and the 5K desktop stayed on
    amdgpu. HD-audio came up normally with `snd_hda_core.gpu_bind=0` (speakers, jack,
    ATI HDMI). No new kernel warnings beyond `Module i915 is blacklisted`.
-1. **i915 headless.** `linux-side/README.md` stage B: `i915.disable_display=1`
-   plus the no-outputs VBT, packages installed, stop at once if the panel blanks.
+1. **i915 headless.** `i915.disable_display=1` plus the no-outputs VBT
+   (`linux-side/README.md`, section 1), packages installed, stop at once if the panel blanks.
    Staged 2026-09-12 as "Test - iGPU i915 headless": stage 0's cmdline without the
    blacklist, plus `i915.disable_display=1 i915.vbt_firmware=imac18-3/headless-vbt.bin`.
    `snd_hda_core.gpu_bind=0` stays (instead of the draft's `probe_mask`): HD-audio then
@@ -91,26 +91,23 @@ Each stage is its own non-default Limine entry; the default is never touched.
      sets the device's sysfs `enable` (no driver, no competing access), and ships inside the
      initramfs so it runs before systemd-backlight restores the saved level.
    - **Chromium** decodes H.264/HEVC on the Radeon (the GPU drawing its window; UVD 27% busy
-     on the Cursor clip) and VP9/AV1 on the CPU (4K VP9 ~1.1 cores). Pointing it at Intel
+     on a 4K H.264 clip) and VP9/AV1 on the CPU (4K VP9 ~1.1 cores). Pointing it at Intel
      (`--hardware-video-device-path`) makes the HD 630 decode, but the Radeon cannot import
      the frames (`eglCreateImage failed`, `Unable to initialize binding from pixmap`), so
      leave Chromium on its default.
    - **Strata** previews landed on the HD 630 with no setting (its sandboxed ffmpeg took
      renderD128).
-2d. **Permanent setup (2026-09-12, in progress).** Power first: `scripts/idle-power`, 60 s idle,
+2d. **First permanent setup (2026-09-12).** Power first: turbostat, 60 s idle,
    default boot 12.0 W package / pc3 0% vs stage 2 11.7 W / pc3 38% (pc6/pc7 0% on both: the
    Radeon, not the iGPU, caps package C-states; i915 powering the HD 630 off lets the package
    go deeper than the firmware-hidden state). Then:
-   - `imac-set-os.efi` with no LoadOptions boots `\EFI\Linux\omarchy_linux.efi` with its
-     embedded cmdline, so the menu entry needs no cmdline and kernel updates change nothing.
    - `/etc/mkinitcpio.conf.d/zz-imac-igpu.conf` (i915 first, VBT in the initramfs).
    - The four options go into `KERNEL_CMDLINE[default]` in `/etc/default/limine` -- it is
      loaded last and assigns the whole line, so a `limine-entry-tool.d` drop-in has no effect.
-   - `limine-entry-tool --add-efi "Omarchy iMac" /boot/EFI/imac-set-os/imac-set-os.efi --priority 90`
-     writes a managed entry at the top of the menu (no hash pin), and `default_entry:` points at it; the
-     generated "Omarchy" group stays below as the plain fallback. The boot chain here is Apple firmware ->
-     OpenCore on an external USB disk -> Limine, so OpenCore's `SignalAppleOS` quirk was rejected: macOS
-     mode would then depend on that disk being plugged in.
+   - It first booted through `imac-set-os.efi` from its own "Omarchy iMac" menu entry; stage 2f
+     replaced that the same day. The boot chain here is Apple firmware -> OpenCore on an external
+     USB disk -> Limine, so OpenCore's `SignalAppleOS` quirk was rejected: macOS mode would then
+     depend on that disk being plugged in.
    - `configs/udev/90-imac-gpu-reset.rules` now matches `DRIVERS=="amdgpu"` only.
 2e. **Full brightness range + boot brightness (2026-09-12).** macOS drives the backlight
    controller over 0..65535 (AppleMCCSControlCello via `\_SB.PNLF`; AppleBacklightDisplay
@@ -143,11 +140,12 @@ Each stage is its own non-default Limine entry; the default is never touched.
 3. **Promotion: done 2026-09-12.** macOS mode is the default "Omarchy > linux" boot.
 
 Known limits: Omarchy's screen recorder (gpu-screen-recorder) encodes on the
-GPU it captures from, so screen recording stays on the Radeon unless a
-cross-GPU path works; ffmpeg, Strata (via its ffmpeg) and Chromium can be
-pointed at the Intel node. Kaby Lake encodes up to 4K.
+GPU it captures from, so screen recording stays on the Radeon. ffmpeg, Strata
+and GStreamer use the Intel chip by default (it is the first render node);
+Chromium stays on the Radeon, which can't import Intel-decoded frames. Kaby
+Lake encodes up to 4K.
 
-## Routing video to the Intel chip: what already exists (researched 2026-09-11)
+## Routing video to the Intel chip: what already exists (researched 2026-09-11, before stage 2b made Intel the default)
 
 There is no system-wide router on Linux: libva has no device-selection variable
 (requests intel/libva#221 from 2018 and #752 from 2023 are open, no code), and

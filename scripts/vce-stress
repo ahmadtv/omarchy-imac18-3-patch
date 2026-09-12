@@ -7,7 +7,7 @@
 # and restarts the login manager (which kills every session process):
 #
 #   sudo systemd-run --unit=vce-stress --collect -p StandardOutput=file:/var/tmp/vce-stress.log \
-#        -p StandardError=inherit -E ROUNDS=3 /home/ahmad/Projects/omarchy-imac18-3/scripts/vce-stress "<clip>"
+#        -p StandardError=inherit -E ROUNDS=3 "$PWD/scripts/vce-stress" "<clip>"
 #   tail -f /var/tmp/vce-stress.log
 #
 # Every variant is a real encode of up to 30 s (or more, where noted) of the

@@ -1,11 +1,9 @@
 -- Pin Hyprland to the Radeon when the Intel iGPU is visible (omarchy-imac18-3 igpu/linux-side).
--- Load it from ~/.config/hypr/hyprland.lua next to the other personal modules
--- (after require("default.hypr.omarchy"), e.g. just before require("hypr.monitors")):
---     require("hypr.imac-gpu")
--- hl.env() takes effect "before the display server initializes" (wiki), so the
--- position among the user requires should not matter; AQ_DRM_DEVICES is read
--- once at startup, a config reload does not re-pick GPUs.
--- (mirror the same change into ~/Projects/dotfiles, which carries copies.)
+-- `imac-patcher --apply macos` installs it and adds require("hypr.imac-gpu") to
+-- ~/.config/hypr/hyprland.lua, just before require("hypr.monitors"). hl.env()
+-- takes effect "before the display server initializes" (wiki), so the position
+-- among the user requires should not matter; AQ_DRM_DEVICES is read once at
+-- startup, a config reload does not re-pick GPUs.
 --
 -- Pin Hyprland/aquamarine to the Radeon. AQ_DRM_DEVICES is a ':'-separated
 -- list; aquamarine canonicalises each entry (std::filesystem::canonical, so a
@@ -18,8 +16,8 @@
 --
 -- Guarded, because an AQ_DRM_DEVICES entry that does not exist leaves
 -- aquamarine with no GPU at all (black screen at login):
---   * only when the Intel function exists (set_os boots) -- default boots,
---     where the iGPU is hidden, keep today's behaviour exactly;
+--   * only when the Intel function exists (set_os boots) -- a boot where the
+--     firmware hides the iGPU is left exactly as stock;
 --   * only when the udev link from 61-imac-dri-names.rules is already there.
 -- Never add the Intel card to this list: it has no outputs and must not
 -- become a (secondary) renderer for the compositor.

@@ -1,8 +1,9 @@
 iMac 18,3 CS8409/CS42L83: make headset capture work, follow the jack live, and
 give both microphones a usable level.
 
-Applies to the snd_hda_macbookpro DKMS driver (davidjo/snd_hda_macbookpro),
-against the tree at commit be90113. Every part below was confirmed on hardware
+Applies to the snd_hda_macbookpro DKMS driver from
+jackdanyell/imac18-3-cs8409-linux-audio (based on davidjo/snd_hda_macbookpro),
+against that tree at commit be90113. Every part below was confirmed on hardware
 on an iMac18,3 running kernels 7.1.9 and 7.2.3.
 
 Six fixes: four on the capture path, one that serialises jack events against

@@ -3,16 +3,16 @@
 # Stable, colon-free names for the iMac18,3's two GPUs.
 #
 # cardN / renderDN numbers are handed out in probe order (drm_minor_alloc():
-# lowest free index). Today amdgpu is card1 + renderD128 because simpledrm holds
-# card0 while amdgpu allocates, then goes away. Once i915 binds the HD 630 later
-# in boot it most likely takes the freed card0 and renderD129 -- but "most
-# likely" is not something to hard-code anywhere. The by-path links are stable
-# but contain colons, which AQ_DRM_DEVICES uses as its list separator.
+# lowest free index), so they move. In macOS mode i915 loads first from the
+# initramfs and takes card1 + renderD128, and amdgpu gets card2 + renderD129; on
+# a boot where the firmware hides the HD 630, amdgpu is card1 + renderD128. The
+# by-path links are stable but contain colons, which AQ_DRM_DEVICES uses as its
+# list separator.
 #
 #   /dev/dri/amd-card     -> Radeon Pro 575 primary node   (compositor, KMS)
-#   /dev/dri/amd-render   -> Radeon Pro 575 render node    (everything by default)
+#   /dev/dri/amd-render   -> Radeon Pro 575 render node    (3D, Vulkan, the desktop)
 #   /dev/dri/intel-card   -> HD 630 primary node           (never a display)
-#   /dev/dri/intel-render -> HD 630 render node            (VA-API / Quick Sync)
+#   /dev/dri/intel-render -> HD 630 render node            (VA-API / Quick Sync, the video default)
 #
 # Keyed on the fixed PCI address AND the bound driver. udev matches KERNELS and
 # DRIVERS against the same parent (the PCI function), so an eGPU running amdgpu

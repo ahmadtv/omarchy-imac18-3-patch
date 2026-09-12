@@ -212,7 +212,7 @@ This follows the repo rule: a non-default test entry, with the default entry
 and its UKI left alone.
 
 ```sh
-cd ~/Projects/omarchy-imac18-3/igpu/set-os-loader
+cd igpu/set-os-loader                                  # from the repo root
 make clean && make && make check && make test          # 1. build + QEMU
 
 sudo mkdir -p /boot/EFI/imac-set-os                    # 2. install loader + UKI copy
@@ -255,7 +255,6 @@ lspci -nn | grep 8086:5912                 # THE check: Intel HD 630 at 00:02.0
 cat /proc/cmdline                          # ends in module_blacklist=i915, so passthrough worked
 lsmod | grep i915                          # empty (blacklisted)
 journalctl -b -k | grep -iE '0000:00:02.0|ramoops'    # PCI enumeration; ramoops region still claimed
-~/Projects/omarchy-imac18-3/scripts/verify.sh          # the usual 5K/amdgpu checks
 ```
 
 Reading the result:

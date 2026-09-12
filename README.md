@@ -135,7 +135,7 @@ Everything here that belongs in the kernel, the audio driver or Omarchy itself, 
 
 ## 🤝 Contributing
 
-On an **iMac18,3** and hit a bug, or made part of this better? [Open an issue or PR](../../issues) — I'll pull in what's solid.
+On an **iMac18,3** and hit a bug, or made part of this better? [Open an issue or PR](https://github.com/ahmadtv/omarchy-imac18-3/issues) — I'll pull in what's solid.
 
 ## 🙏 Credits
 

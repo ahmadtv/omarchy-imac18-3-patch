@@ -72,8 +72,7 @@ open(p,"w").write(s)
 PY
 }
 
-# Insert the entry before any imac-test-entry block (whose `drop` deletes from
-# its marker to end-of-file), otherwise append.
+# Insert the entry before any imac-test-entry block, otherwise append.
 add_entry() {   # add_entry <name> <uki> <cmdline> <module-basename>
 	local hash block
 	hash="$(b2sum "$2" | cut -d' ' -f1)"

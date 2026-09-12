@@ -20,8 +20,8 @@
 #
 set -uo pipefail
 
-# Resolve through symlinks: the menu calls this as ~/.local/bin/imac-patcher,
-# and every patch file we ship is found relative to the real script.
+# Resolve through symlinks, so every patch file we ship is found relative to
+# the real script.
 SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 REPO_DIR="$(dirname "$SCRIPT_DIR")"
 INSTALLER_5K="${SCRIPT_DIR}/patch-imac5k-amdgpu.sh"
@@ -66,24 +66,6 @@ if [[ "$product" != "iMac18,3" && " $* " != *" --force "* ]]; then
     echo "This tool targets the iMac18,3 (detected: ${product}). Refusing. Use --force to override." >&2
     exit 1
 fi
-
-# ── tweaks: patches to other people's apps ─────────────────────────────────
-# A patch to an Omarchy plugin or a third-party one, tier "tweak". Three rules
-# keep these from becoming a mess:
-#
-#   * The target must be a git checkout. That is what makes removal exact and
-#     traceless -- reverse-applying our own diff and then finding the checkout
-#     identical to upstream is a proof, not a hope -- and it is what lets us
-#     tell that the app has moved on.
-#   * Detection asks the checkout, never a stamp file we wrote. If an update
-#     replaced the file, or the plugin was reinstalled, the patch reads as off
-#     by itself, which is exactly what should happen.
-#   * Apply refuses unless the diff applies cleanly to the checkout as it is
-#     now, so a patch is never half-applied to a version it was not written for.
-#
-# `omarchy plugin update` fast-forwards and aborts on modified tracked files,
-# so patched plugins would block their own update. --update-apps handles that:
-# it removes these patches, updates, and puts back the ones that still apply.
 
 # ═══════════════════════ module: audio ═════════════════════════════════════
 AUDIO_REPO=https://github.com/jackdanyell/imac18-3-cs8409-linux-audio
@@ -283,7 +265,7 @@ mod_color_apply() {
         sed -i '/^hl\.monitor({/ s/ })$/, cm = "dp3" })/' "$MONITORS_LUA"
     fi
     grep -q 'cm = "dp3"' "$MONITORS_LUA" || { warn "could not edit $MONITORS_LUA — do it by hand"; return 1; }
-    # a 10-bit panel; declared for what it is, not as a fix (see TODO on genlock)
+    # a 10-bit panel; declared for what it is, not as a fix
     if grep -q 'bitdepth = ' "$MONITORS_LUA"; then sed -i 's/bitdepth = [0-9]*/bitdepth = 10/' "$MONITORS_LUA"
     else sed -i '/^hl\.monitor({/ s/ })$/, bitdepth = 10 })/' "$MONITORS_LUA"; fi
     command -v hyprctl >/dev/null && hyprctl reload >/dev/null 2>&1
@@ -746,54 +728,12 @@ show_status() {
     local m st tier
     for m in "${MODULES[@]}"; do
         st="$("mod_${m}_detect")"; tier="$("mod_${m}_tier")"
-        printf '  %-32s %-22b %s\n' "$("mod_${m}_title")" "$(state_label "$st")" \
+        printf '  %-46s %-22b %s\n' "$("mod_${m}_title")" "$(state_label "$st")" \
             "$([[ $tier == boot ]] && printf '\033[0;33m[boot]\033[0m')"
     done
     echo
     printf '  ids: %s\n' "${MODULES[*]}"
 }
-# The menu asks for every module's state each time it opens, and a full sweep
-# costs most of a second (dkms, pactl, hyprctl). Answer from a cache that one
-# sweep fills, so the first row pays and the rest are free.
-# Which tweaked plugins have an update waiting. Filled by --check-updates,
-# which talks to the network and so is never run from a status query: the bar
-# widget refreshes it on a long timer and everything else only reads it.
-
-# ── the Omarchy menu ───────────────────────────────────────────────────────
-# Not a plugin: Omarchy reads ~/.config/omarchy/extensions/omarchy-menu.jsonc
-# itself, watches it for changes, and evaluates each row's when:/checked: shell
-# expression, so the menu is data rather than code we would have to keep
-# working against Omarchy's internals. Rows are written between markers and
-# regenerated in place, leaving anything the user added around them untouched.
-# Both front ends read the same modules: this file is the only source of truth.
-# Menu rows are narrow: a long label is truncated and takes the checkmark with
-# it, so each row gets a short name here and the module's full title becomes
-# its description, which the menu also searches.
-# ── the bar widget ─────────────────────────────────────────────────────────
-# This one IS a plugin, because a bar widget has to be: Omarchy loads bar
-# widgets as QML from ~/.config/omarchy/plugins/<id>/. It is a thin one --
-# it asks `imac-patcher --list` what exists and calls `--toggle`, so the
-# patcher stays the only thing that knows what a patch is.
-# Both front ends invoke `imac-patcher` by name, so the symlink belongs to
-# neither: it is put in place by either and taken away only when neither is left.
-link_cli()   { install -d "$(dirname "$CLI_LINK")"; ln -sfn "$(readlink -f "${BASH_SOURCE[0]}")" "$CLI_LINK"; }
-
-
-
-# ── modules from elsewhere ─────────────────────────────────────────────────
-# This repo carries the hardware. Patches to apps -- your own plugin fixes,
-# anything you would rather keep to yourself -- live in their own repo and
-# register it here, one path per line:
-#
-#     ~/.config/imac-patcher/module-dirs
-#
-# Each registered path is a repo root; every modules/*.sh under it is sourced
-# with MODULE_ROOT set to that root, so a module can find its own patch files.
-# A file only has to define mod_<id>_title/_tier/_desc/_detect/_apply/_remove --
-# it is picked up by having a _detect, and joins the end of the list. Everything
-# downstream (status, the bar widget, --toggle, --update-apps) then treats it
-# exactly like a built-in, so there is one list and one patcher, not two.
-
 run_module() {   # $1 = apply|remove, $2 = id
     local action=$1 id=$2 st
     st="$("mod_${id}_detect")"
@@ -815,6 +755,9 @@ case "${1:-}" in
         action="${1#--}"; shift
         [[ ${1:-} == safe ]] && { set -- ; for m in "${MODULES[@]}"; do [[ $("mod_${m}_tier") == safe ]] && set -- "$@" "$m"; done; }
         (( $# )) || { echo "usage: $0 --${action} <id...|safe>   ids: ${MODULES[*]}" >&2; exit 2; }
+        # Every module needs root, and boot's detection reads the ESP: without a
+        # sudo ticket it would read as n/a and be skipped.
+        sudo -v || exit 1
         for id in "$@"; do
             [[ " ${MODULES[*]} " == *" $id "* ]] || { warn "unknown module: $id"; continue; }
             run_module "$action" "$id"
@@ -825,6 +768,7 @@ case "${1:-}" in
 esac
 
 # ── interactive ────────────────────────────────────────────────────────────
+sudo -v || exit 1
 show_status
 echo
 if ((HAVE_GUM)); then

@@ -24,8 +24,9 @@
 # The checksum is not checked by i915; it is set correctly anyway.
 #
 # Usage: ./make-headless-vbt.py [out-file]     (default: headless-vbt.bin here)
-# Install (later, by hand): /usr/lib/firmware/imac18-3/headless-vbt.bin and
-# boot with i915.vbt_firmware=imac18-3/headless-vbt.bin
+# `imac-patcher --apply macos` installs it as
+# /usr/lib/firmware/imac18-3/headless-vbt.bin and boots with
+# i915.vbt_firmware=imac18-3/headless-vbt.bin
 
 import os
 import struct

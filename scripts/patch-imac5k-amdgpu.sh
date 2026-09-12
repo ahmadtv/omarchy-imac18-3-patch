@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 #
-# patch-imac5k-amdgpu.sh — build a 5K-patched amdgpu module for the CURRENTLY
-# running kernel and swap it in, WITHOUT installing a second kernel.
+# patch-imac5k-amdgpu.sh — build a patched amdgpu module for the running kernel
+# (or --kernel <release>) and swap it in, WITHOUT installing a second kernel.
 #
 # What it does:
 #   1. Fetches kernel source matching your running kernel version
-#   2. Applies the iMac 5K patch stack (wake + stitch + genlock)
+#   2. Applies the patch stack: 5K (wake + stitch + genlock), then the
+#      GPU-reset and VCE fixes
 #   3. Builds ONLY the amdgpu module (against your kernel's own config +
 #      Module.symvers, so it loads into the running kernel)
 #   4. Backs up the stock amdgpu.ko and installs the patched one
@@ -21,7 +22,8 @@
 #   That case needs a human to re-port the patch — it is not a "just re-run" fix.
 # * This replaces a core GPU module on your real system. If the built module
 #   fails to load, you get software rendering until you --restore (your desktop
-#   still boots). TEST ON THE USB CLONE FIRST, never first on your only install.
+#   still boots). Try a new build from its own boot entry first
+#   (scripts/imac-alt-entry), never over your only working module.
 # * Needs ~8 GB free and 20–40 min of compile time (amdgpu/display is large).
 # ───────────────────────────────────────────────────────────────────────────
 set -euo pipefail
@@ -37,7 +39,7 @@ EXTRA_PATCHES=("${SCRIPT_DIR}/../patches/imac5k-stitch-layer-7.x.patch"
 	"${SCRIPT_DIR}/../patches/amdgpu-hpd-skip-during-reset.patch"
 	"${SCRIPT_DIR}/../patches/amdgpu-vce-suspend-in-reset.patch"
 	"${SCRIPT_DIR}/../patches/amdgpu-vce3-ring-align-mask.patch")
-WORK="${IMAC5K_WORK:-/home/${SUDO_USER:-$USER}/.cache/kernel-5k-build}"
+WORK="${IMAC5K_WORK:-$(getent passwd "${SUDO_USER:-$USER}" | cut -d: -f6)/.cache/kernel-5k-build}"
 RUNNING_KREL="$(uname -r)"                # e.g. 7.2.2-arch1-1
 
 say()  { printf '\033[1;33m==>\033[0m %s\n' "$*"; }
@@ -242,7 +244,7 @@ case "$AMDKO" in
 esac
 depmod "$KREL"
 
-# ── add the boot parameter (Limine, with the 3-copy sync) ──────────────────
+# ── add the boot parameter (Limine) ────────────────────────────────────────
 if ! grep -q 'amdgpu.tiled_stitch=1' /etc/default/limine 2>/dev/null; then
 	say "adding amdgpu.tiled_stitch=1 to the default cmdline"
 	cp /etc/default/limine "/etc/default/limine.backup-5k-$(date +%s)"
@@ -264,8 +266,8 @@ for shadow in /boot/EFI/limine/limine.conf /boot/EFI/BOOT/limine.conf \
 	rm -f "$shadow"
 done
 
-# Refresh the fallback boot path too. On this machine \EFI\BOOT\BOOTX64.EFI is a
-# COPY of the UKI (an earlier bypass of Limine), not the Limine binary — so if
+# Refresh the fallback boot path too. On machines still using the old bypass,
+# \EFI\BOOT\BOOTX64.EFI is a COPY of the UKI (an earlier bypass of Limine), not the Limine binary — so if
 # the firmware takes the fallback path it boots whatever UKI was current when
 # that copy was made. Leaving it stale means booting the previous initramfs,
 # with the previous amdgpu module baked in, and wondering why nothing changed.

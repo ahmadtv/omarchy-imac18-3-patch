@@ -2,4 +2,7 @@
 *.bak
 *.log
 hardware-private/
-
+# local investigation material (logs, measurements, clip notes) -- never public
+evidence/
+__pycache__/
+*.pyc
