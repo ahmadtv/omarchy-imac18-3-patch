@@ -124,7 +124,7 @@ Everything here that belongs in the kernel, the audio driver or Omarchy itself, 
 
 | Where | What | Status |
 |---|---|---|
-| [drm/amd#4455](https://gitlab.freedesktop.org/drm/amd/-/issues/4455) | Native 5K on iMacs (community thread): this project's genlock fix, the first verified iMac18,3, and a lean mainline candidate (kernel exposes two tiles, compositor stitches) | Open, under discussion |
+| [drm/amd#4455](https://gitlab.freedesktop.org/drm/amd/-/issues/4455) | Native 5K on iMacs (community thread): this project's genlock fix, the first verified iMac18,3, and a lean mainline candidate (kernel exposes two tiles, compositor stitches) | Open, under discussion; VCE fix and set_os findings shared 2026-09-12 |
 | [drm/amd#5810](https://gitlab.freedesktop.org/drm/amd/-/issues/5810) | GPU reset after a VCE hang: two fixes (reset deadlock in `dm_suspend`, VCE suspend during reset), patches inline | Open, filed by us, waiting for AMD |
 | [drm/amd#5595](https://gitlab.freedesktop.org/drm/amd/-/issues/5595) | The VCE encoder hang itself (Polaris, since 7.1.6) | Fixed upstream (`2ee9836545e6`, 7.3); backported here until Arch's kernel has it |
 | [drm/i915#17042](https://gitlab.freedesktop.org/drm/i915/kernel/-/issues/17042) | Hidden Intel HD 630 running headless: a quirk so i915 creates no outputs on iMacs, then the kernel's set_os list gains `iMac18,3` | Open, filed by us, no reply yet |
