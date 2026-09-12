@@ -7,6 +7,7 @@
  * does it instead and then starts the real kernel image:
  *
  *   LoadOptions = "<path-of-target.efi> [options passed to the target...]"
+ *   (none at all = \\EFI\\Linux\\omarchy_linux.efi with its embedded cmdline)
  *
  * 1. LocateProtocol(APPLE_SET_OS); if present call set_os_vendor("Apple Inc.")
  *    when version >= 2, then set_os_version("Mac OS X 10.9") when version > 0
@@ -21,6 +22,11 @@
  *    caller (Limine -> OpenCore -> firmware) falls back. Never hangs.
  */
 #include "efi.h"
+
+/* Booted when no LoadOptions name a target (override with -DDEFAULT_TARGET=...). */
+#ifndef DEFAULT_TARGET
+#define DEFAULT_TARGET L"\\EFI\\Linux\\omarchy_linux.efi"
+#endif
 
 static EFI_SYSTEM_TABLE  *ST;
 static EFI_BOOT_SERVICES *BS;
@@ -238,8 +244,15 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE self, EFI_SYSTEM_TABLE *systab)
 	while (i < len && is_space(opt[i])) i++;
 	rest = len - i;
 	if (p1 == p0) {
-		print(L"imac-set-os: no target in LoadOptions; usage: <\\path\\to\\image.efi> [options]\r\n");
-		return fail(L"parsing LoadOptions", EFI_INVALID_PARAMETER);
+		/* No options: boot the distro's live UKI with its embedded .cmdline, so a
+		 * menu entry needs no cmdline and kernel updates need no entry changes. */
+		static CHAR16 default_target[] = DEFAULT_TARGET;
+		opt = default_target;
+		p0 = 0;
+		p1 = sizeof(default_target) / sizeof(CHAR16) - 1;
+		i = p1;
+		rest = 0;
+		print(L"imac-set-os: no options, using the default target\r\n");
 	}
 
 	if (!li->DeviceHandle)

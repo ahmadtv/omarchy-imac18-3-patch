@@ -119,7 +119,7 @@ run fake-v1 fake-set-os-v1 '\EFI\test\child.efi v1' 20 \
 run fake-v0 fake-set-os-v0 '\EFI\test\child.efi v0' 20 \
 	'!fake set_os: call' 'imac-set-os: set_os v0: nothing to call' 'child started, LoadOptions=<v0>'
 run no-target imac-set-os - 25 \
-	'no target in LoadOptions' 'parsing LoadOptions failed, status 0x8000000000000002' 'returning to the firmware in 5 s'
+	'no options, using the default target' 'loading \\EFI\\Linux\\omarchy_linux.efi with 0 chars' 'LoadImage failed, status 0x800000000000000E' 'returning to the firmware in 5 s'
 run missing-file imac-set-os '\EFI\test\nope.efi x' 25 \
 	'LoadImage failed, status 0x800000000000000E' 'returning to the firmware in 5 s'
 if ((have_uki)); then

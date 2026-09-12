@@ -93,6 +93,18 @@ Each stage is its own non-default Limine entry; the default is never touched.
      leave Chromium on its default.
    - **Strata** previews landed on the HD 630 with no setting (its sandboxed ffmpeg took
      renderD128).
+2d. **Permanent setup (2026-09-12, in progress).** Power first: `scripts/idle-power`, 60 s idle,
+   default boot 12.0 W package / pc3 0% vs stage 2 11.7 W / pc3 38% (pc6/pc7 0% on both: the
+   Radeon, not the iGPU, caps package C-states; i915 powering the HD 630 off lets the package
+   go deeper than the firmware-hidden state). Then:
+   - `imac-set-os.efi` with no LoadOptions boots `\EFI\Linux\omarchy_linux.efi` with its
+     embedded cmdline, so the menu entry needs no cmdline and kernel updates change nothing.
+   - `/etc/mkinitcpio.conf.d/zz-imac-igpu.conf` (i915 first, VBT in the initramfs).
+   - The four options go into `KERNEL_CMDLINE[default]` in `/etc/default/limine` -- it is
+     loaded last and assigns the whole line, so a `limine-entry-tool.d` drop-in has no effect.
+   - `limine-entry-tool --add-efi "Omarchy (macOS mode)" /boot/EFI/imac-set-os/imac-set-os.efi`
+     writes a managed entry (no hash pin), and `default_entry:` points at it.
+   - `configs/udev/90-imac-gpu-reset.rules` now matches `DRIVERS=="amdgpu"` only.
 3. **Promotion** only after the above, and only as Ahmad's call.
 
 Known limits: Omarchy's screen recorder (gpu-screen-recorder) encodes on the
