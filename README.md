@@ -35,7 +35,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/ahmadtv/omarchy-imac18-3/mai
 | 🔊 **Speakers & mic** | The CS8409 codec the kernel can't drive at all — now with working speakers and both the internal **and** headset mic, with **automatic switching** on plug/unplug just like macOS. |
 | 🎧 **Apple EarPods** | Fully supported. Plug them in and audio + mic follow the jack; unplug and it's back to internal — automatically. All three **inline buttons** work too: play/pause, volume up, volume down. |
 | 🎨 **True colour** | The wide-gamut **Display P3** panel mapped correctly, instead of the oversaturated mess of stock sRGB. |
-| 🎬 **Hardware video encode** | Screen recording and H.264 export on the Radeon's own encoder, without the GPU hang every Polaris card has had since kernel 7.1.6 (AMD's upstream fix, backported until the distro kernel carries it). And if the GPU ever does hang, it now resets and you are back at a fresh desktop in about five seconds instead of a frozen machine. The two reset fixes are reported to AMD with patches: [drm/amd#5810](https://gitlab.freedesktop.org/drm/amd/-/issues/5810). |
+| 🎬 **Hardware video encode** | Screen recording and H.264 export on the Radeon's own encoder, without the GPU hang every Polaris card has had since kernel 7.1.6 (AMD's upstream fix, backported until the distro kernel carries it). And if the GPU ever does hang, it now resets and you are back at a fresh desktop in about five seconds instead of a frozen machine. The two reset fixes are reported to AMD with patches: [drm/amd#5810](https://gitlab.freedesktop.org/drm/amd/-/issues/5810). Omarchy's recorder runs at 2560×1440, the size this encoder keeps up with at 60 fps. *(module `record`)* |
 | 🧠 **Intel Quick Sync (the hidden iGPU)** | Apple firmware hides the iMac's Intel HD 630 from anything that isn't macOS. The kernel already tells Apple firmware it's booting macOS on some MacBook Pros; this adds the iMac18,3 to that list — so the Intel chip appears and, like on macOS, takes over video: every app that uses the first GPU (ffmpeg, GStreamer, Strata previews, Kdenlive exports) encodes and decodes on Quick Sync, H.264 about **3.7× faster** than the Radeon, plus HEVC 10-bit and VP9. The Radeon keeps the display, the desktop and all 3D. Reported to Intel: [drm/i915#17042](https://gitlab.freedesktop.org/drm/i915/kernel/-/issues/17042). *(module `macos`)* |
 | 🔆 **Brightness** | The brightness slider works — over the panel's **full 500-nit range** (Apple's ACPI table stops Linux at 80%, the same gap Boot Camp users see) — and the panel comes up at your saved brightness from power-on, like macOS. *(module `macos`)* |
 
@@ -117,6 +117,7 @@ Every patch backs up what it replaces and can be reversed. Boot-related changes 
 - **The hidden Intel GPU, the brightness fixes and the macOS-mode boot** → [`igpu/README.md`](igpu/README.md)
 - **Open items, root causes and rejected approaches** → [`TODO.md`](TODO.md)
 - **Upstream issues and PRs** → [Upstream](#-upstream) below
+- **What changed, and when** → [`CHANGELOG.md`](CHANGELOG.md)
 
 ## 📮 Upstream
 
