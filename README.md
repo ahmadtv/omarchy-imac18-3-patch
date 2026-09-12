@@ -63,7 +63,7 @@ Straight about the gaps:
 
 - 💳 **SD / memory-card reader** — not working yet. The card is recognised, then every read fails at the data phase; **still being worked on** — cross-checking against macOS on the same machine to tell a driver quirk from a genuine hardware fault.
 - 🔆 **Auto-brightness** — the ambient-light sensor works, but isn't wired to the (now working) backlight yet.
-- 😴 **Suspend / sleep** — hard-hangs the machine (Apple firmware); masked off so nothing triggers it by accident.
+- 😴 **Suspend / sleep** — hard-hangs the machine every time (Apple firmware; only a power-cycle recovers). The `suspend` module masks it so nothing triggers it by accident.
 
 ---
 
@@ -89,40 +89,23 @@ The patcher shows what's applied, what isn't, and lets you pick — **nothing is
 
 **The 5K module needs kernel 7.1.x or 7.2.x** and the patcher refuses anything else — a mis-applied GPU patch means a broken display, so a newer kernel must be re-ported by hand first. You supply nothing else: the installer fetches the matching kernel source itself (≈8 GB, ~20–40 min the first build; re-runs are fast).
 
-### 🔄 After a kernel update — run it before you reboot
+### 🔄 Updating Omarchy — patch before you reboot
 
-A kernel update replaces the modules the patches live in, so the new kernel boots stock: no 5K, no sound. Run the patcher **while you are still on the old kernel** and it builds for the new one, which is already on disk:
+A kernel update replaces the GPU driver the 5K patch lives in. So:
 
-```bash
-./scripts/imac-patcher            # the banner names the pending kernel and what's missing
-./scripts/imac-patcher --apply 5k audio
-```
+1. **Update Omarchy** as usual. If it offers to reboot, not yet.
+2. **Run the one-liner again.** It pulls the latest patcher and shows what the new kernel is missing — usually just `5k`. Apply it.
+3. **Reboot.**
 
-Both patches target the newest installed kernel, so the machine boots straight into 5K with audio working. Your old kernel keeps its own patched modules, so it stays a working fallback. If you have already rebooted into a stock kernel, the same command still fixes it — you just spend one boot at 4K without sound.
-
-Audio uses the same model — it clones the upstream [jackdanyell](https://github.com/jackdanyell/imac18-3-cs8409-linux-audio) driver at the verified commit and applies [`patches/cs8409-headset-capture.patch`](patches/cs8409-headset-capture.patch) on top, then DKMS-builds it so it survives kernel updates.
+Audio (DKMS) and macOS mode follow the new kernel on their own; the patcher only checks them. Rebooted too early? Run the one-liner anyway — you just spend one boot without 5K. If the new kernel is too new for the 5K patch, the patcher says so, and **Snapshots** in the boot menu boots the system as it was before the update.
 
 > **Not on Omarchy?** Mark Pronkin maintains a universal fork — [`imac5k-universal-linux-patcher`](https://github.com/MarkPronkin/imac5k-universal-linux-patcher) — with one-command install/update, automatic dependency install, and preliminary Fedora support (more distros in progress).
 
 ---
 
-## ⚠️ Before you touch suspend
+## 🎛️ Local AI tools and the reboot freeze
 
-Suspend and hibernate **hard-hang this machine, every time** — an Apple firmware ACPI issue no kernel parameter fixes; recovery is a hard power-cycle. The patcher masks the sleep targets so nothing triggers them by accident:
-
-```bash
-sudo systemctl mask suspend.target hibernate.target hybrid-sleep.target suspend-then-hibernate.target
-```
-
-## 🎛️ GPU compute tools (voxtype, local LLMs) and shutdown
-
-This GPU exposes only a **256 MiB CPU-visible slice** of its video memory (no large BAR). Vulkan compute engines such as ggml, used by [voxtype](https://github.com/nicobrenner/voxtype) and most local speech/LLM tools, park their buffers in that slice by default and can fill it. The shutdown splash then cannot allocate its framebuffer and the machine **freezes at the Omarchy logo on reboot**. The patcher's `vram` module sets ggml's own switch for this class of GPU, session-wide, so every such tool picks it up:
-
-```bash
-./scripts/imac-patcher --apply vram    # GGML_VK_DISABLE_HOST_VISIBLE_VIDMEM=1 in ~/.config/environment.d
-```
-
-Measured here: voxtype's share of the slice fell from 142 MiB to 52 MiB, and the splash needs 59 MiB. On by default because this repo is built for one iMac first; deselect it if you never run such tools.
+The Radeon exposes only a **256 MiB CPU-visible slice** of its memory. Vulkan tools built on ggml — [voxtype](https://github.com/nicobrenner/voxtype) and most local speech/LLM apps — can fill it, and then the machine **freezes at the Omarchy logo on reboot**. The `vram` module (on by default) tells ggml to stay out of that slice, for every such tool.
 
 ## 🛟 Safety
 
