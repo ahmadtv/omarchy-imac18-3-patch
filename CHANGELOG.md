@@ -4,7 +4,7 @@ What changed for someone running the patcher, newest first. Small fixes count. T
 
 ## 2026-09-12
 
-- **Screen recordings at full speed** (new `record` module). The Radeon encodes 4K at only ~29 fps, so Omarchy's 4K recordings came out sped up, shorter than their audio, and slow to stop (sometimes "force-killed"). The Screenrecord menu now records at 2560×1440, exactly half of 5K, at a real 60 fps (keeping Omarchy's icons and labels).
+- **Screen recordings at full speed** (new `record` module). The Radeon encodes 4K at only ~29 fps, so Omarchy's 4K recordings came out sped up, shorter than their audio, and slow to stop (sometimes "force-killed"). The Screenrecord menu now records at 1920×1080, a real 60 fps even with the webcam and audio on, so recordings play at the right speed (keeping Omarchy's icons and labels). 2560×1440 managed only 52 fps under that load.
 - **Smooth webcam in recordings** (`record` module). Omarchy's webcam overlay got the FaceTime camera's raw format, which it can only send at 10 fps, and it cost the recorder frames, so you looked choppy and sped up. An mpv profile for webcams asks for MJPEG instead: 30 fps, and the recorder back at full speed.
 - **The patcher no longer risks locking your account.** It asks for your sudo password only when run in a terminal. Run from anything else (a widget, a script), each unanswered sudo prompt counted as a failed login, and ten in a row lock the account for ten minutes.
 - **macOS mode is now the normal boot entry.** The kernel's own boot code tells the firmware "macOS is starting" (iMac18,3 added to its model list by an initramfs hook), so there is no separate EFI app and no extra menu entry: one "Omarchy > linux" entry, with or without the OpenCore USB.
