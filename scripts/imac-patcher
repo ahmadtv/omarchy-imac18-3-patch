@@ -50,7 +50,7 @@ mkdir -p "$LOGDIR" "$CACHE"
 # they are the same on every machine. Those live in omarchy-tweaks, which
 # brings its own tool and its own bar widget. This is a one-time run per
 # machine, so it stays a terminal thing.
-MODULES=(audio color vram wifi suspend gpureset boot 5k)
+MODULES=(audio color vram wifi suspend gpureset boot 5k macos)
 
 HAVE_GUM=0; command -v gum >/dev/null && HAVE_GUM=1
 say()  { printf '\033[1;33m==>\033[0m %s\n' "$*"; }
@@ -371,6 +371,95 @@ mod_gpureset_remove() {
     sudo rm -f "$GPURESET_RULE" "$GPURESET_UNIT" "$GPURESET_BIN"
     sudo udevadm control --reload; sudo systemctl daemon-reload
     say "removed — after a GPU reset the session is left as the driver leaves it"
+}
+
+# ═══════════════════════ module: macos ═════════════════════════════════════
+# Apple firmware treats a non-macOS boot as second class: it hides the Intel
+# HD 630, and the ACPI backlight it hands Linux drives nothing. Announcing
+# macOS through the Apple set_os protocol before the kernel starts fixes both,
+# like macOS itself: the HD 630 becomes the default video GPU (Quick Sync) while
+# the Radeon keeps display and 3D, and the firmware's backlight dims the panel.
+# Plus the full 0..65535 backlight range (Apple's ACPI table stops at 80%) and
+# the panel lit at the saved brightness from power-on. Details: igpu/README.md.
+IG="${REPO_DIR}/igpu"
+MACOS_ESP_DIR=/boot/EFI/imac-set-os
+MACOS_LOADER="${MACOS_ESP_DIR}/imac-set-os.efi"
+MACOS_ENTRY="Omarchy (macOS mode)"
+MACOS_OPTS="snd_hda_core.gpu_bind=0 i915.disable_display=1 i915.vbt_firmware=imac18-3/headless-vbt.bin module_blacklist=i2c_i801"
+MACOS_VBT=/usr/lib/firmware/imac18-3/headless-vbt.bin
+MACOS_RULES=(61-imac-dri-names.rules 62-imac-smbus-acpi.rules)
+MACOS_MKI=/etc/mkinitcpio.conf.d/zz-imac-igpu.conf
+MACOS_AML=/etc/initcpio/acpi_override/imac-bcl100.aml
+MACOS_NVRAM_BIN=/usr/local/bin/imac-backlight-nvram
+MACOS_NVRAM_UNIT=/etc/systemd/system/imac-backlight-nvram.service
+MACOS_HYPR="${HOME}/.config/hypr/imac-gpu.lua"
+MACOS_HYPR_MAIN="${HOME}/.config/hypr/hyprland.lua"
+mod_macos_title() { echo "macOS mode: Intel video + working brightness"; }
+mod_macos_tier()  { echo boot; }
+mod_macos_desc()  { echo "Boots through a small EFI app that tells the firmware it is starting macOS. That exposes the Intel HD 630, which then encodes and decodes video for every app that picks the first GPU (H.264 about 3.7x faster than the Radeon), and makes the brightness slider work -- over the panel's full range, starting at the saved level from power-on. The Radeon keeps the display and all 3D. The old way stays in the menu as 'Omarchy'."; }
+macos_entry_present()  { sudo grep -qxF "/${MACOS_ENTRY}" /boot/limine.conf 2>/dev/null; }
+macos_is_default()     { sudo grep -qxF "default_entry: ${MACOS_ENTRY}" /boot/limine.conf 2>/dev/null; }
+mod_macos_detect() {
+    [[ $(cat /sys/class/dmi/id/product_name 2>/dev/null) == iMac18,3 ]] || { echo n/a; return; }
+    local have=0 total=7
+    [[ -f $MACOS_VBT ]] && ((have++))
+    [[ -f /etc/udev/rules.d/${MACOS_RULES[1]} ]] && ((have++))
+    [[ -f $MACOS_MKI && -f $MACOS_AML ]] && ((have++))
+    grep -q 'i915.vbt_firmware=imac18-3' "$LIMINE_DEFAULT" 2>/dev/null && ((have++))
+    systemctl is-enabled -q imac-backlight-nvram.service 2>/dev/null && ((have++))
+    macos_entry_present && sudo test -f "$MACOS_LOADER" && ((have++))
+    macos_is_default && ((have++))
+    if ((have == total)); then echo applied; elif ((have == 0)); then echo not-applied; else echo partial; fi
+}
+mod_macos_apply() {
+    local need=() c
+    for c in clang lld-link iasl; do command -v "$c" >/dev/null || need+=("$c"); done
+    if ((${#need[@]})) || ! pacman -Q intel-media-driver >/dev/null 2>&1; then
+        say "installing build tools and the Intel video driver (clang lld acpica intel-media-driver)"
+        sudo pacman -S --needed --noconfirm clang lld acpica intel-media-driver || return 1
+    fi
+    printf '\n\033[1mUndo at any time:\033[0m  %s --remove macos   (or pick "Omarchy" in the boot menu)\n\n' "$0"
+    confirm "Switch the default boot to macOS mode?" || return 1
+    make -s -C "$IG/set-os-loader" >/dev/null || { warn "building imac-set-os.efi failed"; return 1; }
+    sudo install -Dm644 "$IG/set-os-loader/imac-set-os.efi" "$MACOS_LOADER" || return 1
+    sudo install -Dm644 "$IG/linux-side/vbt/headless-vbt.bin" "$MACOS_VBT" || return 1
+    for c in "${MACOS_RULES[@]}"; do sudo install -Dm644 "$IG/linux-side/udev/$c" "/etc/udev/rules.d/$c" || return 1; done
+    sudo udevadm control --reload && sudo udevadm trigger -s drm -s pci
+    sudo "$IG/linux-side/acpi/make-bcl100" "$MACOS_AML" || return 1
+    sudo install -Dm644 "$IG/linux-side/mkinitcpio/zz-imac-igpu.conf" "$MACOS_MKI" || return 1
+    if ! grep -q 'i915.vbt_firmware=imac18-3' "$LIMINE_DEFAULT"; then
+        sudo cp "$LIMINE_DEFAULT" "${LIMINE_DEFAULT}.backup-macos-$(date +%s)"
+        sudo sed -i "s|\(KERNEL_CMDLINE\[default\]=\"[^\"]*\)\"|\1 ${MACOS_OPTS}\"|" "$LIMINE_DEFAULT" || return 1
+    fi
+    sudo install -Dm755 "$IG/linux-side/bin/imac-backlight-nvram" "$MACOS_NVRAM_BIN" || return 1
+    sudo install -Dm644 "$IG/linux-side/systemd/imac-backlight-nvram.service" "$MACOS_NVRAM_UNIT" || return 1
+    sudo systemctl daemon-reload && sudo systemctl enable --now imac-backlight-nvram.service
+    # Hyprland stays on the Radeon by name (card numbers shift once i915 loads).
+    install -Dm644 "$IG/linux-side/hypr/imac-gpu.lua" "$MACOS_HYPR"
+    grep -q 'hypr.imac-gpu' "$MACOS_HYPR_MAIN" 2>/dev/null || \
+        sed -i 's|^require("hypr.monitors")|require("hypr.imac-gpu") -- Radeon stays the desktop GPU when the Intel iGPU is exposed\nrequire("hypr.monitors")|' "$MACOS_HYPR_MAIN"
+    sync_boot_files || return 1
+    macos_entry_present || sudo limine-entry-tool --add-efi "$MACOS_ENTRY" "$MACOS_LOADER" \
+        --comment "set_os, then EFI/Linux/omarchy_linux.efi (Intel HD 630 + working backlight)" || return 1
+    sudo sed -i "s|^default_entry: .*|default_entry: ${MACOS_ENTRY}|" /boot/limine.conf || return 1
+    verify_cmdline 'i915.vbt_firmware=imac18-3' && say "reboot to boot in macOS mode"
+}
+mod_macos_remove() {
+    local c
+    sudo sed -i 's|^default_entry: .*|default_entry: Omarchy/linux|' /boot/limine.conf
+    sudo limine-entry-tool --remove-efi-path "$MACOS_LOADER" --keep-files >/dev/null 2>&1
+    sudo rm -rf "$MACOS_LOADER"
+    sudo systemctl disable --now imac-backlight-nvram.service 2>/dev/null
+    sudo rm -f "$MACOS_NVRAM_BIN" "$MACOS_NVRAM_UNIT" "$MACOS_MKI" "$MACOS_AML" "$MACOS_VBT"
+    for c in "${MACOS_RULES[@]}"; do sudo rm -f "/etc/udev/rules.d/$c"; done
+    sudo udevadm control --reload; sudo systemctl daemon-reload
+    if grep -q 'i915.vbt_firmware=imac18-3' "$LIMINE_DEFAULT"; then
+        sudo cp "$LIMINE_DEFAULT" "${LIMINE_DEFAULT}.backup-unmacos-$(date +%s)"
+        sudo sed -i "s| ${MACOS_OPTS}||" "$LIMINE_DEFAULT"
+    fi
+    sed -i '/require("hypr.imac-gpu")/d' "$MACOS_HYPR_MAIN" 2>/dev/null; rm -f "$MACOS_HYPR"
+    sync_boot_files && verify_cmdline "" 'i915.vbt_firmware'
+    say "reboot to return to the plain boot (Intel iGPU hidden, brightness fixed at the firmware level)"
 }
 
 # ═══════════════════════ module: suspend ═══════════════════════════════════
