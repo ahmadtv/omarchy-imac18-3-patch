@@ -132,6 +132,9 @@ Everything here that belongs in the kernel, the audio driver or Omarchy itself, 
 | linux-efi (mailing list) | One line: add `iMac18,3` to `apple_match_product_name()` in `x86-stub.c` (the patcher applies the same change at build time) | Not sent; waits on #17042 |
 | [jackdanyell/imac18-3-cs8409-linux-audio#5](https://github.com/jackdanyell/imac18-3-cs8409-linux-audio/pull/5) | Headset mic, live jack switching, mic gains, EarPods remote buttons | Open PR |
 | [omacom/omarchy#10985](https://github.com/omacom/omarchy/pull/10985) | Omarchy's audio panel lists each jack's ports as rows, the way macOS and GNOME do | Open PR |
+| [omacom/omarchy#8792](https://github.com/omacom/omarchy/pull/8792) | Webcam overlay asks for MJPEG, so UVC cameras run at 30 fps instead of raw YUYV at 10 (our hardware numbers added) | Open PR (not ours); the `record` module's mpv profile goes once it lands |
+| [omacom/omarchy#11508](https://github.com/omacom/omarchy/issues/11508) | Stopping a screen recording twice posts two "saved" toasts and a broken thumbnail | Open, filed by us |
+| [omacom/omarchy#11509](https://github.com/omacom/omarchy/issues/11509) | Menu extensions: overriding an id resets its icon and label | Open, filed by us |
 | [omacom/omarchy#11464](https://github.com/omacom/omarchy/pull/11464) | Omarchy's Mac support page gains the 2017 iMac 5K: its known issues on stock Omarchy, and a link here | Open PR |
 | [lgse/strata#127](https://github.com/lgse/strata/issues/127) | GPU hang while Strata generated a video preview | Closed; the cause was the kernel VCE bug (#5595) |
 

@@ -325,6 +325,8 @@ mod_vram_remove() {
 # 10 fps over USB: a choppy overlay, and the recorder loses frames to it
 # (55 fps, played back fast). An mpv profile that fires only for v4l2 webcams
 # adds input_format=mjpeg after Omarchy's options: 29.97 fps, recorder 58 fps.
+# Upstream: the mpv profile goes once omacom/omarchy#8792 (MJPEG) lands; the
+# whole-row copy is needed until #11509 (override resets fields) is fixed.
 REC_RES=1920x1080
 REC_MENU="${HOME}/.config/omarchy/extensions/omarchy-menu.jsonc"
 REC_DEFAULT_MENU=/usr/share/omarchy/default/omarchy/omarchy-menu.jsonc
