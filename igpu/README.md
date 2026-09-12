@@ -65,6 +65,17 @@ Each stage is its own non-default Limine entry; the default is never touched.
    measured (RAPL is root-only).
 2. **Video on Intel.** `vainfo` on the Intel render node, ffmpeg transcodes,
    power (turbostat) against the default boot, then GuC/HuC on a separate boot.
+2b. **Intel as the default video GPU (stage 2), result 2026-09-12: it works.** Own UKI
+   built from `linux-side/mkinitcpio/zz-imac-igpu.conf` (i915 before amdgpu, VBT in the
+   initramfs). i915 registers first: renderD128/card1 = HD 630, renderD129/card2 = Radeon;
+   the Radeon still takes fb0 and the 5K desktop. With no device named, ffmpeg's VAAPI
+   picks iHD (1080p60 H.264 at 273 fps) and GStreamer's default `vah264enc`/`vah264dec`/
+   `vah265enc`/`vavp9dec` are the Intel ones (the Radeon's stay as `varenderD129*`). Every
+   graphics client (Hyprland, Xwayland, terminals, quickshell, voxtype, portal) holds only
+   amdgpu fds. Differences vs the default boot: `acpi_video0` behaves as on the default boot
+   (absent on stages 0-1); i801_smbus logs "BIOS is accessing SMBus registers" and inhibits
+   itself (only the DIMM SPD EEPROMs sit behind it). Caveat: `mkinitcpio -c <file>` skips
+   `/etc/mkinitcpio.conf.d`; build test images from a merged config and diff them.
 3. **Promotion** only after the above, and only as Ahmad's call.
 
 Known limits: Omarchy's screen recorder (gpu-screen-recorder) encodes on the
