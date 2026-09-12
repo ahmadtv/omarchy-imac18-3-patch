@@ -1,0 +1,11 @@
+# /etc/udev/rules.d/62-imac-smbus-acpi.rules -- iMac18,3 in macOS mode (set_os).
+#
+# With set_os the firmware leaves the PCH SMBus controller (00:1f.4) disabled and
+# drives the panel backlight over it from ACPI (acpi_video0 -> _BCM -> SMBus).
+# Linux's i2c_i801 would enable it, but then collides with the firmware at boot
+# ("BIOS is accessing SMBus registers ... inhibited"), so it is blacklisted
+# instead and this only enables the device's decoding -- no driver, no competing
+# bus access. Also inside the initramfs (zz-imac-igpu.conf), so it runs before
+# systemd-backlight restores the saved brightness. Harmless on the default boot,
+# where the firmware has already enabled it.
+ACTION=="add", SUBSYSTEM=="pci", KERNEL=="0000:00:1f.4", ATTR{vendor}=="0x8086", ATTR{enable}="1"

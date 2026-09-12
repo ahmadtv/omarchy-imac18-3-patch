@@ -85,7 +85,11 @@ Each stage is its own non-default Limine entry; the default is never touched.
      the backlight over it from ACPI; systemd-backlight's restore at boot collided with
      i2c_i801's probe ("BIOS is accessing SMBus registers ... inhibited"). The firmware owns
      that bus here and only the DIMM SPD EEPROMs sit on it, so the set_os entries boot with
-     `module_blacklist=i2c_i801`.
+     `module_blacklist=i2c_i801`. **But** i801 was also what enabled the controller: blacklisted,
+     00:1f.4 stays `COMMAND=0000` and brightness silently stops working (writes land, nothing
+     dims; enabling I/O decode by hand made it dim again). So `udev/62-imac-smbus-acpi.rules`
+     sets the device's sysfs `enable` (no driver, no competing access), and ships inside the
+     initramfs so it runs before systemd-backlight restores the saved level.
    - **Chromium** decodes H.264/HEVC on the Radeon (the GPU drawing its window; UVD 27% busy
      on the Cursor clip) and VP9/AV1 on the CPU (4K VP9 ~1.1 cores). Pointing it at Intel
      (`--hardware-video-device-path`) makes the HD 630 decode, but the Radeon cannot import
