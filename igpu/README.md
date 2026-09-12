@@ -40,6 +40,29 @@ Each stage is its own non-default Limine entry; the default is never touched.
    blacklist, plus `i915.disable_display=1 i915.vbt_firmware=imac18-3/headless-vbt.bin`.
    `snd_hda_core.gpu_bind=0` stays (instead of the draft's `probe_mask`): HD-audio then
    never waits for i915, so a failing i915 cannot take the speakers with it.
+   **Result 2026-09-12: it works.** i915 bound 00:02.0, DMC 1.4 loaded, zero connectors
+   ("Cannot find any crtc or sizes"), 5K desktop on the Radeon, audio unaffected,
+   `/dev/dri/intel-render` = renderD129, AMD kept card1/renderD128, Hyprland got
+   `AQ_DRM_DEVICES=/dev/dri/amd-card`, the iGPU runtime-suspends to D3hot when idle.
+   vainfo (iHD 26.2.4): H.264 encode (normal + low-power), HEVC 8- and 10-bit encode,
+   VP8/JPEG/MPEG-2 encode; decode H.264, HEVC 8/10, VP9 8/10, VP8, VC-1, JPEG.
+
+   `scripts/video-bench`, identical lossless sources, same bitrate targets:
+
+   | Test | Intel HD 630 | Radeon Pro 575 | x264/x265 (CPU) |
+   |---|---|---|---|
+   | H.264 1080p60 8M | **295 fps**, VMAF 96.12 at 5.1 Mb/s | 82 fps, 96.12 at 7.9 Mb/s | 176 fps veryfast |
+   | H.264 1440p60 12M | **185 fps**, 96.03 at 7.6 Mb/s | 49 fps, 96.10 at 12.1 Mb/s | 111 fps |
+   | H.264 2160p30 20M | **86 fps**, 90.05 | 22 fps, 90.15 | 34 fps |
+   | HEVC 1080p60 5M | 133 fps, **VMAF 95.34** at 3.7 Mb/s | 122 fps, 89.89 at 4.9 Mb/s | 50 fps |
+   | HEVC 2160p30 12M | 32 fps, 89.81 | **37 fps**, 89.83 | 10 fps |
+   | Decode 4K H.264 / HEVC / VP9 | **192 / 223 / 313 fps** | 111 / 82 / none | 208 / 94 / 165 |
+
+   Intel is 3.6-3.8x faster at H.264 and reaches the same quality with 35-37% fewer
+   bits at 1080p/1440p; it wins HEVC quality at 1080p by a wide margin; the Radeon is
+   slightly faster at 4K HEVC. Only Intel handles 1440p60 and 4K30 H.264 in real time.
+   Intel's higher CPU% reflects frame upload at 3-4x the frame rate. Power not
+   measured (RAPL is root-only).
 2. **Video on Intel.** `vainfo` on the Intel render node, ffmpeg transcodes,
    power (turbostat) against the default boot, then GuC/HuC on a separate boot.
 3. **Promotion** only after the above, and only as Ahmad's call.
