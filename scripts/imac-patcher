@@ -50,7 +50,7 @@ mkdir -p "$LOGDIR" "$CACHE"
 # they are the same on every machine. Those live in omarchy-tweaks, which
 # brings its own tool and its own bar widget. This is a one-time run per
 # machine, so it stays a terminal thing.
-MODULES=(audio color vram suspend gpureset boot 5k macos)
+MODULES=(audio color vram record suspend gpureset boot 5k macos)
 # Retired: wifi (the Broadcom handshake fix) -- Omarchy ships it for every Mac
 # since omacom/omarchy#6652, in the same /etc/modprobe.d/brcmfmac.conf.
 
@@ -306,6 +306,60 @@ mod_vram_apply() {
 mod_vram_remove() {
     rm -f "$VRAM_ENV"; systemctl --user daemon-reload; vram_restart_users
     say "removed — ggml tools may use the CPU-visible window again"
+}
+
+# ═══════════════════════ module: record ════════════════════════════════════
+# The Radeon Pro 575's H.264 encoder manages about 29 fps at 3840x2160, and
+# Omarchy's recorder asks for 4K at 60 on any screen larger than 4K. It stamps
+# the frames 1/60 s apart anyway, so the video plays at double speed and ends
+# long before its audio, and stopping has to drain the backlog (past Omarchy's
+# 5 s limit with the webcam on: "force-killed"). 2560x1440, exactly half of 5K,
+# records at full speed (58.5 fps measured). The recorder takes --resolution=,
+# but Omarchy's menu rows don't pass one; its menu extension file overrides a
+# row's action by id, so these rows pass it. The webcam row calls the recorder
+# directly (the recorder picks the first webcam itself); the launcher it
+# replaces only adds a picker when two or more webcams are plugged in.
+REC_RES=2560x1440
+REC_MENU="${HOME}/.config/omarchy/extensions/omarchy-menu.jsonc"
+REC_DEFAULT_MENU=/usr/share/omarchy/default/omarchy/omarchy-menu.jsonc
+REC_BEGIN="  // >>> imac-patcher: record"
+REC_END="  // <<< imac-patcher: record"
+REC_IDS=(trigger.capture.screenrecord.no-audio trigger.capture.screenrecord.desktop-audio
+    trigger.capture.screenrecord.microphone trigger.capture.screenrecord.webcam)
+mod_record_title() { echo "Screen recording at full speed (2560x1440)"; }
+mod_record_tier()  { echo safe; }
+mod_record_desc()  { echo "The Radeon records 4K at only ~29 fps, so Omarchy's 4K recordings come out sped up and shorter than their audio, and can hang on stop. Makes the Screenrecord menu record at 2560x1440 (half of 5K, full 60 fps)."; }
+mod_record_detect() {
+    grep -qF "$REC_BEGIN" "$REC_MENU" 2>/dev/null || { echo not-applied; return; }
+    local id
+    # Omarchy renamed a row: the override would no longer reach it.
+    for id in "${REC_IDS[@]}"; do grep -qF "\"$id\"" "$REC_DEFAULT_MENU" 2>/dev/null || { echo partial; return; }; done
+    echo applied
+}
+mod_record_apply() {
+    local r="--resolution=${REC_RES}" block
+    mod_record_remove >/dev/null
+    [[ -f $REC_MENU ]] || { mkdir -p "$(dirname "$REC_MENU")" && printf '{\n}\n' >"$REC_MENU"; }
+    block="${REC_BEGIN} (the Radeon encodes 4K at ~29 fps; ${REC_RES} at 60)
+  \"trigger.capture.screenrecord.no-audio\": {\"action\":\"omarchy-capture-screenrecording ${r}\"},
+  \"trigger.capture.screenrecord.desktop-audio\": {\"action\":\"omarchy-capture-screenrecording --with-desktop-audio ${r}\"},
+  \"trigger.capture.screenrecord.microphone\": {\"action\":\"omarchy-capture-screenrecording --with-desktop-audio --with-microphone-audio ${r}\"},
+  \"trigger.capture.screenrecord.webcam\": {\"action\":\"omarchy-capture-screenrecording --with-desktop-audio --with-microphone-audio --with-webcam ${r}\"},
+${REC_END}"
+    # Insert before the file's closing brace (its last line that is just "}").
+    BLOCK="$block" python3 - "$REC_MENU" <<'PY' || return 1
+import os, sys
+p = sys.argv[1]; lines = open(p).read().split("\n")
+i = max(n for n, l in enumerate(lines) if l.strip() == "}")
+lines[i:i] = os.environ["BLOCK"].split("\n")
+open(p, "w").write("\n".join(lines))
+PY
+    say "Screenrecord menu rows now record at ${REC_RES} (the menu reloads by itself)"
+}
+mod_record_remove() {
+    [[ -f $REC_MENU ]] || return 0
+    sed -i "\|^${REC_BEGIN}|,\|^${REC_END}\$|d" "$REC_MENU"
+    say "Screenrecord menu back to Omarchy's default resolution"
 }
 
 # ═══════════════════════ module: gpureset ══════════════════════════════════
@@ -755,9 +809,10 @@ case "${1:-}" in
         action="${1#--}"; shift
         [[ ${1:-} == safe ]] && { set -- ; for m in "${MODULES[@]}"; do [[ $("mod_${m}_tier") == safe ]] && set -- "$@" "$m"; done; }
         (( $# )) || { echo "usage: $0 --${action} <id...|safe>   ids: ${MODULES[*]}" >&2; exit 2; }
-        # Every module needs root, and boot's detection reads the ESP: without a
-        # sudo ticket it would read as n/a and be skipped.
-        sudo -v || exit 1
+        # Most modules need root, and boot's detection reads the ESP: take the
+        # sudo ticket first so it doesn't read as n/a. Not fatal: modules that
+        # need no root (vram, record) still run without one.
+        sudo -v 2>/dev/null || true
         for id in "$@"; do
             [[ " ${MODULES[*]} " == *" $id "* ]] || { warn "unknown module: $id"; continue; }
             run_module "$action" "$id"
@@ -768,7 +823,7 @@ case "${1:-}" in
 esac
 
 # ── interactive ────────────────────────────────────────────────────────────
-sudo -v || exit 1
+sudo -v 2>/dev/null || true
 show_status
 echo
 if ((HAVE_GUM)); then

@@ -82,6 +82,7 @@ The patcher shows what's applied, what isn't, and lets you pick — **nothing is
 ./scripts/imac-patcher --apply 5k      # native 5K (rebuilds only the amdgpu module)
 ./scripts/imac-patcher --apply audio   # speakers, mics, EarPods + buttons
 ./scripts/imac-patcher --apply vram    # ggml/Vulkan tools off the 256 MiB CPU-visible window
+./scripts/imac-patcher --apply record  # Omarchy's screen recordings at 2560x1440, full speed (the Radeon encodes 4K at ~29 fps)
 ./scripts/imac-patcher --apply macos   # Intel iGPU for video + working, full-range brightness (kernel tells the firmware it's macOS)
 ./scripts/imac-patcher --remove 5k     # full undo, any time
 ```
