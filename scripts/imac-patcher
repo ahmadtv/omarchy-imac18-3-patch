@@ -810,9 +810,11 @@ case "${1:-}" in
         [[ ${1:-} == safe ]] && { set -- ; for m in "${MODULES[@]}"; do [[ $("mod_${m}_tier") == safe ]] && set -- "$@" "$m"; done; }
         (( $# )) || { echo "usage: $0 --${action} <id...|safe>   ids: ${MODULES[*]}" >&2; exit 2; }
         # Most modules need root, and boot's detection reads the ESP: take the
-        # sudo ticket first so it doesn't read as n/a. Not fatal: modules that
-        # need no root (vram, record) still run without one.
-        sudo -v 2>/dev/null || true
+        # sudo ticket first so it doesn't read as n/a. Only from a terminal:
+        # without one sudo can't ask, and every try counts toward pam_faillock
+        # (10 in a row locks the account). Modules that need no root (vram,
+        # record) run either way.
+        [[ -t 0 ]] && { sudo -v || true; }
         for id in "$@"; do
             [[ " ${MODULES[*]} " == *" $id "* ]] || { warn "unknown module: $id"; continue; }
             run_module "$action" "$id"
@@ -823,7 +825,7 @@ case "${1:-}" in
 esac
 
 # ── interactive ────────────────────────────────────────────────────────────
-sudo -v 2>/dev/null || true
+[[ -t 0 ]] && { sudo -v || true; }
 show_status
 echo
 if ((HAVE_GUM)); then
