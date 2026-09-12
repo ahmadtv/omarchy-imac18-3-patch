@@ -18,6 +18,16 @@ real screen recording with the webcam on, the case that turned the screen pink
 on 2026-09-11. `scripts/vce-stress` and `scripts/vce-reset-test` re-check both
 before the carried patches are dropped.
 
+## 5K on kernel 7.3
+
+The 5K module is verified on 7.1.x/7.2.x only. When Arch moves to 7.3, port it
+from taprobane99's slim 7.3-rc1 patch (drm/amd#4455, about 290 lines: wake and
+tiles only) plus the three pieces it leaves out: the deterministic genlock, the
+reboot/shutdown handoff, and the latch-write-is-not-a-hotplug fix. Keep the
+second-tile wake timing at 300 ms / 30 ms unless it is measured on the 18,3
+(his 100 ms / 3 ms saves at most ~27 ms per boot). Drop
+`amdgpu-vce3-ring-align-mask.patch` there: 7.3 has the fix.
+
 ## SD card reader
 
 Never worked (no `mmcblk` in any boot). The card is identified, then every data
