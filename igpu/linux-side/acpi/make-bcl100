@@ -18,7 +18,7 @@ W=$(mktemp -d); trap 'rm -rf "$W"' EXIT; cd "$W"
 for t in /sys/firmware/acpi/tables/DSDT /sys/firmware/acpi/tables/SSDT*; do cat "$t" > "$(basename "$t").dat"; done
 T=$(grep -l 'PEG0GFX0' SSDT*.dat | head -1) || { echo "no PEG0GFX0 SSDT on this machine"; exit 1; }
 iasl -e DSDT.dat $(ls SSDT*.dat | grep -vx "$T") -d "$T" >/dev/null 2>&1
-python3 - "${T%.dat}.dsl" <<'PY'
+rc=0; python3 - "${T%.dat}.dsl" <<'PY' || rc=$?
 import re, sys
 p = sys.argv[1]; s = open(p).read()
 s, n = re.subn(r'("PEG0GFX0", )0x([0-9A-F]{8})\)', lambda m: '%s0x%08X)' % (m.group(1), int(m.group(2), 16) + 1), s, count=1)
@@ -26,11 +26,18 @@ assert n == 1, "DefinitionBlock header not found"
 m = re.search(r'(Method \(ABCL, 0, NotSerialized\)\s*\{\s*Return \(Package \()0x[0-9A-F]+(\)\s*\{)(.*?)(\}\))', s, re.S)
 assert m, "ABCL not found"
 old = [v.strip() for v in m.group(3).replace('\n', ' ').split(',') if v.strip()]
-assert old[0] == '0x50' and len(old) == 0x52, "unexpected ABCL: already patched or a different firmware"
+if old[0] == '0x64' and len(old) == 2 + 97:
+    sys.exit(3)          # this boot already runs the upgraded table
+assert old[0] == '0x50' and len(old) == 0x52, "unexpected ABCL: a different firmware?"
 levels = list(range(4, 101))
 body = ",\n                    ".join(['0x64', '0x32'] + ['0x%02X' % i for i in levels])
 s = s[:m.start()] + m.group(1) + '0x%02X' % (2 + len(levels)) + m.group(2) + '\n                    ' + body + '\n                ' + m.group(4) + s[m.end():]
 open(p, 'w').write(s)
 PY
+if ((rc == 3)); then
+  # Booted with the override already: the loaded table is exactly the output.
+  install -Dm644 "$T" "$OUT"; echo "wrote $OUT ($(stat -c %s "$OUT") bytes): copied the already-upgraded table"; exit 0
+fi
+((rc == 0)) || exit "$rc"
 iasl -p out "${T%.dat}.dsl" >iasl.log 2>&1 || { grep -E "^Error" iasl.log; exit 1; }
 install -Dm644 out.aml "$OUT"; echo "wrote $OUT ($(stat -c %s "$OUT") bytes): ABCL levels 4..100"
