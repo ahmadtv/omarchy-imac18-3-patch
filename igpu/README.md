@@ -76,6 +76,23 @@ Each stage is its own non-default Limine entry; the default is never touched.
    (absent on stages 0-1); i801_smbus logs "BIOS is accessing SMBus registers" and inhibits
    itself (only the DIMM SPD EEPROMs sit behind it). Caveat: `mkinitcpio -c <file>` skips
    `/etc/mkinitcpio.conf.d`; build test images from a merged config and diff them.
+2c. **Side effects of macOS mode, 2026-09-12.**
+   - **Brightness works.** With set_os the firmware's `acpi_video0` actually dims the panel
+     (verified by eye: 79 -> 15 -> 79); on the default boot it accepts writes and does
+     nothing. Omarchy's `omarchy-hw-display` already picks `acpi_video0`, so the brightness
+     keys/OSD need no change. Supersedes the `acpi_backlight=native` test entry.
+   - **SMBus:** in macOS mode the firmware leaves the SMBus controller disabled and drives
+     the backlight over it from ACPI; systemd-backlight's restore at boot collided with
+     i2c_i801's probe ("BIOS is accessing SMBus registers ... inhibited"). The firmware owns
+     that bus here and only the DIMM SPD EEPROMs sit on it, so the set_os entries boot with
+     `module_blacklist=i2c_i801`.
+   - **Chromium** decodes H.264/HEVC on the Radeon (the GPU drawing its window; UVD 27% busy
+     on the Cursor clip) and VP9/AV1 on the CPU (4K VP9 ~1.1 cores). Pointing it at Intel
+     (`--hardware-video-device-path`) makes the HD 630 decode, but the Radeon cannot import
+     the frames (`eglCreateImage failed`, `Unable to initialize binding from pixmap`), so
+     leave Chromium on its default.
+   - **Strata** previews landed on the HD 630 with no setting (its sandboxed ffmpeg took
+     renderD128).
 3. **Promotion** only after the above, and only as Ahmad's call.
 
 Known limits: Omarchy's screen recorder (gpu-screen-recorder) encodes on the
