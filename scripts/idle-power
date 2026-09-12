@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+#
+# idle-power -- 60 s power snapshot, identical on every boot, for comparing the
+# default boot (iGPU hidden) with the set_os boots (iGPU exposed, i915 headless).
+# Prints processor package/core/iGPU/RAM watts and package C-state residency
+# (turbostat), the Radeon's average board power, and the iGPU's runtime-PM state.
+#   sudo scripts/idle-power [seconds]        (needs: turbostat)
+set -u
+T=${1:-60}; [[ $EUID -eq 0 ]] || { echo "run with sudo"; exit 1; }
+amd=$(for f in /sys/class/drm/card*/device/hwmon/hwmon*/power1_input; do
+        [[ $(basename "$(readlink -f "${f%/hwmon/*}/driver")") == amdgpu ]] && { echo "$f"; break; }; done)
+tmp=$(mktemp); trap 'rm -f "$tmp"' EXIT
+( n=$((T/2)); for _ in $(seq 1 "$n"); do cat "$amd" 2>/dev/null; sleep 2; done ) > "$tmp" &
+echo "idle-power: ${T}s, $(uname -r), cmdline i915: $(tr ' ' '\n' </proc/cmdline | grep -c '^i915\.') opts"
+turbostat --quiet --Summary --show Busy%,PkgWatt,CorWatt,GFXWatt,RAMWatt,Pkg%pc2,Pkg%pc3,Pkg%pc6,Pkg%pc7 \
+          --interval "$T" --num_iterations 1 2>&1 | tail -2
+wait
+awk '{s+=$1; n++} END{if (n) printf "Radeon board power: %.1f W avg\n", s/n/1e6}' "$tmp"
+ig=/sys/bus/pci/devices/0000:00:02.0
+if [[ -e $ig/driver ]]; then echo "iGPU: $(cat $ig/power/runtime_status) (suspended $(cat $ig/power/runtime_suspended_time) ms, active $(cat $ig/power/runtime_active_time) ms)"
+elif [[ -e $ig ]]; then echo "iGPU: visible, no driver"; else echo "iGPU: hidden by firmware"; fi
