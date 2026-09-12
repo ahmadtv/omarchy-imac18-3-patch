@@ -36,6 +36,10 @@ Each stage is its own non-default Limine entry; the default is never touched.
    ATI HDMI). No new kernel warnings beyond `Module i915 is blacklisted`.
 1. **i915 headless.** `linux-side/README.md` stage B: `i915.disable_display=1`
    plus the no-outputs VBT, packages installed, stop at once if the panel blanks.
+   Staged 2026-09-12 as "Test - iGPU i915 headless": stage 0's cmdline without the
+   blacklist, plus `i915.disable_display=1 i915.vbt_firmware=imac18-3/headless-vbt.bin`.
+   `snd_hda_core.gpu_bind=0` stays (instead of the draft's `probe_mask`): HD-audio then
+   never waits for i915, so a failing i915 cannot take the speakers with it.
 2. **Video on Intel.** `vainfo` on the Intel render node, ffmpeg transcodes,
    power (turbostat) against the default boot, then GuC/HuC on a separate boot.
 3. **Promotion** only after the above, and only as Ahmad's call.
