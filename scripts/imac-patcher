@@ -337,22 +337,34 @@ mod_record_detect() {
     echo applied
 }
 mod_record_apply() {
-    local r="--resolution=${REC_RES}" block
     mod_record_remove >/dev/null
     [[ -f $REC_MENU ]] || { mkdir -p "$(dirname "$REC_MENU")" && printf '{\n}\n' >"$REC_MENU"; }
-    block="${REC_BEGIN} (the Radeon encodes 4K at ~29 fps; ${REC_RES} at 60)
-  \"trigger.capture.screenrecord.no-audio\": {\"action\":\"omarchy-capture-screenrecording ${r}\"},
-  \"trigger.capture.screenrecord.desktop-audio\": {\"action\":\"omarchy-capture-screenrecording --with-desktop-audio ${r}\"},
-  \"trigger.capture.screenrecord.microphone\": {\"action\":\"omarchy-capture-screenrecording --with-desktop-audio --with-microphone-audio ${r}\"},
-  \"trigger.capture.screenrecord.webcam\": {\"action\":\"omarchy-capture-screenrecording --with-desktop-audio --with-microphone-audio --with-webcam ${r}\"},
-${REC_END}"
-    # Insert before the file's closing brace (its last line that is just "}").
-    BLOCK="$block" python3 - "$REC_MENU" <<'PY' || return 1
-import os, sys
-p = sys.argv[1]; lines = open(p).read().split("\n")
+    # Omarchy fills in an entry's missing fields (label = id, no icon) before it
+    # merges the user file, so an override has to carry the whole row: copy each
+    # row from Omarchy's own menu and change only its action. The block goes in
+    # before the file's closing brace (its last line that is just "}").
+    python3 - "$REC_MENU" "$REC_DEFAULT_MENU" "$REC_RES" "$REC_BEGIN" "$REC_END" <<'PY' || return 1
+import json, re, sys
+user, default, res, begin, end = sys.argv[1:6]
+raw = re.sub(r"(?m)^\s*//[^\n]*(\n|$)", "", open(default).read())
+rows = json.loads(re.sub(r",(\s*[}\]])", r"\1", raw))
+cmd = "omarchy-capture-screenrecording"
+actions = {
+    "trigger.capture.screenrecord.no-audio": f"{cmd} --resolution={res}",
+    "trigger.capture.screenrecord.desktop-audio": f"{cmd} --with-desktop-audio --resolution={res}",
+    "trigger.capture.screenrecord.microphone": f"{cmd} --with-desktop-audio --with-microphone-audio --resolution={res}",
+    "trigger.capture.screenrecord.webcam": f"{cmd} --with-desktop-audio --with-microphone-audio --with-webcam --resolution={res}",
+}
+block = [f"{begin} (the Radeon encodes 4K at ~29 fps; {res} at 60)"]
+for rid, action in actions.items():
+    if rid not in rows:
+        sys.exit(f"Omarchy's menu has no row {rid}; nothing overridden")
+    block.append(f'  "{rid}": {json.dumps(dict(rows[rid], action=action), ensure_ascii=False)},')
+block.append(end)
+lines = open(user).read().split("\n")
 i = max(n for n, l in enumerate(lines) if l.strip() == "}")
-lines[i:i] = os.environ["BLOCK"].split("\n")
-open(p, "w").write("\n".join(lines))
+lines[i:i] = block
+open(user, "w").write("\n".join(lines))
 PY
     say "Screenrecord menu rows now record at ${REC_RES} (the menu reloads by itself)"
 }
