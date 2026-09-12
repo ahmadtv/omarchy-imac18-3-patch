@@ -83,7 +83,7 @@ The patcher shows what's applied, what isn't, and lets you pick — **nothing is
 ./scripts/imac-patcher --apply audio   # speakers, mics, EarPods + buttons
 ./scripts/imac-patcher --apply wifi    # Broadcom firmware handshake off (associates on WPA2/WPA3-mixed)
 ./scripts/imac-patcher --apply vram    # ggml/Vulkan tools off the 256 MiB CPU-visible window
-./scripts/imac-patcher --apply macos   # Intel iGPU for video + working, full-range brightness (boots via imac-set-os.efi)
+./scripts/imac-patcher --apply macos   # Intel iGPU for video + working, full-range brightness (kernel tells the firmware it's macOS)
 ./scripts/imac-patcher --remove 5k     # full undo, any time
 ```
 

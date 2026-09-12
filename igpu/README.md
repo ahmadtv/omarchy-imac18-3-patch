@@ -1,20 +1,20 @@
 # Intel HD 630 on the iMac18,3 -- experimental
 
 The iMac18,3 has an Intel HD 630 (8086:5912) next to the Radeon Pro 575. Apple
-firmware hides it unless the loader announces macOS through the Apple `set_os`
-EFI protocol; macOS runs it headless (0 framebuffers) and sends Apple's video
+firmware hides it unless something announces macOS through the Apple `set_os`
+EFI protocol before the kernel starts; macOS runs it headless (0 framebuffers) and sends Apple's video
 framework -- H.264/HEVC encode and decode -- to it. Nobody has published i915 on
 an iMac18,x under Linux; the only upstream attempt (an iMac20,1, Jan-Feb 2026,
 unmerged) blanked the Radeon-driven panel once i915 probed a display it made up.
 
 Goal: the same split as macOS. The Radeon keeps the display, the compositor
 and everything else; the Intel chip does video (VA-API via intel-media-driver)
-and nothing else. Nothing here is installed or wired into `imac-patcher`.
+and nothing else. `imac-patcher --apply macos` installs it (stage 2f below).
 
 | Directory | What |
 |---|---|
-| `set-os-loader/` | `imac-set-os.efi`, a 4.6 KB EFI app built from source here: calls `set_os` exactly like the kernel's `apple_set_os()`, then chainloads a UKI with the rest of its options. QEMU-tested (9/9), not yet run on the iMac. |
-| `linux-side/` | Drafts for when the iGPU exists: headless i915 options, a no-outputs VBT, stable `/dev/dri` names, Hyprland pinned to the Radeon, WirePlumber and hibernation guards, `scripts/igpu-check`. |
+| `linux-side/` | What the `macos` module installs: the `imac-setos` mkinitcpio hook (stage 2f), headless i915 options, a no-outputs VBT, stable `/dev/dri` names, Hyprland pinned to the Radeon, the full-range backlight table and boot brightness. |
+| `set-os-loader/` | `imac-set-os.efi`, a 4.6 KB EFI app that calls `set_os` exactly like the kernel's `apple_set_os()`, then chainloads a UKI. It proved set_os works on this iMac (stages 0-2e); superseded by the hook, kept as the reference. |
 
 ## Order of work
 
@@ -128,7 +128,19 @@ Each stage is its own non-default Limine entry; the default is never touched.
    (99.95%, was 52400 = 80%). The firmware honours `backlight-level`: the panel stayed at the
    saved level from power-on through the splash. Note: the override's file name must be under
    18 bytes (`lib/earlycpio.c`), hence `imac-bcl100.aml`.
-3. **Promotion** only after the above, and only as Ahmad's call.
+2f. **One entry, no loader (2026-09-12).** The kernel's own EFI stub already calls `set_os`
+   -- `apple_set_os()` in `drivers/firmware/efi/libstub/x86-stub.c`, for the eight MacBook
+   Pros in `apple_match_product_name()`. That list is a `char[][15]` stored uncompressed in
+   the stub, so `linux-side/mkinitcpio/imac-setos`, a mkinitcpio post hook, rewrites its last
+   slot (`MacBookPro16,4`) to `iMac18,3` in every UKI mkinitcpio builds: 14 bytes, the same
+   bytes the one-line source patch compiles to. It runs before limine-entry-tool copies the
+   UKI and pins its hash, so kernel updates keep it, and the menu is the plain
+   "Omarchy > linux" entry. If a kernel ever changes the list, the hook warns and leaves the
+   image stock rather than failing the update. **Result (test entry, UKI booted directly
+   by Limine):** 00:02.0 present with i915, SMBus enabled, `acpi_video0` 0..96 dims the
+   panel, 5K and audio normal, same kernel errors as the loader boot. Upstream: add
+   `"iMac18,3"` to that list; the hook goes once the kernel carries it.
+3. **Promotion: done 2026-09-12.** macOS mode is the default "Omarchy > linux" boot.
 
 Known limits: Omarchy's screen recorder (gpu-screen-recorder) encodes on the
 GPU it captures from, so screen recording stays on the Radeon unless a

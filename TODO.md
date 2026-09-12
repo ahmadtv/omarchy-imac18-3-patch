@@ -6,11 +6,11 @@ led to the fixes now in `patches/`.
 
 ## Display dimming (backlight)
 
-**2026-09-12: works on boots through `imac-set-os.efi` (macOS mode)** -- the firmware's
-`acpi_video0` dims the panel there (see `igpu/README.md`). The notes below describe the
-default boot, where it stays inert; the `acpi_backlight=native` entry is superseded once
-the set_os boot becomes the default. Next: wire the ambient light sensor (`acpi-als`,
-iio:device0) to auto-brightness.
+**2026-09-12: works in macOS mode** (`imac-patcher --apply macos`, the default boot) --
+the firmware's `acpi_video0` dims the panel there (see `igpu/README.md`). The notes below
+describe a boot without it, where it stays inert; the `acpi_backlight=native` entry is
+superseded. Next: wire the ambient light sensor (`acpi-als`, iio:device0) to
+auto-brightness.
 
 At boot amdgpu logs `Skipping amdgpu DM backlight registration` and hands the
 backlight to ACPI, whose `acpi_video0` is broken (`ACPI(GFX0) defines _DOD but

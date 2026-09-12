@@ -1,0 +1,75 @@
+#!/usr/bin/env python3
+"""mkinitcpio post hook: add iMac18,3 to the kernel's apple_set_os model list.
+
+Installed as /etc/initcpio/post/imac-setos. mkinitcpio runs it after every
+image it builds -- kernel updates included -- as
+    imac-setos KERNEL IMAGE... [UKI]
+and it patches each .efi (the UKI) in place, before limine-entry-tool copies
+the UKI to the ESP and pins its hash.
+
+Why: the x86 EFI stub (drivers/firmware/efi/libstub/x86-stub.c) tells Apple
+firmware "macOS is booting" via the set_os protocol, but only for the models
+in apple_match_product_name():
+
+    static const char type1_product_matches[][15] = {
+        "MacBookPro11,3", ... "MacBookPro16,4",
+    };
+
+On this iMac that call keeps the Intel HD 630 and the backlight SMBus alive.
+The list sits uncompressed in the stub, so the edit is made in the built
+image: the last slot (MacBookPro16,4) becomes "iMac18,3", NUL padded to 15
+bytes -- byte for byte what the one-line source patch compiles to, minus a
+MacBookPro16,4 match this machine never needs. Drop this hook once the
+kernel lists iMac18,3 itself.
+
+Never fails the build: if the kernel's list ever changes, it warns and
+leaves the image stock (Intel GPU hidden, 16-step brightness), rather than
+stopping a kernel update from installing.
+"""
+import sys
+
+SLOT = 15
+MODELS = [b"MacBookPro11,3", b"MacBookPro11,5", b"MacBookPro13,3",
+          b"MacBookPro14,3", b"MacBookPro15,1", b"MacBookPro15,3",
+          b"MacBookPro16,1", b"MacBookPro16,4"]
+OURS = b"iMac18,3"
+
+
+def table(models):
+    return b"".join(m.ljust(SLOT, b"\0") for m in models)
+
+
+def patch(path):
+    with open(path, "rb") as f:
+        data = bytearray(f.read())
+    if data.count(table(MODELS[:-1] + [OURS])) == 1:
+        return f"{path}: already lists iMac18,3"
+    stock = table(MODELS)
+    if data.count(stock) != 1:
+        return (f"WARNING {path}: set_os model list not found as expected; "
+                f"left stock (Intel GPU stays hidden). Update MODELS in {sys.argv[0]}")
+    at = data.find(stock) + 7 * SLOT
+    data[at:at + SLOT] = OURS.ljust(SLOT, b"\0")
+    with open(path, "r+b") as f:
+        f.seek(at)
+        f.write(data[at:at + SLOT])
+    return f"{path}: iMac18,3 added to the set_os list"
+
+
+def main():
+    try:
+        with open("/sys/class/dmi/id/product_name") as f:
+            if f.read().strip() != "iMac18,3":
+                return
+    except OSError:
+        return
+    for path in sys.argv[2:]:
+        if path.endswith(".efi"):
+            try:
+                print(f"  imac-setos: {patch(path)}")
+            except OSError as e:
+                print(f"  imac-setos: WARNING {path}: {e}")
+
+
+if __name__ == "__main__":
+    main()

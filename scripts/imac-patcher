@@ -379,12 +379,14 @@ mod_gpureset_remove() {
 # macOS through the Apple set_os protocol before the kernel starts fixes both,
 # like macOS itself: the HD 630 becomes the default video GPU (Quick Sync) while
 # the Radeon keeps display and 3D, and the firmware's backlight dims the panel.
-# Plus the full 0..65535 backlight range (Apple's ACPI table stops at 80%) and
-# the panel lit at the saved brightness from power-on. Details: igpu/README.md.
+# The kernel's EFI stub already makes that call for eight MacBook Pro models; a
+# mkinitcpio post hook adds iMac18,3 to that list in every UKI it builds, so the
+# normal "Omarchy > linux" entry boots this way. Plus the full 0..65535
+# backlight range (Apple's ACPI table stops at 80%) and the panel lit at the
+# saved brightness from power-on. Details: igpu/README.md.
 IG="${REPO_DIR}/igpu"
-MACOS_ESP_DIR=/boot/EFI/imac-set-os
-MACOS_LOADER="${MACOS_ESP_DIR}/imac-set-os.efi"
-MACOS_ENTRY="Omarchy iMac"   # top of the menu (priority 90), the default; "Omarchy" stays as the plain fallback
+MACOS_HOOK=/etc/initcpio/post/imac-setos
+MACOS_OLD_LOADER_DIR=/boot/EFI/imac-set-os   # the EFI loader this module used before the hook
 MACOS_OPTS="snd_hda_core.gpu_bind=0 i915.disable_display=1 i915.vbt_firmware=imac18-3/headless-vbt.bin module_blacklist=i2c_i801"
 MACOS_VBT=/usr/lib/firmware/imac18-3/headless-vbt.bin
 MACOS_RULES=(61-imac-dri-names.rules 62-imac-smbus-acpi.rules)
@@ -396,9 +398,16 @@ MACOS_HYPR="${HOME}/.config/hypr/imac-gpu.lua"
 MACOS_HYPR_MAIN="${HOME}/.config/hypr/hyprland.lua"
 mod_macos_title() { echo "macOS mode: Intel video + working brightness"; }
 mod_macos_tier()  { echo boot; }
-mod_macos_desc()  { echo "Boots through a small EFI app that tells the firmware it is starting macOS. That exposes the Intel HD 630, which then encodes and decodes video for every app that picks the first GPU (H.264 about 3.7x faster than the Radeon), and makes the brightness slider work -- over the panel's full range, starting at the saved level from power-on. The Radeon keeps the display and all 3D. The old way stays in the menu as 'Omarchy'."; }
-macos_entry_present()  { sudo grep -qxF "/${MACOS_ENTRY}" /boot/limine.conf 2>/dev/null; }
-macos_is_default()     { sudo grep -qxF "default_entry: ${MACOS_ENTRY}" /boot/limine.conf 2>/dev/null; }
+mod_macos_desc()  { echo "Makes the kernel tell the firmware it is starting macOS, as it already does for some MacBook Pros. That exposes the Intel HD 630, which then encodes and decodes video for every app that picks the first GPU (H.264 about 3.7x faster than the Radeon), and makes the brightness slider work -- over the panel's full range, starting at the saved level from power-on. The Radeon keeps the display and all 3D. Same single 'Omarchy > linux' boot entry, kept through kernel updates."; }
+macos_uki_patched() { sudo grep -qa 'iMac18,3' "$UKI_PATH" 2>/dev/null; }
+# Earlier versions booted through an EFI loader with its own "Omarchy iMac"
+# menu entry; the hook replaces it, so clear it out.
+macos_drop_old_loader() {
+    sudo test -d "$MACOS_OLD_LOADER_DIR" || return 0
+    sudo limine-entry-tool --remove-efi-path "${MACOS_OLD_LOADER_DIR}/imac-set-os.efi" --keep-files >/dev/null 2>&1
+    sudo sed -i 's|^default_entry: Omarchy iMac$|default_entry: Omarchy/linux|' /boot/limine.conf
+    sudo rm -rf "$MACOS_OLD_LOADER_DIR"
+}
 mod_macos_detect() {
     [[ $(cat /sys/class/dmi/id/product_name 2>/dev/null) == iMac18,3 ]] || { echo n/a; return; }
     local have=0 total=7
@@ -407,21 +416,19 @@ mod_macos_detect() {
     [[ -f $MACOS_MKI && -f $MACOS_AML ]] && ((have++))
     grep -q 'i915.vbt_firmware=imac18-3' "$LIMINE_DEFAULT" 2>/dev/null && ((have++))
     systemctl is-enabled -q imac-backlight-nvram.service 2>/dev/null && ((have++))
-    macos_entry_present && sudo test -f "$MACOS_LOADER" && ((have++))
-    macos_is_default && ((have++))
+    [[ -x $MACOS_HOOK ]] && ((have++))
+    macos_uki_patched && ((have++))
     if ((have == total)); then echo applied; elif ((have == 0)); then echo not-applied; else echo partial; fi
 }
 mod_macos_apply() {
-    local need=() c
-    for c in clang lld-link iasl; do command -v "$c" >/dev/null || need+=("$c"); done
-    if ((${#need[@]})) || ! pacman -Q intel-media-driver >/dev/null 2>&1; then
-        say "installing build tools and the Intel video driver (clang lld acpica intel-media-driver)"
-        sudo pacman -S --needed --noconfirm clang lld acpica intel-media-driver || return 1
+    local c
+    if ! command -v iasl >/dev/null || ! pacman -Q intel-media-driver >/dev/null 2>&1; then
+        say "installing the ACPI compiler and the Intel video driver (acpica intel-media-driver)"
+        sudo pacman -S --needed --noconfirm acpica intel-media-driver || return 1
     fi
-    printf '\n\033[1mUndo at any time:\033[0m  %s --remove macos   (or pick "Omarchy" in the boot menu)\n\n' "$0"
-    confirm "Switch the default boot to macOS mode?" || return 1
-    make -s -C "$IG/set-os-loader" >/dev/null || { warn "building imac-set-os.efi failed"; return 1; }
-    sudo install -Dm644 "$IG/set-os-loader/imac-set-os.efi" "$MACOS_LOADER" || return 1
+    printf '\n\033[1mUndo at any time:\033[0m  %s --remove macos\n\n' "$0"
+    confirm "Boot in macOS mode from now on?" || return 1
+    sudo install -Dm755 "$IG/linux-side/mkinitcpio/imac-setos" "$MACOS_HOOK" || return 1
     sudo install -Dm644 "$IG/linux-side/vbt/headless-vbt.bin" "$MACOS_VBT" || return 1
     for c in "${MACOS_RULES[@]}"; do sudo install -Dm644 "$IG/linux-side/udev/$c" "/etc/udev/rules.d/$c" || return 1; done
     sudo udevadm control --reload && sudo udevadm trigger -s drm -s pci
@@ -438,21 +445,19 @@ mod_macos_apply() {
     install -Dm644 "$IG/linux-side/hypr/imac-gpu.lua" "$MACOS_HYPR"
     grep -q 'hypr.imac-gpu' "$MACOS_HYPR_MAIN" 2>/dev/null || \
         sed -i 's|^require("hypr.monitors")|require("hypr.imac-gpu") -- Radeon stays the desktop GPU when the Intel iGPU is exposed\nrequire("hypr.monitors")|' "$MACOS_HYPR_MAIN"
+    macos_drop_old_loader
     sync_boot_files || return 1
-    macos_entry_present || sudo limine-entry-tool --add-efi "$MACOS_ENTRY" "$MACOS_LOADER" --priority 90 \
-        --comment "macOS mode: set_os, then EFI/Linux/omarchy_linux.efi (Intel HD 630 + working brightness)" || return 1
-    sudo sed -i "s|^default_entry: .*|default_entry: ${MACOS_ENTRY}|" /boot/limine.conf || return 1
     # One menu: no "EFI fallback" entry (it only re-starts Limine). The fallback FILE
     # EFI/BOOT/BOOTX64.EFI stays (ENABLE_LIMINE_FALLBACK) for booting without OpenCore.
     grep -q "^FIND_BOOTLOADERS=no" "$LIMINE_DEFAULT" || echo "FIND_BOOTLOADERS=no" | sudo tee -a "$LIMINE_DEFAULT" >/dev/null
     sudo limine-entry-tool --remove-efi-path /boot/EFI/BOOT/BOOTX64.EFI --keep-files >/dev/null 2>&1 || true
+    macos_uki_patched || { warn "the UKI does not list iMac18,3 -- see the imac-setos lines in the rebuild output"; return 1; }
     verify_cmdline 'i915.vbt_firmware=imac18-3' && say "reboot to boot in macOS mode"
 }
 mod_macos_remove() {
     local c
-    sudo sed -i 's|^default_entry: .*|default_entry: Omarchy/linux|' /boot/limine.conf
-    sudo limine-entry-tool --remove-efi-path "$MACOS_LOADER" --keep-files >/dev/null 2>&1
-    sudo rm -rf "$MACOS_LOADER"
+    macos_drop_old_loader
+    sudo rm -f "$MACOS_HOOK"
     sudo systemctl disable --now imac-backlight-nvram.service 2>/dev/null
     sudo rm -f "$MACOS_NVRAM_BIN" "$MACOS_NVRAM_UNIT" "$MACOS_MKI" "$MACOS_AML" "$MACOS_VBT"
     for c in "${MACOS_RULES[@]}"; do sudo rm -f "/etc/udev/rules.d/$c"; done

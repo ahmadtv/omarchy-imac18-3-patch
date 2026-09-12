@@ -7,9 +7,11 @@ HD 630 iGPU (`00:02.0`, `8086:5912`) unless the loader calls the Apple
 that call for a list of MacBookPro models (`apple_set_os()` in
 `drivers/firmware/efi/libstub/x86-stub.c`), so this program makes it instead.
 
-**Status: built and tested in QEMU/OVMF. Not yet booted on the iMac. Nothing
-on `/boot` has been changed.** Whether set_os actually exposes the iGPU on an
-iMac18,3 is still unknown; see "What could go wrong".
+**Status: superseded (2026-09-12).** This loader proved on the iMac that set_os
+exposes the iGPU and fixes the backlight. The patcher now gets the same call
+from the kernel's own stub, by adding iMac18,3 to its model list
+(`../linux-side/mkinitcpio/imac-setos`), and no longer installs this. Kept as
+the reference; the notes below are from before it was first booted.
 
 ## What it does
 

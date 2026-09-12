@@ -1,11 +1,12 @@
 # Headless Intel HD 630 on Linux: the Linux side
 
-> **DRAFT — nothing in this directory is installed.** Prepared 2026-09-11 against
+> **Installed by `imac-patcher --apply macos` since 2026-09-12; the notes below are the
+> original design.** Prepared 2026-09-11 against
 > kernel 7.2.3-arch1-3 (source in `~/.cache/kernel-5k-build/linux-7.2.3`),
 > libva 2.24.1, ffmpeg 9.0.1, gpu-screen-recorder 6.1.0, Hyprland 0.56.2 /
 > aquamarine 0.15.0, WirePlumber 0.5.17, mkinitcpio 41.1, Omarchy 4.0.3.
-> The EFI side (calling Apple `set_os` so firmware stops hiding 00:02.0) is in
-> `../set-os-loader/`.
+> The EFI side (calling Apple `set_os` so firmware stops hiding 00:02.0) is the kernel's
+> own stub, with iMac18,3 added by `mkinitcpio/imac-setos` (`../README.md`, stage 2f).
 
 **Goal:** use the HD 630 the way macOS does (`NumFrameBuffer 0`, Quick Sync
 encode): render and video only. It never drives a display, and it is never the
