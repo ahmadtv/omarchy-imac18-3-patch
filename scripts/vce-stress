@@ -13,13 +13,15 @@
 # Every variant is a real encode of up to 30 s (or more, where noted) of the
 # clip. The log names the variant that was running when the hang hit.
 set -u
+# The Radeon's render node: renderD128 unless the Intel iGPU is exposed and loads first.
+AMD_RENDER=/dev/dri/amd-render; [[ -e $AMD_RENDER ]] || AMD_RENDER=/dev/dri/renderD128
 CLIP="${1:-/path/to/screen-recording.mp4}"
 ROUNDS="${ROUNDS:-3}"
 [[ -f $CLIP ]] || { echo "no such clip: $CLIP"; exit 1; }
 CUR=$(journalctl -k -n0 --show-cursor -q --no-pager 2>/dev/null | sed -n 's/^-- cursor: //p')
 klog() { journalctl -k --after-cursor="$CUR" -q --no-pager 2>/dev/null; }
 OUT=$(mktemp /tmp/vce-stress.XXXXXX.mp4); trap 'rm -f "$OUT" "$OUT.2"' EXIT
-HW=(-hwaccel vaapi -hwaccel_device /dev/dri/renderD128 -hwaccel_output_format vaapi)
+HW=(-hwaccel vaapi -hwaccel_device "$AMD_RENDER" -hwaccel_output_format vaapi)
 COMMON=(-nostdin -v error -threads 1 -filter_threads 1)
 
 run() {   # <name> <ffmpeg args...>
@@ -48,7 +50,7 @@ for r in $(seq 1 "$ROUNDS"); do
   run "high bitrate 8M (30s)"        "${HW[@]}" -i "$CLIP" -map 0:v:0 -an -t 30 -vf "$S16" -c:v h264_vaapi -b:v 8M -maxrate 10M -bufsize 16M -f mp4
   run "cqp quality (30s)"            "${HW[@]}" -i "$CLIP" -map 0:v:0 -an -t 30 -vf "$S16" -c:v h264_vaapi -rc_mode CQP -qp 20 -f mp4
   run "gsr-like (high, bf0, 60fps)"  "${HW[@]}" -i "$CLIP" -map 0:v:0 -an -t 30 -vf "$S2,fps=60" -c:v h264_vaapi -profile:v high -bf 0 -g 120 -b:v 6M -f mp4
-  run "sw-decode + hwupload (30s)"   -i "$CLIP" -map 0:v:0 -an -t 30 -vf 'scale=1280:-2,format=nv12,hwupload' -vaapi_device /dev/dri/renderD128 "${ENC[@]}" -f mp4
+  run "sw-decode + hwupload (30s)"   -i "$CLIP" -map 0:v:0 -an -t 30 -vf 'scale=1280:-2,format=nv12,hwupload' -vaapi_device "$AMD_RENDER" "${ENC[@]}" -f mp4
   run "hevc_vaapi (30s)"             "${HW[@]}" -i "$CLIP" -map 0:v:0 -an -t 30 -vf "$S16" -c:v hevc_vaapi -b:v 2M -f mp4
   run "seek to middle (30s)"         "${HW[@]}" -ss 300 -i "$CLIP" -map 0:v:0 -an -t 30 -vf "$S16" "${ENC[@]}" -f mp4
   printf '%s  %-34s ' "$(date +%T)" "two encodes at once (30s)"; t0=$SECONDS

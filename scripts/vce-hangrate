@@ -23,6 +23,8 @@
 #          A GPU reset restores PCI config space, so the condition is
 #          re-applied before every run. Everything is restored on exit.
 set -u
+# The Radeon's render node: renderD128 unless the Intel iGPU is exposed and loads first.
+AMD_RENDER=/dev/dri/amd-render; [[ -e $AMD_RENDER ]] || AMD_RENDER=/dev/dri/renderD128
 CLIP="${CLIP:-/path/to/screen-recording.mp4}"
 N="${N:-20}"; VARIANT="${VARIANT:-encode-only}"; read -ra CL <<<"${CONDS:-default}"
 [[ -f $CLIP ]] || { echo "no such clip: $CLIP"; exit 1; }
@@ -51,7 +53,7 @@ state() { printf 'lnkctl=%s level=%s' "$(setpci -s $GPU CAP_EXP+0x10.w)" "$(cat 
 trap 'aspm on; echo auto > "$LEVEL"; rm -f "$OUT"' EXIT
 
 klog() { journalctl -k --after-cursor="$1" -q --no-pager 2>/dev/null; }
-HW=(-hwaccel vaapi -hwaccel_device /dev/dri/renderD128 -hwaccel_output_format vaapi)
+HW=(-hwaccel vaapi -hwaccel_device "$AMD_RENDER" -hwaccel_output_format vaapi)
 ENC=(-c:v h264_vaapi -fpsmax 30 -b:v 2M -maxrate 3M -bufsize 4M)
 S16='scale_vaapi=w=1280:h=1280:force_original_aspect_ratio=decrease:force_divisible_by=16:format=nv12'
 
@@ -64,7 +66,7 @@ for i in $(seq 1 "$N"); do
   cur=$(journalctl -k -n0 --show-cursor -q --no-pager 2>/dev/null | sed -n 's/^-- cursor: //p')
   t0=$SECONDS; st=$(state)
   case $VARIANT in
-    encode-only) timeout 120 ffmpeg -nostdin -v error -threads 1 -filter_threads 1 -i "$CLIP" -map 0:v:0 -an -t 30 -vf 'scale=1280:-2,format=nv12,hwupload' -vaapi_device /dev/dri/renderD128 "${ENC[@]}" -f mp4 -y "$OUT" 2>/dev/null ;;
+    encode-only) timeout 120 ffmpeg -nostdin -v error -threads 1 -filter_threads 1 -i "$CLIP" -map 0:v:0 -an -t 30 -vf 'scale=1280:-2,format=nv12,hwupload' -vaapi_device "$AMD_RENDER" "${ENC[@]}" -f mp4 -y "$OUT" 2>/dev/null ;;
     strata)      timeout 120 ffmpeg -nostdin -v error -threads 1 -filter_threads 1 "${HW[@]}" -i "$CLIP" -map 0:v:0 -map '0:a:0?' -sn -dn -t 30 -vf "$S16" "${ENC[@]}" -c:a aac -b:a 96k -movflags +frag_keyframe+empty_moov -f mp4 -y "$OUT" 2>/dev/null ;;
     gsr)         timeout 120 ffmpeg -nostdin -v error "${HW[@]}" -i "$CLIP" -map 0:v:0 -an -t 30 -vf "$S16,fps=60" -c:v h264_vaapi -profile:v high -bf 0 -g 120 -b:v 6M -f mp4 -y "$OUT" 2>/dev/null ;;
     *) echo "unknown VARIANT $VARIANT"; exit 2 ;;

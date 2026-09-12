@@ -17,6 +17,8 @@
 # PASS: the reset completed, no hung task, no SMU "last message was failed",
 #       and the debugfs IB test passes afterwards.
 set -u
+# The Radeon's render node: renderD128 unless the Intel iGPU is exposed and loads first.
+AMD_RENDER=/dev/dri/amd-render; [[ -e $AMD_RENDER ]] || AMD_RENDER=/dev/dri/renderD128
 # Under sudo $HOME is /root; the clips live in the invoking user's home.
 USER_HOME="$(getent passwd "${SUDO_USER:-$USER}" | cut -d: -f6)"
 KEEP_DESKTOP=0; MODE=hang
@@ -52,7 +54,7 @@ OUT=$(mktemp /tmp/vce-test.XXXXXX.mp4)
 
 encode() {   # <clip> : Strata's exact preview pipeline
   timeout 90 ffmpeg -nostdin -v error -max_alloc 536870912 -max_pixels 50000000 -threads 1 -filter_threads 1 \
-    -hwaccel vaapi -hwaccel_device /dev/dri/renderD128 -hwaccel_output_format vaapi \
+    -hwaccel vaapi -hwaccel_device "$AMD_RENDER" -hwaccel_output_format vaapi \
     -i "$1" -map 0:v:0 -map '0:a:0?' -sn -dn -t 30 \
     -vf scale_vaapi=w=1280:h=1280:force_original_aspect_ratio=decrease:force_divisible_by=16:format=nv12 \
     -c:v h264_vaapi -fpsmax 30 -b:v 2M -maxrate 3M -bufsize 4M -c:a aac -b:a 96k \
