@@ -400,6 +400,13 @@ mod_macos_title() { echo "macOS mode: Intel video + working brightness"; }
 mod_macos_tier()  { echo boot; }
 mod_macos_desc()  { echo "Makes the kernel tell the firmware it is starting macOS, as it already does for some MacBook Pros. That exposes the Intel HD 630, which then encodes and decodes video for every app that picks the first GPU (H.264 about 3.7x faster than the Radeon), and makes the brightness slider work -- over the panel's full range, starting at the saved level from power-on. The Radeon keeps the display and all 3D. Same single 'Omarchy > linux' boot entry, kept through kernel updates."; }
 macos_uki_patched() { sudo grep -qa 'iMac18,3' "$UKI_PATH" 2>/dev/null; }
+# Status must not need sudo (the bar widget polls it). The UKI on the ESP is
+# root-only, so unless we are root the running boot is the evidence: the
+# firmware only shows the HD 630 after set_os.
+macos_booted() {
+    if [[ -r $UKI_PATH ]]; then grep -qa 'iMac18,3' "$UKI_PATH"
+    else [[ -e /sys/bus/pci/devices/0000:00:02.0 ]]; fi
+}
 # Earlier versions booted through an EFI loader with its own "Omarchy iMac"
 # menu entry; the hook replaces it, so clear it out.
 macos_drop_old_loader() {
@@ -417,7 +424,7 @@ mod_macos_detect() {
     grep -q 'i915.vbt_firmware=imac18-3' "$LIMINE_DEFAULT" 2>/dev/null && ((have++))
     systemctl is-enabled -q imac-backlight-nvram.service 2>/dev/null && ((have++))
     [[ -x $MACOS_HOOK ]] && ((have++))
-    macos_uki_patched && ((have++))
+    macos_booted && ((have++))
     if ((have == total)); then echo applied; elif ((have == 0)); then echo not-applied; else echo partial; fi
 }
 mod_macos_apply() {

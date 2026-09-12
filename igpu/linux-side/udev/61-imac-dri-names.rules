@@ -1,4 +1,4 @@
-# DRAFT — not installed.   Target: /etc/udev/rules.d/61-imac-dri-names.rules
+# Installed by `imac-patcher --apply macos` as /etc/udev/rules.d/61-imac-dri-names.rules
 #
 # Stable, colon-free names for the iMac18,3's two GPUs.
 #

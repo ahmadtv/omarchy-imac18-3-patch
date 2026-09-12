@@ -1,4 +1,4 @@
--- DRAFT — not installed.   Target: ~/.config/hypr/imac-gpu.lua
+-- Pin Hyprland to the Radeon when the Intel iGPU is visible (omarchy-imac18-3 igpu/linux-side).
 -- Load it from ~/.config/hypr/hyprland.lua next to the other personal modules
 -- (after require("default.hypr.omarchy"), e.g. just before require("hypr.monitors")):
 --     require("hypr.imac-gpu")

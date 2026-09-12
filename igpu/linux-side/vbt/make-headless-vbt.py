@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# DRAFT — not installed.
+# Generates vbt/headless-vbt.bin, which `imac-patcher --apply macos` installs.
 #
 # make-headless-vbt.py -- write a minimal, valid Intel VBT that declares NO
 # display outputs, for i915.vbt_firmware= on the iMac18,3.
