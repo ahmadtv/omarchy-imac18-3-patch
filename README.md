@@ -36,7 +36,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/ahmadtv/omarchy-imac18-3/mai
 | 🎧 **Apple EarPods** | Fully supported. Plug them in and audio + mic follow the jack; unplug and it's back to internal — automatically. All three **inline buttons** work too: play/pause, volume up, volume down. |
 | 🎨 **True colour** | The wide-gamut **Display P3** panel mapped correctly, instead of the oversaturated mess of stock sRGB. |
 | 🎬 **Hardware video encode** | Screen recording and H.264 export on the Radeon's own encoder, without the GPU hang every Polaris card has had since kernel 7.1.6 (AMD's upstream fix, backported until the distro kernel carries it). And if the GPU ever does hang, it now resets and you are back at a fresh desktop in about five seconds instead of a frozen machine. The two reset fixes are reported to AMD with patches: [drm/amd#5810](https://gitlab.freedesktop.org/drm/amd/-/issues/5810). |
-| 🧠 **Intel Quick Sync (the hidden iGPU)** | Apple firmware hides the iMac's Intel HD 630 from anything that isn't macOS. A tiny EFI app, built from source, tells the firmware it's booting macOS — so the Intel chip appears and, like on macOS, takes over video: every app that uses the first GPU (ffmpeg, GStreamer, Strata previews, Kdenlive exports) encodes and decodes on Quick Sync, H.264 about **3.7× faster** than the Radeon, plus HEVC 10-bit and VP9. The Radeon keeps the display, the desktop and all 3D. Reported to Intel: [drm/i915#17042](https://gitlab.freedesktop.org/drm/i915/kernel/-/issues/17042). *(module `macos`)* |
+| 🧠 **Intel Quick Sync (the hidden iGPU)** | Apple firmware hides the iMac's Intel HD 630 from anything that isn't macOS. The kernel already tells Apple firmware it's booting macOS on some MacBook Pros; this adds the iMac18,3 to that list — so the Intel chip appears and, like on macOS, takes over video: every app that uses the first GPU (ffmpeg, GStreamer, Strata previews, Kdenlive exports) encodes and decodes on Quick Sync, H.264 about **3.7× faster** than the Radeon, plus HEVC 10-bit and VP9. The Radeon keeps the display, the desktop and all 3D. Reported to Intel: [drm/i915#17042](https://gitlab.freedesktop.org/drm/i915/kernel/-/issues/17042). *(module `macos`)* |
 | 🔆 **Brightness** | The brightness slider works — over the panel's **full 500-nit range** (Apple's ACPI table stops Linux at 80%, the same gap Boot Camp users see) — and the panel comes up at your saved brightness from power-on, like macOS. *(module `macos`)* |
 
 ## 🖥️ On the machine
@@ -133,6 +133,22 @@ Every patch backs up what it replaces and can be reversed. Boot-related changes 
 - **Native 5K, the three layers (wake · stitch · genlock)** and the install rules → [`patches/README.md`](patches/README.md)
 - **The hidden Intel GPU, the brightness fixes and the macOS-mode boot** → [`igpu/README.md`](igpu/README.md)
 - **Open items, root causes and rejected approaches** → [`TODO.md`](TODO.md)
+- **Upstream issues and PRs** → [Upstream](#-upstream) below
+
+## 📮 Upstream
+
+Everything here that belongs in the kernel, the audio driver or Omarchy itself, and where it stands. Once a fix lands upstream, the matching patch leaves this repo. _Last checked 2026-09-12._
+
+| Where | What | Status |
+|---|---|---|
+| [drm/amd#4455](https://gitlab.freedesktop.org/drm/amd/-/issues/4455) | Native 5K on iMacs (community thread): this project's genlock fix, the first verified iMac18,3, and a lean mainline candidate (kernel exposes two tiles, compositor stitches) | Open, under discussion |
+| [drm/amd#5810](https://gitlab.freedesktop.org/drm/amd/-/issues/5810) | GPU reset after a VCE hang: two fixes (reset deadlock in `dm_suspend`, VCE suspend during reset), patches inline | Open, filed by us, waiting for AMD |
+| [drm/amd#5595](https://gitlab.freedesktop.org/drm/amd/-/issues/5595) | The VCE encoder hang itself (Polaris, since 7.1.6) | Fixed upstream (`2ee9836545e6`, 7.3); backported here until Arch's kernel has it |
+| [drm/i915#17042](https://gitlab.freedesktop.org/drm/i915/kernel/-/issues/17042) | Hidden Intel HD 630 running headless: a quirk so i915 creates no outputs on iMacs, then the kernel's set_os list gains `iMac18,3` | Open, filed by us, no reply yet |
+| linux-efi (mailing list) | One line: add `iMac18,3` to `apple_match_product_name()` in `x86-stub.c` (the patcher applies the same change at build time) | Not sent; waits on #17042 |
+| [jackdanyell/imac18-3-cs8409-linux-audio#5](https://github.com/jackdanyell/imac18-3-cs8409-linux-audio/pull/5) | Headset mic, live jack switching, mic gains, EarPods remote buttons | Open PR |
+| [omacom/omarchy#10985](https://github.com/omacom/omarchy/pull/10985) | Omarchy's audio panel lists each jack's ports as rows, the way macOS and GNOME do | Open PR |
+| [lgse/strata#127](https://github.com/lgse/strata/issues/127) | GPU hang while Strata generated a video preview | Closed; the cause was the kernel VCE bug (#5595) |
 
 ## 🤝 Contributing
 
