@@ -109,6 +109,17 @@ Each stage is its own non-default Limine entry; the default is never touched.
    - `limine-entry-tool --add-efi "Omarchy (macOS mode)" /boot/EFI/imac-set-os/imac-set-os.efi`
      writes a managed entry (no hash pin), and `default_entry:` points at it.
    - `configs/udev/90-imac-gpu-reset.rules` now matches `DRIVERS=="amdgpu"` only.
+2e. **Full brightness range + boot brightness (2026-09-12).** macOS drives the backlight
+   controller over 0..65535 (AppleMCCSControlCello via `\_SB.PNLF`; AppleBacklightDisplay
+   `brightness` 0-65535, max 500 nits; DarwinDumped iMac18,3), while the firmware's ACPI `_BCL`
+   stops at level 80 and `BSET` sends 655*level -- Linux's 100% was 80% (~400 nits), the same
+   'Boot Camp is dimmer' gap owners report. `linux-side/acpi/make-bcl100` rewrites only `ABCL`
+   to levels 4..100 from the machine's own table (acpi_override hook; Apple's table is not in
+   this repo). The brightness jump mid-splash is systemd-backlight restoring after the root is
+   unlocked; the firmware lights the panel from NVRAM `backlight-level` (u16 LE, same scale,
+   currently 0xFFFF), which macOS keeps current. `linux-side/bin/imac-backlight-nvram` +
+   `systemd/imac-backlight-nvram.service` write it at shutdown, only when it changed (the
+   approach kernel reviewers accepted for Atharva Tiwari's 2026 series; flash wear).
 3. **Promotion** only after the above, and only as Ahmad's call.
 
 Known limits: Omarchy's screen recorder (gpu-screen-recorder) encodes on the

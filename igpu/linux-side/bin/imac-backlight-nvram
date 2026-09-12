@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+#
+# imac-backlight-nvram -- at shutdown, store the panel brightness in Apple's
+# NVRAM variable backlight-level, so the firmware lights the panel at that level
+# from power-on (as macOS does) instead of jumping when systemd-backlight
+# restores it mid-splash. Format: efivarfs = 4 attribute bytes (kept as read)
+# + u16 little-endian on the controller's 0..0xFFFF scale (= 655 * ACPI level).
+# Writes only when the value changed, never below macOS's usable floor.
+set -u
+B=/sys/class/backlight/acpi_video0
+V=/sys/firmware/efi/efivars/backlight-level-7c436110-ab2a-4bbb-a880-fe41995c9f82
+[[ -r $B/brightness && -e $V ]] || exit 0
+b=$(<"$B/brightness"); max=$(<"$B/max_brightness")
+case $max in
+  96) level=$((b + 4)) ;;   # make-bcl100 table: levels 4..100
+  79) level=$((b + 1)) ;;   # firmware table: levels 1..80
+  *)  exit 0 ;;
+esac
+raw=$((level * 655)); ((raw > 65535)) && raw=65535; ((raw < 2176)) && raw=2176
+cur=$(od -An -tu2 -j4 -N2 "$V" | tr -d ' ')
+[[ $cur == "$raw" ]] && exit 0
+attr=$(od -An -tx1 -N4 "$V" | tr -d ' \n')
+tmp=$(mktemp); trap 'rm -f "$tmp"' EXIT
+printf "\\x${attr:0:2}\\x${attr:2:2}\\x${attr:4:2}\\x${attr:6:2}\\x$(printf %02x $((raw & 255)))\\x$(printf %02x $((raw >> 8)))" > "$tmp"
+[[ $(stat -c %s "$tmp") == 6 ]] || exit 1
+chattr -i "$V" && dd if="$tmp" of="$V" bs=6 count=1 status=none; rc=$?
+chattr +i "$V" 2>/dev/null
+echo "backlight-level: $cur -> $raw (level $level)"; exit $rc

@@ -1,0 +1,13 @@
+[Unit]
+Description=Save panel brightness to Apple NVRAM for the next power-on (iMac18,3)
+ConditionPathExists=/sys/class/backlight/acpi_video0
+After=systemd-backlight@backlight:acpi_video0.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/true
+ExecStop=/usr/local/bin/imac-backlight-nvram
+
+[Install]
+WantedBy=multi-user.target
