@@ -27,6 +27,13 @@ Each stage is its own non-default Limine entry; the default is never touched.
    Questions: does `00:02.0 8086:5912` appear, does the 5K desktop stay normal,
    does the OpRegion carry a VBT (`/sys/kernel/debug/dri/*/i915_opregion` needs
    i915, so dump ASLS memory instead). Nothing loads a driver for the iGPU.
+   **Result 2026-09-12: it works.** `ImacSetOsStatus` read `set_os v3: vendor ok,
+   version 0x800000000000000E` -- set_os_vendor alone was enough; the version call
+   returned EFI_NOT_FOUND and did not matter. `00:02.0 [8086:5912]` HD 630, subsystem
+   Apple 0180, BARs 16M + 256M, D0. vgaarb first marked it boot VGA, then the Radeon
+   overrode it (`boot_vga`: Radeon 1, Intel 0); fb0 and the 5K desktop stayed on
+   amdgpu. HD-audio came up normally with `snd_hda_core.gpu_bind=0` (speakers, jack,
+   ATI HDMI). No new kernel warnings beyond `Module i915 is blacklisted`.
 1. **i915 headless.** `linux-side/README.md` stage B: `i915.disable_display=1`
    plus the no-outputs VBT, packages installed, stop at once if the panel blanks.
 2. **Video on Intel.** `vainfo` on the Intel render node, ffmpeg transcodes,
