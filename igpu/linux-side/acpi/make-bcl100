@@ -12,7 +12,8 @@
 # leaves the machine. Needs root and iasl (acpica).
 #   sudo igpu/linux-side/acpi/make-bcl100 [out.aml]
 set -euo pipefail
-OUT=${1:-/etc/initcpio/acpi_override/imac18-3-bcl100.aml}
+# Name after kernel/firmware/acpi/ must stay under 18 bytes (lib/earlycpio.c MAX_CPIO_FILE_NAME).
+OUT=${1:-/etc/initcpio/acpi_override/imac-bcl100.aml}
 W=$(mktemp -d); trap 'rm -rf "$W"' EXIT; cd "$W"
 for t in /sys/firmware/acpi/tables/DSDT /sys/firmware/acpi/tables/SSDT*; do cat "$t" > "$(basename "$t").dat"; done
 T=$(grep -l 'PEG0GFX0' SSDT*.dat | head -1) || { echo "no PEG0GFX0 SSDT on this machine"; exit 1; }

@@ -120,6 +120,11 @@ Each stage is its own non-default Limine entry; the default is never touched.
    currently 0xFFFF), which macOS keeps current. `linux-side/bin/imac-backlight-nvram` +
    `systemd/imac-backlight-nvram.service` write it at shutdown, only when it changed (the
    approach kernel reviewers accepted for Atharva Tiwari's 2026 series; flash wear).
+   **Result 2026-09-12 (test entry): both work.** `ACPI: Table Upgrade: override
+   [SSDT-APPLE -PEG0GFX0]`, rev 0x1001; `acpi_video0` 0..96, 100% = level 100 = 65500/65535
+   (99.95%, was 52400 = 80%). The firmware honours `backlight-level`: the panel stayed at the
+   saved level from power-on through the splash. Note: the override's file name must be under
+   18 bytes (`lib/earlycpio.c`), hence `imac-bcl100.aml`.
 3. **Promotion** only after the above, and only as Ahmad's call.
 
 Known limits: Omarchy's screen recorder (gpu-screen-recorder) encodes on the
