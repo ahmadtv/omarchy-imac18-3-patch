@@ -15,7 +15,7 @@
 
 </div>
 
-Native **5120×2880**, real **speakers and mic**, true **wide-gamut colour** — the hardware Apple leaves half-asleep for everyone but macOS, woken up. **One command. Every change reversible. Nothing touched without asking.**
+Native **5120×2880**, real **speakers and mic**, true **wide-gamut colour**, the **hidden Intel GPU** on video duty and a **brightness slider that works** — the hardware Apple leaves half-asleep for everyone but macOS, woken up. **One command. Every change reversible. Nothing touched without asking.**
 
 [Omarchy](https://omarchy.org)'s whole promise is *“we can fix everything.”* This points that at a 2017 iMac.
 
@@ -35,7 +35,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/ahmadtv/omarchy-imac18-3/mai
 | 🔊 **Speakers & mic** | The CS8409 codec the kernel can't drive at all — now with working speakers and both the internal **and** headset mic, with **automatic switching** on plug/unplug just like macOS. |
 | 🎧 **Apple EarPods** | Fully supported. Plug them in and audio + mic follow the jack; unplug and it's back to internal — automatically. All three **inline buttons** work too: play/pause, volume up, volume down. |
 | 🎨 **True colour** | The wide-gamut **Display P3** panel mapped correctly, instead of the oversaturated mess of stock sRGB. |
-| 🎬 **Hardware video encode** | Screen recording and H.264 export on the Radeon's own encoder, without the GPU hang every Polaris card has had since kernel 7.1.6 (AMD's upstream fix, backported until the distro kernel carries it). And if the GPU ever does hang, it now resets and you are back at a fresh desktop in about five seconds instead of a frozen machine. |
+| 🎬 **Hardware video encode** | Screen recording and H.264 export on the Radeon's own encoder, without the GPU hang every Polaris card has had since kernel 7.1.6 (AMD's upstream fix, backported until the distro kernel carries it). And if the GPU ever does hang, it now resets and you are back at a fresh desktop in about five seconds instead of a frozen machine. The two reset fixes are reported to AMD with patches: [drm/amd#5810](https://gitlab.freedesktop.org/drm/amd/-/issues/5810). |
 | 🧠 **Intel Quick Sync (the hidden iGPU)** | Apple firmware hides the iMac's Intel HD 630 from anything that isn't macOS. A tiny EFI app, built from source, tells the firmware it's booting macOS — so the Intel chip appears and, like on macOS, takes over video: every app that uses the first GPU (ffmpeg, GStreamer, Strata previews, Kdenlive exports) encodes and decodes on Quick Sync, H.264 about **3.7× faster** than the Radeon, plus HEVC 10-bit and VP9. The Radeon keeps the display, the desktop and all 3D. *(module `macos`)* |
 | 🔆 **Brightness** | The brightness slider works — over the panel's **full 500-nit range** (Apple's ACPI table stops Linux at 80%, the same gap Boot Camp users see) — and the panel comes up at your saved brightness from power-on, like macOS. *(module `macos`)* |
 
@@ -131,6 +131,7 @@ Every patch backs up what it replaces and can be reversed. Boot-related changes 
 ## 🔬 Under the hood
 
 - **Native 5K, the three layers (wake · stitch · genlock)** and the install rules → [`patches/README.md`](patches/README.md)
+- **The hidden Intel GPU, the brightness fixes and the macOS-mode boot** → [`igpu/README.md`](igpu/README.md)
 - **Open items, root causes and rejected approaches** → [`TODO.md`](TODO.md)
 
 ## 🤝 Contributing

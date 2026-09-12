@@ -119,8 +119,10 @@ turned the screen pink and froze it**.
   check. Worth its own amd-gfx report with the two stacks.
 - **Ruled out:** macroblock alignment, sandboxing or app version, file
   corruption. Decoding the same file is fine. RADV has no Vulkan encode on
-  Polaris. VCE is the only H.264 encoder; HEVC encode runs on UVD-ENC, a
-  different ring (`hevc_vaapi`, `gpu-screen-recorder -k hevc`).
+  Polaris. On the Radeon, VCE is the only H.264 encoder; HEVC encode runs on
+  UVD-ENC, a different ring (`hevc_vaapi`, `gpu-screen-recorder -k hevc`). In macOS
+  mode (`macos` module) the Intel HD 630 is the default encoder for apps that take
+  the first GPU; gpu-screen-recorder still encodes on the Radeon.
 - **Leads:** bisect Mesa radeonsi encode parameters (rate control, GOP/IDR,
   reference frames, slices, dimensions) against a reproducer; the kernel's
   `VCE VM mode` on Polaris (`vce_v3_0.c`); per-ring recovery so a reset does not
