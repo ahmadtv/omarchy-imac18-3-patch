@@ -15,9 +15,9 @@
 set -u
 # The Radeon's render node: renderD128 unless the Intel iGPU is exposed and loads first.
 AMD_RENDER=/dev/dri/amd-render; [[ -e $AMD_RENDER ]] || AMD_RENDER=/dev/dri/renderD128
-CLIP="${1:-/path/to/screen-recording.mp4}"
+CLIP="${1:-}"
 ROUNDS="${ROUNDS:-3}"
-[[ -f $CLIP ]] || { echo "no such clip: $CLIP"; exit 1; }
+[[ -f $CLIP ]] || { echo "usage: vce-stress <video file>"; exit 1; }
 CUR=$(journalctl -k -n0 --show-cursor -q --no-pager 2>/dev/null | sed -n 's/^-- cursor: //p')
 klog() { journalctl -k --after-cursor="$CUR" -q --no-pager 2>/dev/null; }
 OUT=$(mktemp /tmp/vce-stress.XXXXXX.mp4); trap 'rm -f "$OUT" "$OUT.2"' EXIT

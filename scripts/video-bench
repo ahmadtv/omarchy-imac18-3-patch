@@ -36,8 +36,8 @@ set -u -o pipefail
 # ---------------------------------------------------------------- arguments ---
 DEVICE="" QUICK=0 FORCE=0
 WORKDIR="${VIDEO_BENCH_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/video-bench}"
-SCREEN_CLIP="${VIDEO_BENCH_SCREEN_CLIP:-/path/to/screen-recording.mp4}"
-CAMERA_CLIP="${VIDEO_BENCH_CAMERA_CLIP:-/path/to/camera-4k-b.mp4}"
+SCREEN_CLIP="${VIDEO_BENCH_SCREEN_CLIP:-}"   # a screen recording (H.264, 1080p or more, 5+ minutes)
+CAMERA_CLIP="${VIDEO_BENCH_CAMERA_CLIP:-}"   # 4K camera footage (H.264, 2+ minutes)
 TO_GPU="${VIDEO_BENCH_TIMEOUT_GPU:-300}"   # per ffmpeg call, GPU tests
 TO_CPU="${VIDEO_BENCH_TIMEOUT_CPU:-1200}"  # per ffmpeg call, CPU encodes / source generation / scoring
 
@@ -256,7 +256,7 @@ ensure_sources() {
   local n missing=()
   for n in s1080p60 s1440p60 s2160p30 d_h264 d_hevc d_vp9; do [[ -s ${SRCFILE[$n]} ]] || missing+=("$n"); done
   ((${#missing[@]})) || return 0
-  [[ -r $SCREEN_CLIP && -r $CAMERA_CLIP ]] || die "source clips not readable: $SCREEN_CLIP / $CAMERA_CLIP"
+  [[ -r $SCREEN_CLIP && -r $CAMERA_CLIP ]] || die "set VIDEO_BENCH_SCREEN_CLIP and VIDEO_BENCH_CAMERA_CLIP to two readable videos (a screen recording and 4K camera footage) to build the test sources"
   local avail; avail=$(df --output=avail -B1M "$SRC" | tail -1)
   ((avail > 6000)) || die "only ${avail} MiB free in $SRC — need ~6 GB for the sources"
   echo "Generating test sources in $SRC (${missing[*]}; one-time, deterministic):"

@@ -34,12 +34,9 @@ RECOVER=/sys/kernel/debug/dri/1/amdgpu_gpu_recover
 IBTEST=/sys/kernel/debug/dri/1/amdgpu_test_ib
 # First the confirmed reproducer (hung vce0 on 2026-09-01 and 09-02 through
 # Strata's preview pipeline), then the sequence that hung it on 2026-09-11.
-CLIPS=("/path/to/screen-recording.mp4"
-       "/path/to/clip-hevc10.mov"
-       "/path/to/camera-4k-a.mp4"
-       "/path/to/camera-4k-b.mp4"
-       "/path/to/camera-4k-c.mp4")
+CLIPS=()   # the video files to encode, given on the command line
 (( $# )) && CLIPS=("$@")
+[[ $MODE == trigger || ${#CLIPS[@]} -gt 0 ]] || { echo "give one or more video files:  sudo $0 [--trigger-encoding] <video>..."; exit 2; }
 ROUNDS=5
 [[ $EUID -eq 0 ]] || { echo "run with sudo (it stops the graphical session)"; exit 1; }
 for c in "${CLIPS[@]}"; do [[ -f $c ]] || { echo "no such clip: $c"; exit 1; }; done

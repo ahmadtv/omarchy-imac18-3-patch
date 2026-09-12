@@ -25,9 +25,9 @@
 set -u
 # The Radeon's render node: renderD128 unless the Intel iGPU is exposed and loads first.
 AMD_RENDER=/dev/dri/amd-render; [[ -e $AMD_RENDER ]] || AMD_RENDER=/dev/dri/renderD128
-CLIP="${CLIP:-/path/to/screen-recording.mp4}"
+CLIP="${CLIP:-}"   # any H.264 video; pass it with -E CLIP=/path/to/video.mp4
 N="${N:-20}"; VARIANT="${VARIANT:-encode-only}"; read -ra CL <<<"${CONDS:-default}"
-[[ -f $CLIP ]] || { echo "no such clip: $CLIP"; exit 1; }
+[[ -f $CLIP ]] || { echo "set CLIP to a video file (systemd-run ... -E CLIP=/path/to/video.mp4)"; exit 1; }
 [[ $EUID -eq 0 ]] || { echo "run as root (systemd-run, see header)"; exit 1; }
 GPU=0000:01:00.0; BRIDGE=$(basename "$(readlink -f /sys/bus/pci/devices/$GPU/..)")
 LEVEL=/sys/bus/pci/devices/$GPU/power_dpm_force_performance_level

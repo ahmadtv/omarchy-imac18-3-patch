@@ -67,14 +67,14 @@ turned the screen pink and froze it**.
   -hwaccel_output_format vaapi -i <file> -t 30 -vf scale_vaapi=w=1280:h=1280:…
   :format=nv12 -c:v h264_vaapi -b:v 2M …`. Two clips passed (a 10-bit HEVC
   1080p, a 4K H.264); the third, a 4K H.264 Canon clip
-  (`camera-4k-b.mp4`), hung `vce0` and the GPU reset itself stuck in
+  (a 4K H.264 camera clip), hung `vce0` and the GPU reset itself stuck in
   `amdgpu_device_pre_asic_reset` — the same failure as 2026-09-04. Kernel log in
   `evidence/vce-hang-2026-09-11/` (untracked). So it is not app-specific and not
   fixed by the September updates: **keep apps on software video encode**
   (Strata's `video_preview_backend = "software"`). Screen recording also encodes
   on VCE (`gpu-screen-recorder -k auto`), so it carries the same risk.
 - **End to end, on a real hang (2026-09-11 15:29):** `scripts/vce-stress` ran
-  the confirmed reproducer (`/path/to/screen-recording.mp4`)
+  the confirmed reproducer (a 1080p H.264 screen recording)
   through eleven encode variants; the eighth — software decode, GPU encode
   only — hung vce0. Reset completed in 0.7 s, the `gpureset` module restarted
   the login manager, fresh desktop 5 s after the hang, no power button. Note
