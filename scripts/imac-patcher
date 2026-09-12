@@ -442,6 +442,10 @@ mod_macos_apply() {
     macos_entry_present || sudo limine-entry-tool --add-efi "$MACOS_ENTRY" "$MACOS_LOADER" --priority 90 \
         --comment "macOS mode: set_os, then EFI/Linux/omarchy_linux.efi (Intel HD 630 + working brightness)" || return 1
     sudo sed -i "s|^default_entry: .*|default_entry: ${MACOS_ENTRY}|" /boot/limine.conf || return 1
+    # One menu: no "EFI fallback" entry (it only re-starts Limine). The fallback FILE
+    # EFI/BOOT/BOOTX64.EFI stays (ENABLE_LIMINE_FALLBACK) for booting without OpenCore.
+    grep -q "^FIND_BOOTLOADERS=no" "$LIMINE_DEFAULT" || echo "FIND_BOOTLOADERS=no" | sudo tee -a "$LIMINE_DEFAULT" >/dev/null
+    sudo limine-entry-tool --remove-efi-path /boot/EFI/BOOT/BOOTX64.EFI --keep-files >/dev/null 2>&1 || true
     verify_cmdline 'i915.vbt_firmware=imac18-3' && say "reboot to boot in macOS mode"
 }
 mod_macos_remove() {
