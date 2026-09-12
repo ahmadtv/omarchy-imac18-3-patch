@@ -53,7 +53,7 @@ The patcher on a fully set-up iMac18,3 — everything applied:
 
 No patch needed — these just work on Omarchy / Linux:
 
-🌐 Ethernet · 📶 Wi-Fi (see `wifi` below for mixed WPA2/WPA3 networks) · 🔷 Bluetooth · 📷 Webcam · ⌨️ Keyboard & trackpad · 🔌 USB · ⚡ Thunderbolt / 10GbE
+🌐 Ethernet · 📶 Wi-Fi (Omarchy applies the Broadcom handshake fix for Macs itself) · 🔷 Bluetooth · 📷 Webcam · ⌨️ Keyboard & trackpad · 🔌 USB · ⚡ Thunderbolt / 10GbE
 
 Thunderbolt is on the in-tree `atlantic`/`thunderbolt` drivers — tested with an **OWC Thunderbolt 3 10GbE** adapter. Like on any Linux box, a Thunderbolt device needs a one-time authorization the first time you plug it in (`boltctl enroll`, or your desktop's prompt); after that it's remembered. Nothing this patch does — just how Thunderbolt security works.
 
@@ -81,7 +81,6 @@ The patcher shows what's applied, what isn't, and lets you pick — **nothing is
 ```bash
 ./scripts/imac-patcher --apply 5k      # native 5K (rebuilds only the amdgpu module)
 ./scripts/imac-patcher --apply audio   # speakers, mics, EarPods + buttons
-./scripts/imac-patcher --apply wifi    # Broadcom firmware handshake off (associates on WPA2/WPA3-mixed)
 ./scripts/imac-patcher --apply vram    # ggml/Vulkan tools off the 256 MiB CPU-visible window
 ./scripts/imac-patcher --apply macos   # Intel iGPU for video + working, full-range brightness (kernel tells the firmware it's macOS)
 ./scripts/imac-patcher --remove 5k     # full undo, any time
