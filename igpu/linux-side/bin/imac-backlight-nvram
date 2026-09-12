@@ -19,7 +19,10 @@ esac
 raw=$((level * 655)); ((raw > 65535)) && raw=65535; ((raw < 2176)) && raw=2176
 cur=$(od -An -tu2 -j4 -N2 "$V" | tr -d ' ')
 [[ $cur == "$raw" ]] && exit 0
-attr=$(od -An -tx1 -N4 "$V" | tr -d ' \n')
+# Apple sets a vendor bit (0x80000000) that efivarfs refuses to write back
+# (fs/efivarfs/file.c: attributes & ~EFI_VARIABLE_MASK -> -EINVAL); keep only
+# the standard bits (NV|BS|RT = 0x07).
+attr=$(printf %08x $(( $(od -An -tu4 -N4 "$V" | tr -d ' ') & 0x7f )) | sed -E 's/(..)(..)(..)(..)/\4\3\2\1/')
 tmp=$(mktemp); trap 'rm -f "$tmp"' EXIT
 printf "\\x${attr:0:2}\\x${attr:2:2}\\x${attr:4:2}\\x${attr:6:2}\\x$(printf %02x $((raw & 255)))\\x$(printf %02x $((raw >> 8)))" > "$tmp"
 [[ $(stat -c %s "$tmp") == 6 ]] || exit 1

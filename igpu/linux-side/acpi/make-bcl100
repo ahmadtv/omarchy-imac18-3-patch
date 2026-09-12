@@ -16,7 +16,7 @@ OUT=${1:-/etc/initcpio/acpi_override/imac18-3-bcl100.aml}
 W=$(mktemp -d); trap 'rm -rf "$W"' EXIT; cd "$W"
 for t in /sys/firmware/acpi/tables/DSDT /sys/firmware/acpi/tables/SSDT*; do cat "$t" > "$(basename "$t").dat"; done
 T=$(grep -l 'PEG0GFX0' SSDT*.dat | head -1) || { echo "no PEG0GFX0 SSDT on this machine"; exit 1; }
-iasl -e DSDT.dat $(ls SSDT*.dat | grep -vx "$T") -d "$T" >/dev/null
+iasl -e DSDT.dat $(ls SSDT*.dat | grep -vx "$T") -d "$T" >/dev/null 2>&1
 python3 - "${T%.dat}.dsl" <<'PY'
 import re, sys
 p = sys.argv[1]; s = open(p).read()
@@ -31,5 +31,5 @@ body = ",\n                    ".join(['0x64', '0x32'] + ['0x%02X' % i for i in 
 s = s[:m.start()] + m.group(1) + '0x%02X' % (2 + len(levels)) + m.group(2) + '\n                    ' + body + '\n                ' + m.group(4) + s[m.end():]
 open(p, 'w').write(s)
 PY
-iasl -p out "${T%.dat}.dsl" | grep -E '^Error' && exit 1
+iasl -p out "${T%.dat}.dsl" >iasl.log 2>&1 || { grep -E "^Error" iasl.log; exit 1; }
 install -Dm644 out.aml "$OUT"; echo "wrote $OUT ($(stat -c %s "$OUT") bytes): ABCL levels 4..100"
