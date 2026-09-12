@@ -384,7 +384,7 @@ mod_gpureset_remove() {
 IG="${REPO_DIR}/igpu"
 MACOS_ESP_DIR=/boot/EFI/imac-set-os
 MACOS_LOADER="${MACOS_ESP_DIR}/imac-set-os.efi"
-MACOS_ENTRY="Omarchy (macOS mode)"
+MACOS_ENTRY="Omarchy iMac"   # top of the menu (priority 90), the default; "Omarchy" stays as the plain fallback
 MACOS_OPTS="snd_hda_core.gpu_bind=0 i915.disable_display=1 i915.vbt_firmware=imac18-3/headless-vbt.bin module_blacklist=i2c_i801"
 MACOS_VBT=/usr/lib/firmware/imac18-3/headless-vbt.bin
 MACOS_RULES=(61-imac-dri-names.rules 62-imac-smbus-acpi.rules)
@@ -439,8 +439,8 @@ mod_macos_apply() {
     grep -q 'hypr.imac-gpu' "$MACOS_HYPR_MAIN" 2>/dev/null || \
         sed -i 's|^require("hypr.monitors")|require("hypr.imac-gpu") -- Radeon stays the desktop GPU when the Intel iGPU is exposed\nrequire("hypr.monitors")|' "$MACOS_HYPR_MAIN"
     sync_boot_files || return 1
-    macos_entry_present || sudo limine-entry-tool --add-efi "$MACOS_ENTRY" "$MACOS_LOADER" \
-        --comment "set_os, then EFI/Linux/omarchy_linux.efi (Intel HD 630 + working backlight)" || return 1
+    macos_entry_present || sudo limine-entry-tool --add-efi "$MACOS_ENTRY" "$MACOS_LOADER" --priority 90 \
+        --comment "macOS mode: set_os, then EFI/Linux/omarchy_linux.efi (Intel HD 630 + working brightness)" || return 1
     sudo sed -i "s|^default_entry: .*|default_entry: ${MACOS_ENTRY}|" /boot/limine.conf || return 1
     verify_cmdline 'i915.vbt_firmware=imac18-3' && say "reboot to boot in macOS mode"
 }

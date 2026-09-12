@@ -106,8 +106,11 @@ Each stage is its own non-default Limine entry; the default is never touched.
    - `/etc/mkinitcpio.conf.d/zz-imac-igpu.conf` (i915 first, VBT in the initramfs).
    - The four options go into `KERNEL_CMDLINE[default]` in `/etc/default/limine` -- it is
      loaded last and assigns the whole line, so a `limine-entry-tool.d` drop-in has no effect.
-   - `limine-entry-tool --add-efi "Omarchy (macOS mode)" /boot/EFI/imac-set-os/imac-set-os.efi`
-     writes a managed entry (no hash pin), and `default_entry:` points at it.
+   - `limine-entry-tool --add-efi "Omarchy iMac" /boot/EFI/imac-set-os/imac-set-os.efi --priority 90`
+     writes a managed entry at the top of the menu (no hash pin), and `default_entry:` points at it; the
+     generated "Omarchy" group stays below as the plain fallback. The boot chain here is Apple firmware ->
+     OpenCore on an external USB disk -> Limine, so OpenCore's `SignalAppleOS` quirk was rejected: macOS
+     mode would then depend on that disk being plugged in.
    - `configs/udev/90-imac-gpu-reset.rules` now matches `DRIVERS=="amdgpu"` only.
 2e. **Full brightness range + boot brightness (2026-09-12).** macOS drives the backlight
    controller over 0..65535 (AppleMCCSControlCello via `\_SB.PNLF`; AppleBacklightDisplay
